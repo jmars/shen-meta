@@ -221,7 +221,7 @@
   X -> (interp X [] [] [] []))
 
 (define kl->zinc
-  X -> (zinc-c (debruijn [] (normalize-term X))))
+  X -> (zinc-c (debruijn [] (normalize-term (kmacros X)))))
 
 ===
 self-checks
