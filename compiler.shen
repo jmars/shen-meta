@@ -23,7 +23,7 @@
 (define primitive?
   X -> (element? X [+ / * - trap-error simple-error error-to-string intern
                     set value number? > < >= <= string? pos tlstr cn str
-                    string->n n->string absvector address-> <-address
+                    string->n n->string absvector address-> <-address if
                     absvector? cons? cons hd tl write-byte read-byte open
                     close = eval-kl get-time type symbol?]))
 
@@ -192,6 +192,10 @@
 (define interp
   [[access N] | C] A E S R                         -> (interp C (lookup N E) E S R)
   [[global G] | C] A E S R                         -> (interp C (get interp G) E S R)
+  [[jmpf L] | C] [boolean false] E S R             -> (interp (interp-jmp C L) [boolean false] E S R)
+  [[jmpf L] | C] A E S R                           -> (interp C A E S R)
+  [[jmp L] | C] A E S R                            -> (interp (interp-jmp C L) A E S R)
+  [[label L] | C] A E S R                          -> (interp C A E S R)
   [appterm | C] [lambda C1 E1] E [V | S] R         -> (interp C1 [lambda C1 E1] [V | E1] S R)
   [apply | C] [lambda C1 E1] E [V | S] R           -> (interp C1 [lambda C1 E1] [V | E1] S [[lambda C E] | R])
   [push | C] A E S R                               -> (interp C A E [A | S] R)
@@ -222,6 +226,11 @@
 ===
 self-checks
 ===
+(= [number 40] (toplevel-interp (kl->zinc [[lambda X [lambda Y X]] 40 2])))
+(= [number 2] (toplevel-interp (kl->zinc [let X 1 [+ X 1]])))
 (put interp first (interp (kl->zinc [lambda X [lambda Y X]]) [] [] [] []))
 (= [number 40] (toplevel-interp (kl->zinc [first 40 2])))
 (= [number 2] (toplevel-interp (kl->zinc [+ 1 1])))
+(= [number 1] (toplevel-interp (kl->zinc [if true 1 0])))
+(= [number 0] (toplevel-interp (kl->zinc [if false 1 0])))
+(= [number 41] (toplevel-interp (kl->zinc [let X [if true 1 0] [+ X [first 40 2]]])))
