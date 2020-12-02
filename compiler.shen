@@ -234,3 +234,5 @@ self-checks
 (= [number 1] (toplevel-interp (kl->zinc [if true 1 0])))
 (= [number 0] (toplevel-interp (kl->zinc [if false 1 0])))
 (= [number 41] (toplevel-interp (kl->zinc [let X [if true 1 0] [+ X [first 40 2]]])))
+(= [boolean false] (toplevel-interp (kl->zinc [and true false])))
+(= [boolean true] (toplevel-interp (kl->zinc [or false true])))
