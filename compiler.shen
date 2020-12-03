@@ -275,3 +275,50 @@ self-checks
 (= [boolean true] (toplevel-interp (kl->zinc [and [number? 1] [number? 2]])))
 (= [number 2] (toplevel-interp (kl->zinc [+ 1 1])))
 (= [number 41] (toplevel-interp (kl->zinc [let X [if true 1 0] [+ X [first 40 2]]])))
+
+\* Restricted subset of klambda to QBE SSA *\
+(define normalize-body
+  Body -> (normalize-term (kmacros Body)))
+
+(define callargs->qbe
+  [H] -> [[% H]] where (variable? H)
+  [V] -> [[d_ V]] where (number? V)
+  [H | T] -> [[% H] , | (callargs->qbe T)]) where (variable? H)
+
+(define body->qbe
+  [F | Args] -> [F (callargs->qbe Args)] where (symbol? F)
+  V -> [% V] where (variable? V))
+
+(define args->qbe
+  [H] -> [[l [% H]]]
+  [H | T] -> [[l [% H]] , | (args->qbe T)])
+
+(define defun->qbe
+  [defun Name Args Body] -> [
+    function l [$ Name] (args->qbe Args) [
+      [@ start]
+      [ret (body->qbe (normalize-body Body))]
+    ]
+  ])
+
+\* printing *\
+(define mnl -> (make-string "~%"))
+
+(define qbebody->str
+  [[ret L]] -> (@s "ret " (qbe->str L) (mnl))
+  [[@ L] | T] -> (@s "@" (str L) (mnl) (qbebody->str T))
+  [V] -> (@s "ret " (qbe->str V)))
+
+(define qbeargs->str
+  [[T N]] -> (@s (str T) " " (qbe->str N))
+  [[T N] , | Tl] -> (@s (str T) " " (qbe->str N) ", " (qbeargs->str Tl)))
+
+(define qbe->str
+  [$ N] -> (@s "$" (str N))
+  [% N] -> (@s "%" (str N))
+  [@ N] -> (@s "@" (str N))
+  [function R N Args Body] -> (@s
+    "function " (str R) " " (qbe->str N) " (" (qbeargs->str Args) ") {" (mnl)
+      (qbebody->str Body)
+    "}" (mnl)
+    ))
