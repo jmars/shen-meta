@@ -1,31 +1,31 @@
 
-(define id {A --> A}
+(define id
   X -> X)
 
-(define newvar {--> symbol}
+(define newvar
   -> (gensym (protect V)))
 
-(define index_h { A --> (list A) --> number --> number }
+(define index_h
   X [X | Rest] C -> C
   X [_ | Rest] C -> (index_h X Rest (+ 1 C))
   _ _ _          -> -1)
 
-(define index { A --> (list A) --> number }
+(define index
   X L -> (index_h X L 0))
 
-(define intersperse { A --> (list A) --> (list A) }
+(define intersperse
   V []         -> []
   V [X]        -> [X]
   V [X | Rest] -> [X V | (intersperse V Rest)]
   _ _          -> [])
 
-(define fold-append { (list A) -> (list (list A)) --> (list A) }
+(define fold-append
   A []      -> A
   A [H]     -> (fold-append (append A H) [])
   A [H | T] -> (fold-append (append A H) T)
   _ _       -> (simple-error "impossible"))
 
-(define primitive? { symbol --> boolean }
+(define primitive?
   X -> (element? X [+ / * - trap-error simple-error error-to-string intern
                     set value number? > < >= <= string? pos tlstr cn str
                     string->n n->string absvector address-> <-address
