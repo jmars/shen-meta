@@ -1,27 +1,31 @@
-(define id X -> X)
 
-(define newvar -> (gensym (protect V)))
+(define id {A --> A}
+  X -> X)
 
-(define index_h
+(define newvar {--> symbol}
+  -> (gensym (protect V)))
+
+(define index_h { A --> (list A) --> number --> number }
   X [X | Rest] C -> C
   X [_ | Rest] C -> (index_h X Rest (+ 1 C))
   _ _ _          -> -1)
 
-(define index X L -> (index_h X L 0))
+(define index { A --> (list A) --> number }
+  X L -> (index_h X L 0))
 
-(define intersperse
+(define intersperse { A --> (list A) --> (list A) }
   V []         -> []
   V [X]        -> [X]
   V [X | Rest] -> [X V | (intersperse V Rest)]
   _ _          -> [])
 
-(define fold-append
+(define fold-append { (list A) -> (list (list A)) --> (list A) }
   A []      -> A
   A [H]     -> (fold-append (append A H) [])
   A [H | T] -> (fold-append (append A H) T)
   _ _       -> (simple-error "impossible"))
 
-(define primitive?
+(define primitive? { symbol --> boolean }
   X -> (element? X [+ / * - trap-error simple-error error-to-string intern
                     set value number? > < >= <= string? pos tlstr cn str
                     string->n n->string absvector address-> <-address
@@ -282,12 +286,12 @@ self-checks
 
 (define callargs->qbe
   [H]     -> [[l [% H]]] where (variable? H)
-  [V]     -> [[d_ V]] where (number? V)
-  [H | T] -> [[l [% H]] | (callargs->qbe T)]) where (variable? H)
+  [V]     -> [[d [d_ V]]] where (number? V)
+  [H | T] -> [(callargs->qbe [H]) | (callargs->qbe T)]) where (variable? H)
 
 (define body->qbe
-  [let V X Y] -> 
-  [if C T F] -> 
+  [let V X Y] -> [[]]
+  [if C T F] -> [[]]
   [F | Args] -> [[call [$ F] (callargs->qbe Args)]] where (symbol? F))
 
 (define args->qbe
@@ -320,7 +324,7 @@ self-checks
   [$ N]                    -> (@s "$" (str N))
   [% N]                    -> (@s "%" (str N))
   [@ N]                    -> (@s "@" (str N))
-  [d_ N]                   -> (@s "d_ " (str N)) where (number? N)
+  [d_ N]                   -> (@s "d_" (str N)) where (number? N)
   [l X]                    -> (@s "l " (qbe->str X))
   [call [$ F] Args]        -> (@s "call " (qbe->str [$ F]) "(" (qbeargs->str Args) ")") where (symbol? F)
   [function R N Args Body] -> (@s
