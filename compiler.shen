@@ -2,12 +2,12 @@
 
 (define newvar -> (gensym (protect V)))
 
-(define index*
+(define index_h
   X [X | Rest] C -> C
-  X [_ | Rest] C -> (index* X Rest (+ 1 C))
+  X [_ | Rest] C -> (index_h X Rest (+ 1 C))
   _ _ _          -> -1)
 
-(define index X L -> (index* X L 0))
+(define index X L -> (index_h X L 0))
 
 (define intersperse
   V []         -> []
@@ -286,7 +286,9 @@ self-checks
   [H | T] -> [[l [% H]] | (callargs->qbe T)]) where (variable? H)
 
 (define body->qbe
-  [F | Args] -> [[[$ F] (callargs->qbe Args)]] where (symbol? F))
+  [let V X Y] -> 
+  [if C T F] -> 
+  [F | Args] -> [[call [$ F] (callargs->qbe Args)]] where (symbol? F))
 
 (define args->qbe
   [H]     -> [[l [% H]]]
@@ -306,21 +308,23 @@ self-checks
 (define mnl -> (make-string "~%"))
 
 (define qbebody->str
-  [[ret L]]       -> (@s "ret " (qbe->str L) (mnl))
-  [[[% V] [= l] F]] -> (@s "c" "all")
-  [[@ L] | T]     -> (@s "@" (str L) (mnl) (qbebody->str T)))
+  [[[% V] [= l] F] | R] -> (@s (qbe->str [% V]) " =l " (qbe->str F) (mnl) (qbebody->str R))
+  [[ret L]]             -> (@s "ret " (qbe->str L) (mnl))
+  [[@ L] | T]           -> (@s "@" (str L) (mnl) (qbebody->str T)))
 
 (define qbeargs->str
-  [[T N]]      -> (@s (str T) " " (qbe->str N))
-  [[T N] | Tl] -> (@s (str T) " " (qbe->str N) ", " (qbeargs->str Tl)))
+  [A]      -> (qbe->str A)
+  [A | Tl] -> (@s (qbe->str A) ", " (qbeargs->str Tl)))
 
 (define qbe->str
   [$ N]                    -> (@s "$" (str N))
   [% N]                    -> (@s "%" (str N))
   [@ N]                    -> (@s "@" (str N))
-  [[$ F] Args]             -> (@s "call" "foo") where (symbol? F)
+  [d_ N]                   -> (@s "d_ " (str N)) where (number? N)
+  [l X]                    -> (@s "l " (qbe->str X))
+  [call [$ F] Args]        -> (@s "call " (qbe->str [$ F]) "(" (qbeargs->str Args) ")") where (symbol? F)
   [function R N Args Body] -> (@s
     "function " (str R) " " (qbe->str N) " (" (qbeargs->str Args) ") {" (mnl)
       (qbebody->str Body)
-    "}" (mnl)
+    "}"
     ))
