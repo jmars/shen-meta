@@ -1,6 +1,6 @@
 (define id X -> X)
 
-(define newvar -> (gensym (protect X)))
+(define newvar -> (gensym (protect V)))
 
 (define index*
   X [X | Rest] C -> C
@@ -10,6 +10,7 @@
 (define index X L -> (index* X L 0))
 
 (define intersperse
+  V []         -> []
   V [X]        -> [X]
   V [X | Rest] -> [X V | (intersperse V Rest)]
   _ _          -> [])
@@ -23,7 +24,7 @@
 (define primitive?
   X -> (element? X [+ / * - trap-error simple-error error-to-string intern
                     set value number? > < >= <= string? pos tlstr cn str
-                    string->n n->string absvector address-> <-address if
+                    string->n n->string absvector address-> <-address
                     absvector? cons? cons hd tl write-byte read-byte open
                     close = eval-kl get-time type symbol?]))
 
@@ -71,18 +72,21 @@
 
 \* https://github.com/Shen-Language/wiki/wiki/KLambda#equivalent-forms *\
 (define kmacros
-  [freeze X]          -> [lambda (newvar) X]
-  [thaw X]            -> [X 0]
-  [and X Y]           -> [if X Y false]
-  [or X Y]            -> [if X true Y]
-  [cond [X Y] | Rest] -> [if X Y (kmacros [cond | Rest])]
+  [freeze X]          -> [lambda (newvar) (kmacros X)]
+  [thaw X]            -> [(kmacros X) 0]
+  [and X Y]           -> (kmacros [if (kmacros X) (kmacros Y) false])
+  [or X Y]            -> (kmacros [if (kmacros X) true (kmacros Y)])
+  [cond [X Y] | Rest] -> (kmacros [if (kmacros X) (kmacros Y) (kmacros [cond | Rest])])
   [cond]              -> [simple-error "No condition was true"]
+  [if true X Y]       -> (kmacros X)
+  [if false X Y]      -> (kmacros Y)
   [X Y]               -> [(kmacros X) (kmacros Y)]
   [X | Y]             -> [(kmacros X) | (map (function kmacros) Y)]
   X                   -> X)
 
 \* http://matt.might.net/articles/a-normalization/ *\
 (define atomic?
+  []      -> true
   X       -> true where (number? X)
   X       -> true where (symbol? X)
   X       -> true where (string? X)
@@ -122,8 +126,9 @@
 (define debruijn
   Scope [let X Y Z]  -> [let (debruijn Scope Y) (debruijn [X | Scope] Z)]
   Scope [lambda X Y] -> [lambda (debruijn [X | Scope] Y)]
-  Scope [X Y]        -> [X (debruijn Scope Y)] where (primitive? X)
-  Scope [X | Y]      -> [X | (map (debruijn Scope) Y)] where (primitive? X)
+  Scope [if X Y Z]   -> [if (debruijn Scope X) (debruijn Scope Y) (debruijn Scope Z)]
+  Scope [%% X Y]     -> [X (debruijn Scope Y)] where (primitive? X)
+  Scope [%% X | Y]   -> [X | (map (debruijn Scope) Y)] where (primitive? X)
   Scope [X Y]        -> [[function X] (debruijn Scope Y)] where (and (symbol? X) (not (element? X Scope)))
   Scope [X | Y]      -> [[function X] | (map (debruijn Scope) Y)] where (and (symbol? X) (not (element? X Scope)))
   Scope [X Y]        -> [(debruijn Scope X) (debruijn Scope Y)]
@@ -140,6 +145,7 @@
   [let X Y]    -> (append (zinc-c X) [let] (zinc-t Y))
   [if X Y Z]   -> (let F (gensym l) (let E (gensym l) (append (zinc-c X) [[jmpf F]] (zinc-c Y) [[jmp E]] [[label F]] (zinc-c Z) [[label E]])))
   [symbol X]   -> [[symbol X]] where (symbol? X)
+  [F A]        -> (append (zinc-c A) [[prim F]]) where (primitive? F)
   [F | Args]   -> (append (fold (function append) [] (intersperse [push] (map (function zinc-c) (reverse (tl Args))))) [push] (zinc-c (hd Args)) [[prim F]]) where (primitive? F)
   [F | Args]   -> (append (fold (function append) [] (intersperse [push] (map (function zinc-c) (reverse Args)))) [push] (zinc-c F) [appterm])
   true         -> [[boolean true]]
@@ -155,6 +161,7 @@
   [let X Y]    -> (append (zinc-c X) [let] (zinc-c Y) [endlet])
   [if X Y Z]   -> (let F (gensym l) (let E (gensym l) (append (zinc-c X) [[jmpf F]] (zinc-c Y) [[jmp E]] [[label F]] (zinc-c Z) [[label E]])))
   [symbol X]   -> [[symbol X]] where (symbol? X)
+  [F A]        -> (append (zinc-c A) [[prim F]]) where (primitive? F)
   [F | Args]   -> (append (fold (function append) [] (intersperse [push] (map (function zinc-c) (reverse (tl Args))))) [push] (zinc-c (hd Args)) [[prim F]]) where (primitive? F)
   [F | Args]   -> (append [pushmark] (fold (function append) [] (intersperse [push] (map (function zinc-c) (reverse Args)))) [push] (zinc-c F) [apply])
   true         -> [[boolean true]]
@@ -166,7 +173,7 @@
 
 (define lookup
   0 [X | _] -> X
-  X [_ | Z] -> (lookup (- 1 X) Z)
+  X [_ | Z] -> (lookup (- X 1) Z)
   _ _       -> (simple-error "failed lookup"))
 
 (define interp-jmp
@@ -177,15 +184,15 @@
 (define unwrap
   [number N]  -> N
   [string S]  -> S
-  [symbol S]  -> S
   [boolean S] -> S
+  [symbol S]  -> S
   _           -> (simple-error "unwrap: unknown value"))
 
 (define wrap
   N -> [number N] where (number? N)
+  B -> [boolean B] where (boolean? B)
   S -> [symbol S] where (symbol? S)
   S -> [string S] where (string? S)
-  B -> [boolean B] where (boolean? B)
   _ -> (simple-error "wrap: unknown value"))
 
 \* Reference implementation *\
@@ -223,16 +230,40 @@
 (define kl->zinc
   X -> (zinc-c (debruijn [] (normalize-term (kmacros X)))))
 
+(define defun->lambda
+  [defun Name [Arg] Body] -> [lambda Arg Body]
+  [defun Name [Arg | Args] Body] -> [lambda Arg (defun->lambda [defun Name Args Body])]
+  _ -> (simple-error "defun->lambda: invalid arg"))
+
 ===
 self-checks
 ===
-(= [number 40] (toplevel-interp (kl->zinc [[lambda X [lambda Y X]] 40 2])))
-(= [number 2] (toplevel-interp (kl->zinc [let X 1 [+ X 1]])))
+
+(define set-toplevel
+  N X -> (put interp N (toplevel-interp (zinc-c (debruijn [] (normalize-term (kmacros (defun->lambda (ps X)))))))))
+
+(load "primitives.shen")
+
+(set-toplevel + safe.+)
+(set-toplevel number? safe.number?)
 (put interp first (interp (kl->zinc [lambda X [lambda Y X]]) [] [] [] []))
+(put interp id (interp (kl->zinc [lambda X X]) [] [] [] []))
+(put interp t (interp (kl->zinc [lambda X true]) [] [] [] []))
+
+(= [number 40] (toplevel-interp (kl->zinc [[lambda X [lambda Y X]] 40 2])))
 (= [number 40] (toplevel-interp (kl->zinc [first 40 2])))
-(= [number 2] (toplevel-interp (kl->zinc [+ 1 1])))
+(= [number 40] (toplevel-interp (kl->zinc [id 40])))
+(= [number 1] (toplevel-interp (kl->zinc [let X 1 X])))
 (= [number 1] (toplevel-interp (kl->zinc [if true 1 0])))
+(= [number 1] (toplevel-interp (kl->zinc [if true [if false 0 1] 0])))
+(= [boolean true] (toplevel-interp (kl->zinc [%% number? 1])))
+(= [boolean true] (toplevel-interp (kl->zinc [number? 1])))
 (= [number 0] (toplevel-interp (kl->zinc [if false 1 0])))
-(= [number 41] (toplevel-interp (kl->zinc [let X [if true 1 0] [+ X [first 40 2]]])))
 (= [boolean false] (toplevel-interp (kl->zinc [and true false])))
 (= [boolean true] (toplevel-interp (kl->zinc [or false true])))
+(= [number 2] (toplevel-interp (kl->zinc [let X 1 [%% + X 1]])))
+(= [number 1] (toplevel-interp (kl->zinc [[lambda X [if [%% number? X] X 0]] 1])))
+(= [number 41] (toplevel-interp (kl->zinc [let X [if true 1 0] [%% + X [first 40 2]]])))
+(= [boolean true] (toplevel-interp (kl->zinc [and [number? 1] [number? 2]])))
+(= [number 2] (toplevel-interp (kl->zinc [+ 1 1])))
+(= [number 41] (toplevel-interp (kl->zinc [let X [if true 1 0] [+ X [first 40 2]]])))
