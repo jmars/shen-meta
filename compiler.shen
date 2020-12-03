@@ -15,11 +15,11 @@
   V [X | Rest] -> [X V | (intersperse V Rest)]
   _ _          -> [])
 
-(define fold
-  F A []      -> A
-  F A [H]     -> (fold F (F A H) [])
-  F A [H | T] -> (fold F (F A H) T)
-  _ _ _       -> (simple-error "impossible"))
+(define fold-append
+  A []      -> A
+  A [H]     -> (fold-append (append A H) [])
+  A [H | T] -> (fold-append (append A H) T)
+  _ _       -> (simple-error "impossible"))
 
 (define primitive?
   X -> (element? X [+ / * - trap-error simple-error error-to-string intern
@@ -81,7 +81,7 @@
   [if true X Y]       -> (kmacros X)
   [if false X Y]      -> (kmacros Y)
   [X Y]               -> [(kmacros X) (kmacros Y)]
-  [X | Y]             -> [(kmacros X) | (map (function kmacros) Y)]
+  [X | Y]             -> [(kmacros X) | (kmacros Y)]
   X                   -> X)
 
 \* http://matt.might.net/articles/a-normalization/ *\
@@ -122,22 +122,30 @@
                 (normalize-names (tl Exps) (/. Ts
                   (K [T | Ts])))))))
 
+(define map-debruijn
+  Scope []      -> []
+  Scope [H | T] -> [(debruijn Scope H) | (map-debruijn Scope T)])
+
 \* De Bruijn Index conversion *\
 (define debruijn
   Scope [let X Y Z]  -> [let (debruijn Scope Y) (debruijn [X | Scope] Z)]
   Scope [lambda X Y] -> [lambda (debruijn [X | Scope] Y)]
   Scope [if X Y Z]   -> [if (debruijn Scope X) (debruijn Scope Y) (debruijn Scope Z)]
   Scope [%% X Y]     -> [X (debruijn Scope Y)] where (primitive? X)
-  Scope [%% X | Y]   -> [X | (map (debruijn Scope) Y)] where (primitive? X)
+  Scope [%% X | Y]   -> [X | (map-debruijn Scope Y)] where (primitive? X)
   Scope [X Y]        -> [[function X] (debruijn Scope Y)] where (and (symbol? X) (not (element? X Scope)))
-  Scope [X | Y]      -> [[function X] | (map (debruijn Scope) Y)] where (and (symbol? X) (not (element? X Scope)))
+  Scope [X | Y]      -> [[function X] | (map-debruijn Scope Y)] where (and (symbol? X) (not (element? X Scope)))
   Scope [X Y]        -> [(debruijn Scope X) (debruijn Scope Y)]
-  Scope [X | Y]      -> [(debruijn Scope X) | (map (debruijn Scope) Y)]
+  Scope [X | Y]      -> [(debruijn Scope X) | (map-debruijn Scope Y)]
   Scope X            -> [lookup (index X Scope)] where (and (variable? X) (element? X Scope))
   Scope X            -> [symbol X] where (and (not (variable? X)) (symbol? X) (not (element? X Scope)))
   Scope X            -> X)
 
 \* https://caml.inria.fr/pub/papers/xleroy-zinc.pdf *\
+(define map-zinc-c
+  []      -> []
+  [H | T] -> [(zinc-c H) | (map-zinc-c T)])
+
 (define zinc-t
   [lookup X]   -> [[access X]]
   [function X] -> [[global X]]
@@ -146,8 +154,8 @@
   [if X Y Z]   -> (let F (gensym l) (let E (gensym l) (append (zinc-c X) [[jmpf F]] (zinc-c Y) [[jmp E]] [[label F]] (zinc-c Z) [[label E]])))
   [symbol X]   -> [[symbol X]] where (symbol? X)
   [F A]        -> (append (zinc-c A) [[prim F]]) where (primitive? F)
-  [F | Args]   -> (append (fold (function append) [] (intersperse [push] (map (function zinc-c) (reverse (tl Args))))) [push] (zinc-c (hd Args)) [[prim F]]) where (primitive? F)
-  [F | Args]   -> (append (fold (function append) [] (intersperse [push] (map (function zinc-c) (reverse Args)))) [push] (zinc-c F) [appterm])
+  [F | Args]   -> (append (fold-append [] (intersperse [push] (map-zinc-c (reverse (tl Args))))) [push] (zinc-c (hd Args)) [[prim F]]) where (primitive? F)
+  [F | Args]   -> (append (fold-append [] (intersperse [push] (map-zinc-c (reverse Args)))) [push] (zinc-c F) [appterm])
   true         -> [[boolean true]]
   false        -> [[boolean false]]
   X            -> [[number X]] where (number? X)
@@ -162,8 +170,8 @@
   [if X Y Z]   -> (let F (gensym l) (let E (gensym l) (append (zinc-c X) [[jmpf F]] (zinc-c Y) [[jmp E]] [[label F]] (zinc-c Z) [[label E]])))
   [symbol X]   -> [[symbol X]] where (symbol? X)
   [F A]        -> (append (zinc-c A) [[prim F]]) where (primitive? F)
-  [F | Args]   -> (append (fold (function append) [] (intersperse [push] (map (function zinc-c) (reverse (tl Args))))) [push] (zinc-c (hd Args)) [[prim F]]) where (primitive? F)
-  [F | Args]   -> (append [pushmark] (fold (function append) [] (intersperse [push] (map (function zinc-c) (reverse Args)))) [push] (zinc-c F) [apply])
+  [F | Args]   -> (append (fold-append [] (intersperse [push] (map-zinc-c (reverse (tl Args))))) [push] (zinc-c (hd Args)) [[prim F]]) where (primitive? F)
+  [F | Args]   -> (append [pushmark] (fold-append [] (intersperse [push] (map-zinc-c (reverse Args)))) [push] (zinc-c F) [apply])
   true         -> [[boolean true]]
   false        -> [[boolean false]]
   X            -> [[number X]] where (number? X)
