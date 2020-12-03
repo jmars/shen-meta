@@ -239,9 +239,9 @@
   X -> (zinc-c (debruijn [] (normalize-term (kmacros X)))))
 
 (define defun->lambda
-  [defun Name [Arg] Body] -> [lambda Arg Body]
+  [defun Name [Arg] Body]        -> [lambda Arg Body]
   [defun Name [Arg | Args] Body] -> [lambda Arg (defun->lambda [defun Name Args Body])]
-  _ -> (simple-error "defun->lambda: invalid arg"))
+  _                              -> (simple-error "defun->lambda: invalid arg"))
 
 ===
 self-checks
@@ -281,42 +281,44 @@ self-checks
   Body -> (normalize-term (kmacros Body)))
 
 (define callargs->qbe
-  [H] -> [[% H]] where (variable? H)
-  [V] -> [[d_ V]] where (number? V)
-  [H | T] -> [[% H] , | (callargs->qbe T)]) where (variable? H)
+  [H]     -> [[l [% H]]] where (variable? H)
+  [V]     -> [[d_ V]] where (number? V)
+  [H | T] -> [[l [% H]] | (callargs->qbe T)]) where (variable? H)
 
 (define body->qbe
-  [F | Args] -> [F (callargs->qbe Args)] where (symbol? F)
-  V -> [% V] where (variable? V))
+  [F | Args] -> [[[$ F] (callargs->qbe Args)]] where (symbol? F))
 
 (define args->qbe
-  [H] -> [[l [% H]]]
-  [H | T] -> [[l [% H]] , | (args->qbe T)])
+  [H]     -> [[l [% H]]]
+  [H | T] -> [[l [% H]] | (args->qbe T)])
 
 (define defun->qbe
   [defun Name Args Body] -> [
-    function l [$ Name] (args->qbe Args) [
-      [@ start]
-      [ret (body->qbe (normalize-body Body))]
-    ]
+    function l [$ Name] (args->qbe Args) (let B (reverse (body->qbe (normalize-body Body))) (append 
+      [[@ start]]
+      [[[% r] [= l] (hd B)]]
+      (reverse (tl B))
+      [[ret [% r]]]
+    ))
   ])
 
 \* printing *\
 (define mnl -> (make-string "~%"))
 
 (define qbebody->str
-  [[ret L]] -> (@s "ret " (qbe->str L) (mnl))
-  [[@ L] | T] -> (@s "@" (str L) (mnl) (qbebody->str T))
-  [V] -> (@s "ret " (qbe->str V)))
+  [[ret L]]       -> (@s "ret " (qbe->str L) (mnl))
+  [[[% V] [= l] F]] -> (@s "c" "all")
+  [[@ L] | T]     -> (@s "@" (str L) (mnl) (qbebody->str T)))
 
 (define qbeargs->str
-  [[T N]] -> (@s (str T) " " (qbe->str N))
-  [[T N] , | Tl] -> (@s (str T) " " (qbe->str N) ", " (qbeargs->str Tl)))
+  [[T N]]      -> (@s (str T) " " (qbe->str N))
+  [[T N] | Tl] -> (@s (str T) " " (qbe->str N) ", " (qbeargs->str Tl)))
 
 (define qbe->str
-  [$ N] -> (@s "$" (str N))
-  [% N] -> (@s "%" (str N))
-  [@ N] -> (@s "@" (str N))
+  [$ N]                    -> (@s "$" (str N))
+  [% N]                    -> (@s "%" (str N))
+  [@ N]                    -> (@s "@" (str N))
+  [[$ F] Args]             -> (@s "call" "foo") where (symbol? F)
   [function R N Args Body] -> (@s
     "function " (str R) " " (qbe->str N) " (" (qbeargs->str Args) ") {" (mnl)
       (qbebody->str Body)
