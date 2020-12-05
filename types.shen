@@ -79,3 +79,23 @@
   P : primitive-funcname;
   _______________________
   [prim P] : zinc-code;)
+
+(datatype binary-code
+  X : (absvector number);
+  ___
+  X : binary-code;)
+
+(datatype binary-constants
+  X : (absvector string);
+  ___
+  X : binary-constants;)
+
+(datatype absvector
+  X : number;
+  ___
+  (absvector X) : (absvector A);
+
+  Y : number;
+  X : (absvector A);
+  ___
+  (address-> X Y Z) : (absvector A);)
