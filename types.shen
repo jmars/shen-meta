@@ -8,74 +8,74 @@
 (datatype primitive-funcname
   if (primitive? X)
   X : symbol;
-  ___
+  ________________________
   X : primitive-funcname;)
 
 (datatype zinc-code
   X : number;
-  ___
+  _______________________
   [access X] : zinc-code;
 
   X : symbol;
-  ___
+  _______________________
   [global X] : zinc-code;
 
-  ___
+  _________________
   grab : zinc-code;
 
-  ___
+  ________________
   let : zinc-code;
 
   X : symbol;
-  ___
+  _____________________
   [jmpf X] : zinc-code;
 
   X : symbol;
-  ___
+  ______________________
   [label X] : zinc-code;
 
   X : symbol;
-  ___
+  ____________________
   [jmp X] : zinc-code;
   
   X : boolean;
-  ___
+  ________________________
   [boolean X] : zinc-code;
 
   X : number;
-  ___
+  _______________________
   [number X] : zinc-code;
 
   X : string;
-  ___
+  _______________________
   [string X] : zinc-code;
 
   X : symbol;
-  ___
+  _______________________
   [symbol X] : zinc-code;
 
-  ___
+  ____________________
   appterm : zinc-code;
 
-  ___
+  __________________
   apply : zinc-code;
 
-  ___
+  _________________
   push : zinc-code;
 
-  ___
+  _____________________
   pushmark : zinc-code;
 
   X : (list zinc-code);
-  ___
+  ____________________
   [cur X] : zinc-code;
 
-  ___
+  ___________________
   return : zinc-code;
 
-  ___
+  ___________________
   endlet : zinc-code;
 
   P : primitive-funcname;
-  ___
+  _______________________
   [prim P] : zinc-code;)
