@@ -1,5 +1,50 @@
+(load "normalize.shen")
+(load "util.shen")
+(load "zinc.shen")
+
 \* Reference implementation, this is basically a transliteration
   of the rules in the paper *\
+(define arity?
+  address->       -> 3
+  +               -> 2
+  /               -> 2
+  *               -> 2
+  -               -> 2
+  trap-error      -> 2
+  set             -> 2
+  >               -> 2
+  <               -> 2
+  >=              -> 2
+  <=              -> 2
+  pos             -> 2
+  cn              -> 2
+  <-address       -> 2
+  cons            -> 2
+  write-byte      -> 2
+  open            -> 2
+  =               -> 2
+  type            -> 2
+  simple-error    -> 1
+  error-to-string -> 1
+  intern          -> 1
+  value           -> 1
+  number?         -> 1
+  string?         -> 1
+  tlstr           -> 1
+  str             -> 1
+  string->n       -> 1
+  n->string       -> 1
+  absvector       -> 1
+  absvector       -> 1
+  cons?           -> 1
+  hd              -> 1
+  tl              -> 1
+  read-byte       -> 1
+  close           -> 1
+  eval-kl         -> 1
+  get-time        -> 1
+  symbol?         -> 1
+  _               -> -1)
 
 (define lookup
   0 [X | _] -> X
@@ -61,6 +106,9 @@
 
 (define toplevel-interp
   X -> (interp X [] [] [] []))
+
+(define kl->zinc
+  X -> (zinc-c (debruijn [] (normalize-term (kmacros X)))))
 
 (define set-toplevel
   N X -> (put interp N (toplevel-interp (zinc-c (debruijn [] (normalize-term (kmacros (defun->lambda (ps X)))))))))

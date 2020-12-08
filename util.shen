@@ -23,3 +23,10 @@
   A [H]     -> (fold-append (append A H) [])
   A [H | T] -> (fold-append (append A H) T)
   _ _       -> (simple-error "impossible"))
+
+(define primitive?
+  X -> (element? X [+ / * - trap-error simple-error error-to-string intern
+                    set value number? > < >= <= string? pos tlstr cn str
+                    string->n n->string absvector address-> <-address
+                    absvector? cons? cons hd tl write-byte read-byte open
+                    close = eval-kl get-time type symbol?]))
