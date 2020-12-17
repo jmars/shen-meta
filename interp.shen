@@ -39,8 +39,14 @@
 
   [prim symbol? | C] [symbol _] E S R                           -> (interp C [boolean true] E S R)
   [prim symbol? | C] A E S R                                    -> (interp C [boolean false] E S R)
+  [prim boolean? | C] [boolean _] E S R                         -> (interp C [boolean true] E S R)
+  [prim boolean? | C] A E S R                                   -> (interp C [boolean false] E S R)
+  [prim stream? | C] [stream _] E S R                           -> (interp C [boolean true] E S R)
+  [prim stream? | C] A E S R                                    -> (interp C [boolean false] E S R)
   [prim get-time | C] [symbol A] E S R                          -> (interp C [number (get-time A)] E S R)
+
   [prim eval-kl | C] A E S R                                    -> (interp C A E S R)
+
   [prim close | C] [stream A] E S R                             -> (interp C (do (close A) [cons []]) E S R)
   [prim read-byte | C] [stream A] E S R                         -> (interp C [number (read-byte A)] E S R)
   [prim tl | C] [cons A] E S R                                  -> (interp C [cons (tl A)] E S R)
