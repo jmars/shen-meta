@@ -4,99 +4,90 @@
 
 \* Reference implementation, this is basically a transliteration
   of the rules in the paper *\
-(define arity?
-  address->       -> 3
-  +               -> 2
-  /               -> 2
-  *               -> 2
-  -               -> 2
-  trap-error      -> 2
-  set             -> 2
-  >               -> 2
-  <               -> 2
-  >=              -> 2
-  <=              -> 2
-  pos             -> 2
-  cn              -> 2
-  <-address       -> 2
-  cons            -> 2
-  write-byte      -> 2
-  open            -> 2
-  =               -> 2
-  type            -> 2
-  simple-error    -> 1
-  error-to-string -> 1
-  intern          -> 1
-  value           -> 1
-  number?         -> 1
-  string?         -> 1
-  tlstr           -> 1
-  str             -> 1
-  string->n       -> 1
-  n->string       -> 1
-  absvector       -> 1
-  absvector       -> 1
-  cons?           -> 1
-  hd              -> 1
-  tl              -> 1
-  read-byte       -> 1
-  close           -> 1
-  eval-kl         -> 1
-  get-time        -> 1
-  symbol?         -> 1
-  _               -> -1)
-
 (define lookup
   0 [X | _] -> X
   X [_ | Z] -> (lookup (- X 1) Z)
   _ _       -> (simple-error "failed lookup"))
 
 (define interp-jmp
-  [[label L] | C] L -> C
+  [label L | C] L -> C
   [C1 | C] L        -> (interp-jmp C L)   
   _ _               -> (simple-error "failed jump"))
 
-(define unwrap
-  [number N]  -> N
-  [string S]  -> S
-  [boolean S] -> S
-  [symbol S]  -> S
-  _           -> (simple-error "unwrap: unknown value"))
-
-(define wrap
-  N -> [number N] where (number? N)
-  B -> [boolean B] where (boolean? B)
-  S -> [symbol S] where (symbol? S)
-  S -> [string S] where (string? S)
-  _ -> (simple-error "wrap: unknown value"))
-
 (define interp
-  [[access N] | C] A E S R                         -> (interp C (lookup N E) E S R)
-  [[global G] | C] A E S R                         -> (interp C (get interp G) E S R)
-  [[jmpf L] | C] [boolean false] E S R             -> (interp (interp-jmp C L) [boolean false] E S R)
-  [[jmpf L] | C] A E S R                           -> (interp C A E S R)
-  [[jmp L] | C] A E S R                            -> (interp (interp-jmp C L) A E S R)
-  [[label L] | C] A E S R                          -> (interp C A E S R)
-  [appterm | C] [lambda C1 E1] E [V | S] R         -> (interp C1 [lambda C1 E1] [V | E1] S R)
-  [apply | C] [lambda C1 E1] E [V | S] R           -> (interp C1 [lambda C1 E1] [V | E1] S [[lambda C E] | R])
-  [push | C] A E S R                               -> (interp C A E [A | S] R)
-  [pushmark | C] A E S R                           -> (interp C A E [mark | S] R)
-  [[cur C1] | C] A E S R                           -> (interp C [lambda C1 E] E S R)
-  [grab | C] A E [mark | S] [[lambda C1 E1] | R]   -> (interp C1 [lambda C E] E1 S R)
-  [grab | C] A E [V | S] R                         -> (interp C A [V | E] S R)
-  [return | C] A E [mark | S] [[lambda C1 E1] | R] -> (interp C1 A E1 S R)
-  [return | C] [lambda C1 E1] E [V | S] R          -> (interp C1 [lambda C1 E1] [V | E1] S R)
-  [let | C] A E S R                                -> (interp C A [A | E] S R)
-  [endlet | C] A [V | E] S R                       -> (interp C A E S R)
-  [[number N] | C] A E S R                         -> (interp C [number N] E S R)
-  [[string Ss] | C] A E S R                        -> (interp C [string Ss] E S R)
-  [[symbol Ss] | C] A E S R                        -> (interp C [symbol Ss] E S R)
-  [[boolean B] | C] A E S R                        -> (interp C [boolean B] E S R)
-  [[prim P] | C] A E S R                           -> (interp C (wrap ((function P) (unwrap A))) E S R) where (= (arity? P) 1)
-  [[prim P] | C] A E [A1 | S] R                    -> (interp C (wrap ((function P) (unwrap A) (unwrap A1))) E S R) where (= (arity? P) 2)
-  [[prim P] | C] A E [A1 A2 | S] R                 -> (interp C (wrap ((function P) (unwrap A) (unwrap A1) (unwrap A2))) E S R) where (= (arity? P) 3)
-  [] A E S R                                       -> A
-  _ _ _ _ _                                        -> (simple-error "interp: unknown expression"))
+  [access N | C] A E S R                                        -> (interp C (lookup N E) E S R)
+  [global G | C] A E S R                                        -> (interp C (get interp G) E S R)
+  [jmpf L | C] [boolean false] E S R                            -> (interp (interp-jmp C L) [boolean false] E S R)
+  [jmpf L | C] A E S R                                          -> (interp C A E S R)
+  [jmp L | C] A E S R                                           -> (interp (interp-jmp C L) A E S R)
+  [label L | C] A E S R                                         -> (interp C A E S R)
+  [appterm | C] [lambda C1 E1] E [V | S] R                      -> (interp C1 [lambda C1 E1] [V | E1] S R)
+  [apply | C] [lambda C1 E1] E [V | S] R                        -> (interp C1 [lambda C1 E1] [V | E1] S [[lambda C E] | R])
+  [push | C] A E S R                                            -> (interp C A E [A | S] R)
+  [pushmark | C] A E S R                                        -> (interp C A E [mark | S] R)
+  [cur C1 | C] A E S R                                          -> (interp C [lambda C1 E] E S R)
+  [grab | C] A E [mark | S] [[lambda C1 E1] | R]                -> (interp C1 [lambda C E] E1 S R)
+  [grab | C] A E [V | S] R                                      -> (interp C A [V | E] S R)
+  [return | C] A E [mark | S] [[lambda C1 E1] | R]              -> (interp C1 A E1 S R)
+  [return | C] [lambda C1 E1] E [V | S] R                       -> (interp C1 [lambda C1 E1] [V | E1] S R)
+  [let | C] A E S R                                             -> (interp C A [A | E] S R)
+  [endlet | C] A [V | E] S R                                    -> (interp C A E S R)
+  [number N | C] A E S R                                        -> (interp C [number N] E S R)
+  [string Ss | C] A E S R                                       -> (interp C [string Ss] E S R)
+  [symbol Ss | C] A E S R                                       -> (interp C [symbol Ss] E S R)
+  [boolean B | C] A E S R                                       -> (interp C [boolean B] E S R)
+
+  [prim symbol? | C] [symbol _] E S R                           -> (interp C [boolean true] E S R)
+  [prim symbol? | C] A E S R                                    -> (interp C [boolean false] E S R)
+  [prim get-time | C] [symbol A] E S R                          -> (interp C [number (get-time A)] E S R)
+  [prim eval-kl | C] A E S R                                    -> (interp C A E S R)
+  [prim close | C] [stream A] E S R                             -> (interp C (do (close A) [cons []]) E S R)
+  [prim read-byte | C] [stream A] E S R                         -> (interp C [number (read-byte A)] E S R)
+  [prim tl | C] [cons A] E S R                                  -> (interp C [cons (tl A)] E S R)
+  [prim hd | C] [cons A] E S R                                  -> (interp C [cons (hd A)] E S R)
+  [prim cons? | C] [cons _] E S R                               -> (interp C [boolean true] E S R)
+  [prim cons? | C] A E S R                                      -> (interp C [boolean false] E S R)
+  [prim absvector | C] [number A] E S R                         -> (interp C [absvector (absvector A)] E S R)
+  [prim n->string | C] [number A] E S R                         -> (interp C [string (n->string A)] E S R)
+  [prim string->n | C] [string A] E S R                         -> (interp C [number (string->n A)] E S R)
+  [prim str | C] [_ A] E S R                                    -> (interp C [string (str A)] E S R)
+  [prim tlstr | C] [string A] E S R                             -> (interp C [string (tlstr A)] E S R)
+  [prim string? | C] [string _] E S R                           -> (interp C [boolean true] E S R)
+  [prim string? | C] A E S R                                    -> (interp C [boolean false] E S R)
+  [prim number? | C] [number _] E S R                           -> (interp C [boolean true] E S R)
+  [prim number? | C] A E S R                                    -> (interp C [boolean false] E S R)
+  [prim value | C] [symbol A] E S R                             -> (interp C (value A) E S R)
+  [prim intern | C] [string A] E S R                            -> (interp C [symbol (intern A)] E S R)
+  [prim error-to-string | C] [error A] E S R                    -> (interp C [string (error-to-string A)] E S R)
+  [prim simple-error | C] [string A] E S R                      -> (simple-error A)
+  [prim trap-error | C] [lambda C1 E1] E S R                    -> (interp C (trap-error (interp C1 [lambda C1 E1] E1 S R) (/. Err [error Err])))
+
+  [prim type | C] A E [A1 | S] R                                -> (interp C A E S R)
+  [prim = | C] A E [A1 | S] R                                   -> (interp C [boolean (= A A1)] E S R)
+  [prim open | C] [string A] E [[symbol A1] | S] R              -> (interp C [stream (open A A1)] E S R)
+  [prim write-byte | C] [number A] E [[stream A1] | S] R        -> (interp C [number (write-byte A A1)] E S R)
+  [prim cons | C] A E [[cons A1] | S] R                         -> (interp C [cons (cons A A1)] E S R)
+  [prim <-address | C] [absvector A] E [[number A1] | S] R      -> (interp C (<-address A A1) E S R)
+  [prim cn | C] [string A] E [[string A1] | S] R                -> (interp C [string (cn A A1)] E S R)
+  [prim pos | C] [string A] E [[number A1] | S] R               -> (interp C [string (pos A A1)] E S R)
+  [prim <= | C] [number A] E [[number A1] | S] R                -> (interp C [number (<= A A1)] E S R)
+  [prim <= | C] [number A] E [[number A1] | S] R                -> (interp C [number (>= A A1)] E S R)
+  [prim > | C] [number A] E [[number A1] | S] R                 -> (interp C [number (> A A1)] E S R)
+  [prim < | C] [number A] E [[number A1] | S] R                 -> (interp C [number (< A A1)] E S R)
+  [prim set | C] [symbol A] E [A1 | S] R                        -> (interp C (set A A1) E S R)
+
+  [prim error? | C] [error A] E S R                             -> (interp C [boolean true] E S R)
+  [prim error? | C] A E S R                                     -> (interp C [boolean false] E S R)
+
+  [prim - | C] [number A] E [[number A1] | S] R                 -> (interp C [number (- A A1)] E S R)
+  [prim * | C] [number A] E [[number A1] | S] R                 -> (interp C [number (* A A1)] E S R)
+  [prim / | C] [number A] E [[number A1] | S] R                 -> (interp C [number (/ A A1)] E S R)
+  [prim + | C] [number A] E [[number A1] | S] R                 -> (interp C [number (+ A A1)] E S R)
+
+  [prim address-> | C] [absvector A] E [[number A1] A2 | S] R   -> (interp C [absvector A A1 A2] E S R)
+
+  [] A E S R                                                    -> A
+  _ _ _ _ _                                                     -> (simple-error "interp: unknown expression"))
 
 
 (define defun->lambda

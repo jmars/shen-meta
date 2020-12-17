@@ -6,6 +6,7 @@
   [or X Y]            -> (kmacros [if (kmacros X) true (kmacros Y)])
   [cond [X Y] | Rest] -> (kmacros [if (kmacros X) (kmacros Y) (kmacros [cond | Rest])])
   [cond]              -> [simple-error "No condition was true"]
+  [trap-error B E]    -> [trap-error (kmacros [lambda (gensym (protect V)) (kmacros B)]) (kmacros E)]
   [if true X Y]       -> (kmacros X)
   [if false X Y]      -> (kmacros Y)
   [X Y]               -> [(kmacros X) (kmacros Y)]
