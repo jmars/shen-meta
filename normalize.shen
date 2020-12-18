@@ -15,6 +15,7 @@
   [if false X Y]      -> (kmacros Y)
   [do X]              -> (kmacros X)
   [do X | Y]          -> (kmacros [let (newvar) (kmacros X) (kmacros [do | Y])])
+  [X]                 -> [X 0]
   [X Y]               -> [(kmacros X) (kmacros Y)]
   [X | Y]             -> [(kmacros X) | (map-kmacros Y)]
   []                  -> [%% emptylist 0]

@@ -110,6 +110,7 @@
   _ _ _ _ _                                                     -> (simple-error "interp: unknown expression"))
 
 (define defun->lambda
+  [defun Name [] Body]           -> [lambda (newvar) Body]
   [defun Name [Arg] Body]        -> [lambda Arg Body]
   [defun Name [Arg | Args] Body] -> [lambda Arg (defun->lambda [defun Name Args Body])]
   _                              -> (simple-error "defun->lambda: invalid arg"))
