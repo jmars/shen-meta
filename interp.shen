@@ -11,8 +11,16 @@
 
 (define interp-jmp
   [label L | C] L -> C
-  [C1 | C] L        -> (interp-jmp C L)   
+  [C1 | C] L        -> (interp-jmp C L)
   _ _               -> (simple-error "failed jump"))
+
+(define extract-kl
+  [cons]      -> []
+  [cons X Y]  -> (cons (extract-kl X) (extract-kl Y))
+  [number X]  -> X
+  [symbol X]  -> X
+  [string X]  -> X
+  [boolean X] -> X)
 
 (define interp
   [access N | C] A E S R                                        -> (interp C (lookup N E) E S R)
@@ -37,6 +45,8 @@
   [symbol Ss | C] A E S R                                       -> (interp C [symbol Ss] E S R)
   [boolean B | C] A E S R                                       -> (interp C [boolean B] E S R)
 
+  [prim emptylist | C] [number 0] E S R                         -> (interp C [cons] E S R)
+
   [prim symbol? | C] [symbol _] E S R                           -> (interp C [boolean true] E S R)
   [prim symbol? | C] A E S R                                    -> (interp C [boolean false] E S R)
   [prim boolean? | C] [boolean _] E S R                         -> (interp C [boolean true] E S R)
@@ -45,13 +55,14 @@
   [prim stream? | C] A E S R                                    -> (interp C [boolean false] E S R)
   [prim get-time | C] [symbol A] E S R                          -> (interp C [number (get-time A)] E S R)
 
-  [prim eval-kl | C] A E S R                                    -> (interp C A E S R)
+  [prim eval-kl | C] A E S R                                    -> (interp C (toplevel-interp (kl->zinc (extract-kl A))) E S R)
 
-  [prim close | C] [stream A] E S R                             -> (interp C (do (close A) [cons []]) E S R)
+  [prim close | C] [stream A] E S R                             -> (interp C (do (close A) [number 0]) E S R)
   [prim read-byte | C] [stream A] E S R                         -> (interp C [number (read-byte A)] E S R)
-  [prim tl | C] [cons A] E S R                                  -> (interp C [cons (tl A)] E S R)
-  [prim hd | C] [cons A] E S R                                  -> (interp C [cons (hd A)] E S R)
-  [prim cons? | C] [cons _] E S R                               -> (interp C [boolean true] E S R)
+  [prim tl | C] [cons _ A] E S R                                -> (interp C A E S R)
+  [prim hd | C] [cons A _] E S R                                -> (interp C A E S R)
+  [prim cons? | C] [cons _ _] E S R                             -> (interp C [boolean true] E S R)
+  [prim cons? | C] [cons] E S R                                 -> (interp C [boolean true] E S R)
   [prim cons? | C] A E S R                                      -> (interp C [boolean false] E S R)
   [prim absvector | C] [number A] E S R                         -> (interp C [absvector (absvector A)] E S R)
   [prim n->string | C] [number A] E S R                         -> (interp C [string (n->string A)] E S R)
@@ -66,24 +77,27 @@
   [prim intern | C] [string A] E S R                            -> (interp C [symbol (intern A)] E S R)
   [prim error-to-string | C] [error A] E S R                    -> (interp C [string (error-to-string A)] E S R)
   [prim simple-error | C] [string A] E S R                      -> (simple-error A)
-  [prim trap-error | C] [lambda C1 E1] E S R                    -> (interp C (trap-error (interp C1 [lambda C1 E1] E1 S R) (/. Err [error Err])))
+  [prim trap-error | C] [lambda C1 E1] E S R                    -> (interp C (trap-error (interp C1 [lambda C1 E1] E1 S R) (/. Err [error Err])) E S R)
 
   [prim type | C] A E [A1 | S] R                                -> (interp C A E S R)
   [prim = | C] A E [A1 | S] R                                   -> (interp C [boolean (= A A1)] E S R)
   [prim open | C] [string A] E [[symbol A1] | S] R              -> (interp C [stream (open A A1)] E S R)
   [prim write-byte | C] [number A] E [[stream A1] | S] R        -> (interp C [number (write-byte A A1)] E S R)
-  [prim cons | C] A E [[cons A1] | S] R                         -> (interp C [cons (cons A A1)] E S R)
+  [prim cons | C] A E [A1 | S] R                                -> (interp C [cons A A1] E S R)
   [prim <-address | C] [absvector A] E [[number A1] | S] R      -> (interp C (<-address A A1) E S R)
   [prim cn | C] [string A] E [[string A1] | S] R                -> (interp C [string (cn A A1)] E S R)
   [prim pos | C] [string A] E [[number A1] | S] R               -> (interp C [string (pos A A1)] E S R)
   [prim <= | C] [number A] E [[number A1] | S] R                -> (interp C [number (<= A A1)] E S R)
-  [prim <= | C] [number A] E [[number A1] | S] R                -> (interp C [number (>= A A1)] E S R)
+  [prim >= | C] [number A] E [[number A1] | S] R                -> (interp C [number (>= A A1)] E S R)
   [prim > | C] [number A] E [[number A1] | S] R                 -> (interp C [number (> A A1)] E S R)
   [prim < | C] [number A] E [[number A1] | S] R                 -> (interp C [number (< A A1)] E S R)
   [prim set | C] [symbol A] E [A1 | S] R                        -> (interp C (set A A1) E S R)
 
   [prim error? | C] [error A] E S R                             -> (interp C [boolean true] E S R)
   [prim error? | C] A E S R                                     -> (interp C [boolean false] E S R)
+
+  [prim function? | C] [lambda _ _] E S R                       -> (interp C [boolean true] E S R)
+  [prim function? | C] A E S R                                  -> (interp C [boolean false] E S R)
 
   [prim - | C] [number A] E [[number A1] | S] R                 -> (interp C [number (- A A1)] E S R)
   [prim * | C] [number A] E [[number A1] | S] R                 -> (interp C [number (* A A1)] E S R)
@@ -94,7 +108,6 @@
 
   [] A E S R                                                    -> A
   _ _ _ _ _                                                     -> (simple-error "interp: unknown expression"))
-
 
 (define defun->lambda
   [defun Name [Arg] Body]        -> [lambda Arg Body]
@@ -112,8 +125,71 @@
 
 (load "primitives.shen")
 
-(set-toplevel + safe.+)
 (set-toplevel number? safe.number?)
+(set-toplevel symbol? safe.symbol?)
+(set-toplevel string? safe.string?)
+(set-toplevel boolean? safe.boolean?)
+(set-toplevel cons? safe.cons?)
+(set-toplevel simple-error safe.simple-error)
+(set-toplevel get-time safe.get-time)
+(set-toplevel close safe.close)
+(set-toplevel read-byte safe.read-byte)
+(set-toplevel tl safe.tl)
+(set-toplevel hd safe.hd)
+(set-toplevel absvector safe.absvector)
+(set-toplevel n->string safe.n->string)
+(set-toplevel string->n safe.string->n)
+(set-toplevel str safe.str)
+(set-toplevel tlstr safe.tlstr)
+(set-toplevel value safe.value)
+(set-toplevel intern safe.intern)
+(set-toplevel error-to-string safe.error-to-string)
+(set-toplevel trap-error safe.trap-error)
+(set-toplevel = safe.=)
+(set-toplevel open safe.open)
+(set-toplevel write-byte safe.write-byte)
+(set-toplevel cons safe.cons)
+(set-toplevel <-address safe.<-address)
+(set-toplevel cn safe.cn)
+(set-toplevel pos safe.pos)
+(set-toplevel <= safe.<=)
+(set-toplevel >= safe.>=)
+(set-toplevel < safe.<)
+(set-toplevel > safe.>)
+(set-toplevel set safe.set)
+(set-toplevel - safe.-)
+(set-toplevel * safe.*)
+(set-toplevel / safe./)
+(set-toplevel + safe.+)
+(set-toplevel address-> safe.address->)
+(set-toplevel eval-kl safe.eval-kl)
+
+(= [boolean true] (toplevel-interp (kl->zinc [= "X" [cn "X" ""]])))
+(= [boolean true] (toplevel-interp (kl->zinc [= "X" [cn "" "X"]])))
+(= [boolean true] (toplevel-interp (kl->zinc [= "Xx" [cn [pos "Xx" 0] [tlstr "Xx"]]])))
+(= [boolean true] (toplevel-interp (kl->zinc [= [pos "X" 0] [n->string [string->n "X"]]])))
+(= [boolean true] (toplevel-interp (kl->zinc [= [intern "X"] [intern "X"]])))
+(= [boolean true] (toplevel-interp (kl->zinc [do [set x "Y"] [= [value x] "Y"]])))
+(= [boolean true] (toplevel-interp (kl->zinc [= y [set x y]])))
+(= [boolean true] (toplevel-interp (kl->zinc [= "X" [trap-error [simple-error "X"] [lambda E [error-to-string E]]]])))
+(= [boolean true] (toplevel-interp (kl->zinc [= x [hd [cons x y]]])))
+(= [boolean true] (toplevel-interp (kl->zinc [= y [tl [cons x y]]])))
+(= [boolean true] (toplevel-interp (kl->zinc [= 3 [eval-kl [cons + [cons 1 [cons 2 []]]]]])))
+(= [boolean true] (toplevel-interp (kl->zinc [= [+ 1 2] [[+ 1] 2]])))
+(= [boolean true] (toplevel-interp (kl->zinc [boolean? true])))
+(= [boolean true] (toplevel-interp (kl->zinc [boolean? false])))
+(= [boolean true] (toplevel-interp (kl->zinc [boolean? [intern "true"]])))
+(= [boolean true] (toplevel-interp (kl->zinc [boolean? [intern "false"]])))
+
+(= [boolean false] (toplevel-interp (kl->zinc [symbol? true])))
+(= [boolean false] (toplevel-interp (kl->zinc [symbol? false])))
+(= [boolean false] (toplevel-interp (kl->zinc [symbol? [intern "true"]])))
+(= [boolean false] (toplevel-interp (kl->zinc [symbol? [intern "false"]])))
+(= [boolean false] (toplevel-interp (kl->zinc [symbol? [lambda X X]])))
+(= [boolean false] (toplevel-interp (kl->zinc [symbol? [value *stinput*]])))
+(= [boolean false] (toplevel-interp (kl->zinc [trap-error [simple-error ""] [lambda E [symbol? E]]])))
+(= [boolean false] (toplevel-interp (kl->zinc [symbol? []])))
+
 (put interp first (interp (kl->zinc [lambda X [lambda Y X]]) [] [] [] []))
 (put interp id (interp (kl->zinc [lambda X X]) [] [] [] []))
 (put interp t (interp (kl->zinc [lambda X true]) [] [] [] []))

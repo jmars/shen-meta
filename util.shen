@@ -27,6 +27,6 @@
 (define primitive?
   X -> (element? X [+ / * - trap-error simple-error error-to-string intern
                     set value number? > < >= <= string? pos tlstr cn str
-                    string->n n->string absvector address-> <-address
-                    absvector? cons? cons hd tl write-byte read-byte open
-                    close = eval-kl get-time type symbol?]))
+                    string->n n->string absvector address-> <-address emptylist
+                    absvector? cons? cons hd tl write-byte read-byte open function?
+                    close = eval-kl get-time type symbol? boolean? error? stream?]))

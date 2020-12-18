@@ -1,9 +1,9 @@
 (define primitive? { symbol --> boolean }
   X -> (element? X [+ / * - trap-error simple-error error-to-string intern
                     set value number? > < >= <= string? pos tlstr cn str
-                    string->n n->string absvector address-> <-address
-                    absvector? cons? cons hd tl write-byte read-byte open
-                    close = eval-kl get-time type symbol?]))
+                    string->n n->string absvector address-> <-address emptylist
+                    absvector? cons? cons hd tl write-byte read-byte open function?
+                    close = eval-kl get-time type symbol? boolean? error? stream?]))
 
 (datatype primitive-funcname
   if (primitive? X)
@@ -79,23 +79,3 @@
   P : primitive-funcname;
   _______________________
   [prim P] : zinc-code;)
-
-(datatype binary-code
-  X : (absvector number);
-  ___
-  X : binary-code;)
-
-(datatype binary-constants
-  X : (absvector string);
-  ___
-  X : binary-constants;)
-
-(datatype absvector
-  X : number;
-  ___
-  (absvector X) : (absvector A);
-
-  Y : number;
-  X : (absvector A);
-  ___
-  (address-> X Y Z) : (absvector A);)

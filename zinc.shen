@@ -17,6 +17,7 @@
   false        -> [boolean false]
   X            -> [number X] where (number? X)
   X            -> [string X] where (string? X)
+  []           -> []
   _            -> (simple-error "zinc-t: unknown expression"))
 
 (define zinc-c
