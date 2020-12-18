@@ -4,22 +4,55 @@
   [H | T] -> [(kmacros H) | (map-kmacros T)])
 
 (define kmacros
-  [freeze X]          -> [lambda (newvar) (kmacros X)]
-  [thaw X]            -> [(kmacros X) 0]
-  [and X Y]           -> (kmacros [if (kmacros X) (kmacros Y) false])
-  [or X Y]            -> (kmacros [if (kmacros X) true (kmacros Y)])
-  [cond [X Y] | Rest] -> (kmacros [if (kmacros X) (kmacros Y) (kmacros [cond | Rest])])
-  [cond]              -> [simple-error "No condition was true"]
-  [trap-error B E]    -> [trap-error (kmacros [lambda (newvar) (kmacros B)]) (kmacros E)]
-  [if true X Y]       -> (kmacros X)
-  [if false X Y]      -> (kmacros Y)
-  [do X]              -> (kmacros X)
-  [do X | Y]          -> (kmacros [let (newvar) (kmacros X) (kmacros [do | Y])])
-  [X]                 -> [X 0]
-  [X Y]               -> [(kmacros X) (kmacros Y)]
-  [X | Y]             -> [(kmacros X) | (map-kmacros Y)]
-  []                  -> [%% emptylist 0]
-  X                   -> X)
+  [freeze X]                                   -> [lambda (newvar) (kmacros X)]
+  [thaw X]                                     -> [(kmacros X) 0]
+  [and X Y]                                    -> (kmacros [if (kmacros X) (kmacros Y) false])
+  [or X Y]                                     -> (kmacros [if (kmacros X) true (kmacros Y)])
+  [cond [X Y] | Rest]                          -> (kmacros [if (kmacros X) (kmacros Y) (kmacros [cond | Rest])])
+  [cond]                                       -> [simple-error "No condition was true"]
+  [trap-error B E]                             -> [trap-error (kmacros [lambda (newvar) (kmacros B)]) (kmacros E)]
+  [if true X Y]                                -> (kmacros X)
+  [if false X Y]                               -> (kmacros Y)
+  [do X]                                       -> (kmacros X)
+  [do X | Y]                                   -> (kmacros [let (newvar) (kmacros X) (kmacros [do | Y])])
+  [number? [type X number]]                    -> true
+  [symbol? [type X symbol]]                    -> true
+  [string? [type X string]]                    -> true
+  [boolean? [type X boolean]]                  -> true
+  [cons? [type X [list _]]]                    -> true
+  [simple-error [type X string]]               -> [%% simple-error X]
+  [get-time [type unix symbol]]                -> [%% get-time unix]
+  [get-time [type run symbol]]                 -> [%% get-time run]
+  [close [type X stream]]                      -> [%% close X]
+  [read-byte [type X stream]]                  -> [%% read-byte X]
+  [absvector [type X number]]                  -> [%% absvector X]
+  [n->string [type X number]]                  -> [%% n->string X]
+  [string->n [type X string]]                  -> [%% string->n X]
+  [value [type X symbol]]                      -> [%% value X]
+  [intern [type "true" string]]                -> true
+  [intern [type "false" string]]               -> false
+  [intern [type X string]]                     -> [%% intern X]
+  [error-to-string [type X exception]]         -> [%% error-to-string X]
+  [open [type X string] [type in symbol]]      -> [%% open X in]
+  [open [type X string] [type out symbol]]     -> [%% open X in]
+  [write-byte [type N number] [type S stream]] -> [%% write-byte N S]
+  [cn [type S string] [type S1 string]]        -> [%% cn S S1]
+  [pos [type S string] [type N number]]        -> [%% pos S N]
+  [<= [type N number] [type N1 number]]        -> [%% <= N N1]
+  [>= [type N number] [type N1 number]]        -> [%% >= N N1]
+  [< [type N number] [type N1 number]]         -> [%% < N N1]
+  [> [type N number] [type N1 number]]         -> [%% > N N1]
+  [set [type S symbol] Y]                      -> [%% set S Y]
+  [- [type N number] [type N1 number]]         -> [%% - N N1]
+  [* [type N number] [type N1 number]]         -> [%% * N N1]
+  [/ [type N number] [type N1 number]]         -> [%% / N N1]
+  [+ [type N number] [type N1 number]]         -> [%% + N N1]
+  [type X Y]                                   -> X
+  [X]                                          -> [X 0]
+  [X Y]                                        -> [(kmacros X) (kmacros Y)]
+  [X | Y]                                      -> [(kmacros X) | (map-kmacros Y)]
+  []                                           -> [%% emptylist 0]
+  X                                            -> X)
 
 \* http://matt.might.net/articles/a-normalization/ *\
 (define atomic?

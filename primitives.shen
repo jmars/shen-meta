@@ -61,8 +61,9 @@
   S -> (%% str S))
 
 (define safe.tlstr
-  S -> (%% tlstr S) where (string? S)
-  _ -> (simple-error "tlstr: arg must be a string"))
+  "" -> (simple-error "tlstr: empty string")
+  S  -> (%% tlstr S) where (string? S)
+  _  -> (simple-error "tlstr: arg must be a string"))
 
 (define safe.value
   S -> (%% value S) where (symbol? S)

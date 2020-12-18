@@ -79,7 +79,6 @@
   [prim simple-error | C] [string A] E S R                      -> (simple-error A)
   [prim trap-error | C] [lambda C1 E1] E S R                    -> (interp C (trap-error (interp C1 [lambda C1 E1] E1 S R) (/. Err [error Err])) E S R)
 
-  [prim type | C] A E [A1 | S] R                                -> (interp C A E S R)
   [prim = | C] A E [A1 | S] R                                   -> (interp C [boolean (= A A1)] E S R)
   [prim open | C] [string A] E [[symbol A1] | S] R              -> (interp C [stream (open A A1)] E S R)
   [prim write-byte | C] [number A] E [[stream A1] | S] R        -> (interp C [number (write-byte A A1)] E S R)
@@ -123,6 +122,8 @@
 
 (define set-toplevel
   N X -> (put interp N (toplevel-interp (zinc-c (debruijn [] (normalize-term (kmacros (defun->lambda (ps X)))))))))
+
+(optimise +)
 
 (load "primitives.shen")
 
