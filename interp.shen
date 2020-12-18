@@ -57,7 +57,7 @@
 
   [prim eval-kl | C] A E S R                                    -> (interp C (toplevel-interp (kl->zinc (extract-kl A))) E S R)
 
-  [prim close | C] [stream A] E S R                             -> (interp C (do (close A) [number 0]) E S R)
+  [prim close | C] [stream A] E S R                             -> (interp C (do (close A) [cons]) E S R)
   [prim read-byte | C] [stream A] E S R                         -> (interp C [number (read-byte A)] E S R)
   [prim tl | C] [cons _ A] E S R                                -> (interp C A E S R)
   [prim hd | C] [cons A _] E S R                                -> (interp C A E S R)
