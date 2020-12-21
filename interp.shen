@@ -51,14 +51,14 @@
   [prim symbol? | C] A E S R                                    -> (interp C [boolean false] E S R)
   [prim boolean? | C] [boolean _] E S R                         -> (interp C [boolean true] E S R)
   [prim boolean? | C] A E S R                                   -> (interp C [boolean false] E S R)
-  [prim stream? | C] [stream _] E S R                           -> (interp C [boolean true] E S R)
+  [prim stream? | C] [stream _ _] E S R                         -> (interp C [boolean true] E S R)
   [prim stream? | C] A E S R                                    -> (interp C [boolean false] E S R)
   [prim get-time | C] [symbol A] E S R                          -> (interp C [number (get-time A)] E S R)
 
   [prim eval-kl | C] A E S R                                    -> (interp C (toplevel-interp (kl->zinc (extract-kl A))) E S R)
 
-  [prim close | C] [stream A] E S R                             -> (interp C (do (close A) [cons]) E S R)
-  [prim read-byte | C] [stream A] E S R                         -> (interp C [number (read-byte A)] E S R)
+  [prim close | C] [stream _ A] E S R                           -> (interp C (do (close A) [cons]) E S R)
+  [prim read-byte | C] [stream in A] E S R                      -> (interp C [number (read-byte A)] E S R)
   [prim tl | C] [cons _ A] E S R                                -> (interp C A E S R)
   [prim hd | C] [cons A _] E S R                                -> (interp C A E S R)
   [prim cons? | C] [cons _ _] E S R                             -> (interp C [boolean true] E S R)
@@ -80,8 +80,9 @@
   [prim trap-error | C] [lambda C1 E1] E S R                    -> (interp C (trap-error (interp C1 [lambda C1 E1] E1 S R) (/. Err [error Err])) E S R)
 
   [prim = | C] A E [A1 | S] R                                   -> (interp C [boolean (= A A1)] E S R)
-  [prim open | C] [string A] E [[symbol A1] | S] R              -> (interp C [stream (open A A1)] E S R)
-  [prim write-byte | C] [number A] E [[stream A1] | S] R        -> (interp C [number (write-byte A A1)] E S R)
+  [prim open | C] [string A] E [[symbol in] | S] R              -> (interp C [stream in (open A in)] E S R)
+  [prim open | C] [string A] E [[symbol out] | S] R             -> (interp C [stream out (open A out)] E S R)
+  [prim write-byte | C] [number A] E [[stream out A1] | S] R    -> (interp C [number (write-byte A A1)] E S R)
   [prim cons | C] A E [A1 | S] R                                -> (interp C [cons A A1] E S R)
   [prim <-address | C] [absvector A] E [[number A1] | S] R      -> (interp C (<-address A A1) E S R)
   [prim cn | C] [string A] E [[string A1] | S] R                -> (interp C [string (cn A A1)] E S R)
@@ -103,7 +104,7 @@
   [prim / | C] [number A] E [[number A1] | S] R                 -> (interp C [number (/ A A1)] E S R)
   [prim + | C] [number A] E [[number A1] | S] R                 -> (interp C [number (+ A A1)] E S R)
 
-  [prim address-> | C] [absvector A] E [[number A1] A2 | S] R   -> (interp C [absvector A A1 A2] E S R)
+  [prim address-> | C] [absvector A] E [[number A1] A2 | S] R   -> (interp C [absvector (address-> A A1 A2)] E S R)
 
   [] A E S R                                                    -> A
   _ _ _ _ _                                                     -> (simple-error "interp: unknown expression"))
