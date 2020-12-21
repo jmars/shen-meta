@@ -89,6 +89,17 @@
   ___
   (absvector N) : absvector;
 
+  A : absvector;
+  A1 : number;
+  ___
+  (<-address A A1) : zinc-value;
+
+  A : absvector;
+  A1 : number;
+  A2 : zinc-value;
+  ___
+  [absvector (address-> A A1 A2)] : zinc-value;
+
   X : absvector;
   ===
   [absvector X] : zinc-value;

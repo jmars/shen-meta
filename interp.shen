@@ -84,10 +84,10 @@
   [prim <-address | C] [absvector A] E [[number A1] | S] R      -> (interp C (<-address A A1) E S R)
   [prim cn | C] [string A] E [[string A1] | S] R                -> (interp C [string (cn A A1)] E S R)
   [prim pos | C] [string A] E [[number A1] | S] R               -> (interp C [string (pos A A1)] E S R)
-  [prim <= | C] [number A] E [[number A1] | S] R                -> (interp C [number (<= A A1)] E S R)
-  [prim >= | C] [number A] E [[number A1] | S] R                -> (interp C [number (>= A A1)] E S R)
-  [prim > | C] [number A] E [[number A1] | S] R                 -> (interp C [number (> A A1)] E S R)
-  [prim < | C] [number A] E [[number A1] | S] R                 -> (interp C [number (< A A1)] E S R)
+  [prim <= | C] [number A] E [[number A1] | S] R                -> (interp C [boolean (<= A A1)] E S R)
+  [prim >= | C] [number A] E [[number A1] | S] R                -> (interp C [boolean (>= A A1)] E S R)
+  [prim > | C] [number A] E [[number A1] | S] R                 -> (interp C [boolean (> A A1)] E S R)
+  [prim < | C] [number A] E [[number A1] | S] R                 -> (interp C [boolean (< A A1)] E S R)
   [prim set | C] [symbol A] E [A1 | S] R                        -> (interp C (set A A1) E S R)
   [prim error? | C] [error A] E S R                             -> (interp C [boolean true] E S R)
   [prim error? | C] A E S R                                     -> (interp C [boolean false] E S R)
@@ -108,16 +108,19 @@
   _                              -> (simple-error "defun->lambda: invalid arg"))
 
 (define toplevel-interp { zinc-code --> zinc-value }
-  X -> (interp X [] [] [] []))
+  X -> (interp X [cons] [] [] []))
 
 (define kl->zinc { klambda --> zinc-code }
   X -> (zinc-c (debruijn [] (normalize-term (kmacros X)))))
 
-(define set-toplevel { symbol --> unit }
-  N X -> (put interp N (toplevel-interp (zinc-c (debruijn [] (normalize-term (kmacros (defun->lambda (ps X)))))))))
+(define set-toplevel { symbol --> symbol --> symbol }
+  N X -> (do
+    (put interp N (toplevel-interp (zinc-c (debruijn [] (normalize-term (kmacros (defun->lambda (ps X))))))))
+    N))
 
 (optimise +)
 
+(tc -)
 (load "primitives.shen")
 
 (set-toplevel number? safe.number?)
