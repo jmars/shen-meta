@@ -122,6 +122,7 @@
 
 (tc -)
 (load "primitives.shen")
+(tc +)
 
 (set-toplevel number? safe.number?)
 (set-toplevel symbol? safe.symbol?)
