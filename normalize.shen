@@ -69,13 +69,20 @@
 (define normalize-term { klambda --> klambda } Exp -> (normalize Exp (function id)))
 
 (define normalize { klambda --> (klambda --> klambda) --> klambda }
+  \* Shen 41.2: [[fn %%] X] -> bare %% call (no args) *\
+  [[fn %%] X] K          -> (K [%% X]) where (symbol? X)
+  \* Shen 41.2: [[[fn %%] X] | Args] -> %% call with args. 
+     Must be BEFORE [F | E] to intercept the full expression before it's split *\
+  [[[fn %%] X] | Args] K -> (normalize-names Args (/. A (K [%% X | A]))) where (symbol? X)
+  \* Shen 41.2: [fn X] -> function reference *\
+  [fn X] K               -> (K [function X]) where (symbol? X)
   [lambda Param Body] K -> (K [lambda Param (normalize-term Body)])
   [let V X Y] K         -> (normalize X (/. Aexp
                              [let V Aexp (normalize Y K)]))
   [if X Y Z] K          -> (normalize-name X (/. T
                              (K [if T (normalize-term Y) (normalize-term Z)])))
   [set S E] K           -> (normalize-name E (/. T
-                             [let (newvar) [set S T] (K [])]))
+                             [let (newvar) [set S T] (K T)]))
   [F | E] K             -> (normalize-name F (/. T
                              (normalize-names E (/. Ts
                                (K [T | Ts])))))
@@ -84,8 +91,10 @@
 (define normalize-name { klambda --> (klambda --> klambda) --> klambda }
   E K -> (normalize E (/. Aexp
            (if (atomic? Aexp) (K Aexp)
-             (let T (newvar)
-               [let T Aexp (K T)])))))
+             (if (and (cons? Aexp) (symbol? (hd Aexp)))
+                 (K Aexp)
+                 (let T (newvar)
+                   [let T Aexp (K T)]))))))
 
 (define normalize-names { klambda --> (klambda --> klambda) --> klambda }
   Exps K -> (if (empty? Exps)
@@ -104,10 +113,11 @@
   Scope [if X Y Z]   -> [if (debruijn Scope X) (debruijn Scope Y) (debruijn Scope Z)]
   Scope [%% X Y]     <- (if (primitive? X) [X (debruijn Scope Y)] (fail)) where (symbol? X)
   Scope [%% X | Y]   <- (if (primitive? X) [X | (map-debruijn Scope Y)] (fail)) where (symbol? X)
+
   Scope [X Y]        <- (if (not (element? X Scope)) [[function X] (debruijn Scope Y)] (fail)) where (symbol? X)
   Scope [X | Y]      <- (if (not (element? X Scope)) [[function X] | (map-debruijn Scope Y)] (fail)) where (symbol? X)
   Scope [X Y]        -> [(debruijn Scope X) (debruijn Scope Y)]
   Scope [X | Y]      -> [(debruijn Scope X) | (map-debruijn Scope Y)]
-  Scope X            <- (if (element? X Scope) [lookup (index X Scope)] (fail)) where (variable? X)
+  Scope X            <- (if (element? X Scope) [lookup (idx X Scope)] (fail)) where (variable? X)
   Scope X            <- (if (and (not (variable? X)) (symbol? X) (not (element? X Scope))) [symbol X] (fail))
   Scope X            -> X)

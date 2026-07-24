@@ -9,7 +9,7 @@
   X [_ | Rest] C -> (index_h X Rest (+ 1 C))
   _ _ _          -> -1)
 
-(define index { A --> (list A) --> number }
+(define idx { A --> (list A) --> number }
   X L -> (index_h X L 0))
 
 (define intersperse { A --> (list A) --> (list A) }
