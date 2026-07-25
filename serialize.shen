@@ -20,6 +20,11 @@
 (interp-load "/home/arch/github/shen-scheme/kl/sequent.kl")
 (interp-load "/home/arch/github/shen-scheme/kl/t-star.kl")
 (interp-load "/home/arch/github/shen-scheme/kl/overrides.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/extension-expand-dynamic.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/extension-features.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/extension-launcher.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/extension-programmable-pattern-matching.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/shen-scheme-extensions.kl")
 
 (define entry-str
   [N [lambda Code []]] -> (cn (cn (cn (cn "(" (csexp-atom N)) " ")
