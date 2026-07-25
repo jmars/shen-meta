@@ -52,6 +52,4 @@ Example: `(+ 1 2)` → `(mn[1:n]2un[1:n]1ug[1:s]+p)`
 
 ## Credits
 
-ZINC abstract machine: Xavier Leroy (INRIA).  
-Original Shen 22.2 interpreter and native compiler by the repo author.  
-Shen 41.2 port, C VM, and pipeline by the repo author.
+ZINC abstract machine: Xavier Leroy (INRIA).
