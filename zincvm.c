@@ -840,14 +840,22 @@ static Value vm_exec(Instr *code, int code_len) {
             acc = val_lambda(in->closure_code, in->closure_len, ec, ecl); free(ec); pc++; break;
         }
         case OP_APPTERM: {
-            if (acc.tag != VAL_LAMBDA) { fprintf(stderr, "runtime: appterm non-lambda\n"); goto done; }
-            if (stack.len <= 0) { fprintf(stderr, "runtime: appterm empty stack\n"); goto done; }
-            Value v = va_pop(&stack);
-            cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
-            Value *ne = malloc((acc.lambda.env_len + 1) * sizeof(Value));
-            ne[0] = v; memcpy(ne + 1, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
-            free(env); env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
-            pc = 0; break;
+            if (acc.tag == VAL_LAMBDA) {
+                if (stack.len <= 0) { fprintf(stderr, "runtime: appterm empty stack\n"); goto done; }
+                Value v = va_pop(&stack);
+                cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
+                Value *ne = malloc((acc.lambda.env_len + 1) * sizeof(Value));
+                ne[0] = v; memcpy(ne + 1, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
+                free(env); env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
+                pc = 0; break;
+            } else if (acc.tag == VAL_PRIM) {
+                if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) va_pop(&stack);
+                const char *pn = acc.prim.name;
+                if (exec_primitive(pn, &acc, &stack) < 0) goto done;
+                pc++; break;
+            } else {
+                fprintf(stderr, "runtime: appterm non-lambda\n"); goto done;
+            }
         }
         default: fprintf(stderr, "runtime: unknown op '%c' at pc=%d\n", in->op, pc); goto done;
         }
