@@ -761,13 +761,12 @@ static Value vm_exec(Instr *code, int code_len) {
         case OP_NUMBER: case OP_STRING: case OP_SYMBOL: case OP_BOOLEAN:
             acc = in->operand; pc++; break;
         case OP_PRIM: {
+            /* ZINC [prim X] executes primitive X with args from stack + acc.
+               Push acc so binary primitives find both args on the stack. */
             const char *pn = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
-            /* Push acc so both args are on stack for binary primitives */
             va_push(&stack, acc);
             if (exec_primitive(pn, &acc, &stack) < 0) goto done;
             pc++;
-            /* If next instruction is apply, skip it — prim already executed */
-            if (pc < cur_len && cur_code[pc].op == OP_APPLY) pc++;
             break;
         }
         case OP_PUSHMARK: va_push(&stack, val_mark()); pc++; break;

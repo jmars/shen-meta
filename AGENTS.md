@@ -41,8 +41,22 @@ Key files:
 - Opcodes are single chars: `m` pushmark, `p` apply, `u` push, `r` grab, `v` return, etc.
 - `global` loads from table then falls back to `val_prim(name)`
 - Primitives dispatch via `exec_primitive()` — apply-mode pops mark + args from stack
-- Inline `OP_PRIM` pushes acc before calling exec_primitive, skips trailing `p`
+- Inline `OP_PRIM` (`P`) executes primitive with args from stack + accumulator (ZINC semantics)
 - `trap-error`/`simple-error` use `setjmp`/`longjmp`
+
+## Pipeline gotchas
+
+- `%%` compiles to `[prim X]` in ZINC; normalize must flatten curried `%%` calls
+  via `flatten-%%app` or you get spurious `apply` after `prim` instructions
+- `instr-count` and `label-positions` must handle opcodes with operands explicitly
+  (`access _`, `global _`, `jmpf _`, `jmp _`, `number _`, `string _`, `symbol _`,
+  `boolean _`, `prim _`) — catch-all `[_ | C]` counts operand atoms as separate
+  instructions, inflating jump targets
+- `cur` is 1 instruction in csexp stream, not `1 + body_size`
+- `parse_bundle` must unwrap `OP_CUR` to get closure body — the `c(...)` wrapper
+  is a single instruction whose operand is the closure's code array
+- `ps` returns KLambda; unary primitives like `number?` lack `%%` wrapping in
+  Shen 41.2 — normalize/debruijn need to handle bare primitives for inline `prim`
 
 ## Commit style
 
