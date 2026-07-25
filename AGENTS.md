@@ -58,6 +58,38 @@ Key files:
 - `ps` returns KLambda; unary primitives like `number?` lack `%%` wrapping in
   Shen 41.2 — normalize/debruijn need to handle bare primitives for inline `prim`
 
+## Eval/load & serialization
+
+- `interp-eval` in `toplevel.shen` compiles `defun` forms and stores closures in
+  `global-table` via `defun->lambda → kl->zinc → toplevel-interp`
+- `interp-load` in `load.shen` reads a file with `read-file`, feeds each `defun`
+  through `interp-eval`; errors in individual forms are caught and skipped
+- `serialize.shen` loads `interp.shen`, calls `interp-load` on `.kl` files to
+  populate `global-table`, then walks the table and serializes all closures
+- Output goes to file via `open`/`pr`/`close` — `print` wraps long lines
+  and `grep '^"'` truncates multi-line bundles
+- `pr` writes raw string to a stream; `(stoutput)` is stdout
+- 95 closures currently serialized: 38 safe wrappers + 57 from `core.kl`
+- 8 of 65 `core.kl` defuns still fail (nested `lambda`, missing `shen.*` deps)
+
+## KLambda primitives (added to `primitive?` + `interp` handlers)
+
+- `@p` — tuple constructor, stored as cons cell `[cons A B]`
+- `fst`/`snd` — tuple accessors, aliases for `hd`/`tl`
+- `gensym` — fresh symbol generation
+- `variable?` — predicate for KLambda variable symbols
+
+## Shen pitfalls
+
+- **`let` does not work with `tc -`** in Shen 41.2 — use `do` blocks or
+  `set`/`value` global variables instead. This affects all code loaded after
+  `(tc -)` including `toplevel.shen`, `load.shen`, and `serialize.shen`.
+- `type` signatures in `define` ARE accepted with `tc -` (just not checked)
+- `read-file` returns a list of parsed s-expressions from a file — works for
+  both `.shen` and `.kl` files
+- `.kl` files use raw KLambda constructs: `defun`, `lambda`, `let`, `cond`,
+  `@p`, `where`, `freeze`, `thaw`, `cons?`, `=`, `if`, etc.
+
 ## Commit style
 
 - Conventional commits: `feat:`, `fix:`, `chore:`
