@@ -762,8 +762,13 @@ static Value vm_exec(Instr *code, int code_len) {
             acc = in->operand; pc++; break;
         case OP_PRIM: {
             const char *pn = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
+            /* Push acc so both args are on stack for binary primitives */
+            va_push(&stack, acc);
             if (exec_primitive(pn, &acc, &stack) < 0) goto done;
-            pc++; break;
+            pc++;
+            /* If next instruction is apply, skip it — prim already executed */
+            if (pc < cur_len && cur_code[pc].op == OP_APPLY) pc++;
+            break;
         }
         case OP_PUSHMARK: va_push(&stack, val_mark()); pc++; break;
         case OP_PUSH: va_push(&stack, acc); pc++; break;
@@ -924,14 +929,114 @@ static void init_globals(void) {
     for (int i = 0; prims[i]; i++) global_set(prims[i], val_prim(prims[i]));
 }
 
+/* ------------------------------------------------------------------ */
+/*  Bundle parser: load serialized closures into global table          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Parse a bundle: ((name1 code1) (name2 code2) ...)
+ * Each entry: (name_csexp code_csexp)
+ *   where name_csexp is a csexp atom and code_csexp is a csexp list
+ * Returns number of entries loaded (0 on error).
+ */
+static int parse_bundle(const char *str) {
+    ParseState ps;
+    ps.p = str; ps.start = str;
+
+    if (setjmp(parse_err_jmp)) {
+        fprintf(stderr, "%s\n", parse_err_msg);
+        return 0;
+    }
+
+    skip_ws(&ps);
+    if (*ps.p != '(') {
+        fprintf(stderr, "bundle error: expected outer '('\n");
+        return 0;
+    }
+    ps.p++; /* skip '(' */
+
+    int count = 0;
+    while (1) {
+        skip_ws(&ps);
+        if (*ps.p == ')') { ps.p++; break; } /* end of bundle */
+        if (*ps.p != '(') {
+            fprintf(stderr, "bundle error: expected '(' for entry\n");
+            return count;
+        }
+        ps.p++; /* skip '(' */
+
+        /* Parse name atom */
+        Value name_val = parse_csexp_atom(&ps);
+        if (name_val.tag != VAL_SYMBOL) {
+            fprintf(stderr, "bundle error: name must be a symbol\n");
+            return count;
+        }
+        const char *name = name_val.sym.name;
+        /* Keep full safe.* name -- primitives stay under short names */
+        const char *key = name;
+
+
+        /* Parse code list */
+        Instr *code = NULL;
+        int code_len = parse_csexp_list(&ps, &code);
+        if (code_len <= 0 || code == NULL) {
+            fprintf(stderr, "bundle error: failed to parse code for '%s'\n", name);
+            return count;
+        }
+
+        /* Resolve jumps in the code */
+        resolve_jumps(code, code_len);
+
+        /* Create a closure from the code (empty env) and store in globals */
+        Value closure = val_lambda(code, code_len, NULL, 0);
+        global_set(key, closure);
+
+        /* Consume closing ')' of entry */
+        skip_ws(&ps);
+        if (*ps.p != ')') {
+            fprintf(stderr, "bundle error: expected ')' to close entry '%s'\n", name);
+            return count;
+        }
+        ps.p++;
+
+        count++;
+    }
+
+    return count;
+}
+
 int main(int argc, char **argv) {
     init_globals();
     if (argc > 1) {
         char *buf = read_file_or_stdin(argv[1]);
         if (!buf) return 1;
         char *p = buf; while (*p && isspace((unsigned char)*p)) p++;
-        if (*p) run_test(argv[1], p, 0); else printf("(empty file)\n");
-        free(buf); return 0;
+
+        /* Detect: if the second char (after '(') is '(' it's a bundle */
+        if (*p == '(' && *(p+1) == '(') {
+            /* Bundle format: ((name code) (name code) ...) */
+            int n = parse_bundle(p);
+            printf("Loaded %d closures into global table\n\n", n);
+            free(buf);
+            /* If second arg, run it as bytecode; otherwise run a test */
+            if (argc > 2) {
+                char *b2 = read_file_or_stdin(argv[2]);
+                if (b2) {
+                    char *q = b2; while (*q && isspace((unsigned char)*q)) q++;
+                    if (*q) run_test(argv[2], q, 0);
+                    free(b2);
+                }
+            } else {
+                /* Run a quick test: (+ 1 2) using the loaded globals */
+                printf("--- Quick test: (+ 1 2) ---\n");
+                run_test("test", "(mn[1:n]2un[1:n]1ug[1:s]+p)", 1);
+            }
+        } else {
+            /* Single bytecode list */
+            if (*p) run_test(argv[1], p, 0); else printf("(empty file)\n");
+            free(buf);
+        }
+        return 0;
     }
 
     printf("=== ZINC Bytecode VM with 37 Primitives ===\n\n");
