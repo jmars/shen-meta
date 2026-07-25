@@ -2,17 +2,35 @@
 
 \* Count instructions in flat code, skipping labels *\
 (define instr-count { zinc-code --> number }
-  [cur C1 | C]  -> (+ 1 (instr-count C1) (instr-count C))
-  [label _ | C] -> (instr-count C)
-  [_ | C]       -> (+ 1 (instr-count C))
-  []            -> 0)
+  [cur C1 | C]    -> (+ 1 (instr-count C))
+  [label _ | C]   -> (instr-count C)
+  [access _ | C]  -> (+ 1 (instr-count C))
+  [global _ | C]  -> (+ 1 (instr-count C))
+  [jmpf _ | C]    -> (+ 1 (instr-count C))
+  [jmp _ | C]     -> (+ 1 (instr-count C))
+  [number _ | C]  -> (+ 1 (instr-count C))
+  [string _ | C]  -> (+ 1 (instr-count C))
+  [symbol _ | C]  -> (+ 1 (instr-count C))
+  [boolean _ | C] -> (+ 1 (instr-count C))
+  [prim _ | C]    -> (+ 1 (instr-count C))
+  [_ | C]         -> (+ 1 (instr-count C))
+  []              -> 0)
 
 \* First pass: build label -> position map *\
 (define label-positions { zinc-code --> number --> (list (list symbol number)) --> (list (list symbol number)) }
-  [label L | C]  N Acc -> (label-positions C N (cons [L N] Acc))
-  [cur C1 | C]   N Acc -> (label-positions C (+ N 1 (instr-count C1)) (label-positions C1 0 Acc))  \* cur takes 1 slot + recurse into body *\
-  [_ | C]        N Acc -> (label-positions C (+ 1 N) Acc)
-  []             _ Acc -> Acc)
+  [label L | C]   N Acc -> (label-positions C N (cons [L N] Acc))
+  [cur C1 | C]    N Acc -> (label-positions C (+ N 1) (label-positions C1 0 Acc))
+  [access _ | C]  N Acc -> (label-positions C (+ 1 N) Acc)
+  [global _ | C]  N Acc -> (label-positions C (+ 1 N) Acc)
+  [jmpf _ | C]    N Acc -> (label-positions C (+ 1 N) Acc)
+  [jmp _ | C]     N Acc -> (label-positions C (+ 1 N) Acc)
+  [number _ | C]  N Acc -> (label-positions C (+ 1 N) Acc)
+  [string _ | C]  N Acc -> (label-positions C (+ 1 N) Acc)
+  [symbol _ | C]  N Acc -> (label-positions C (+ 1 N) Acc)
+  [boolean _ | C] N Acc -> (label-positions C (+ 1 N) Acc)
+  [prim _ | C]    N Acc -> (label-positions C (+ 1 N) Acc)
+  [_ | C]         N Acc -> (label-positions C (+ 1 N) Acc)
+  []              _ Acc -> Acc)
 
 (define resolve-label { symbol --> (list (list symbol number)) --> number }
   L Labels -> (let P (assoc L Labels)

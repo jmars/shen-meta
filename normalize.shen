@@ -68,6 +68,11 @@
 
 (define normalize-term { klambda --> klambda } Exp -> (normalize Exp (function id)))
 
+(define flatten-%%app { klambda --> (list klambda) --> klambda }
+  T Ts -> (if (and (cons? T) (= (hd T) %%))
+              [%% | (append (tl T) Ts)]
+              [T | Ts]))
+
 (define normalize { klambda --> (klambda --> klambda) --> klambda }
   \* Shen 41.2: [[fn %%] X] -> bare %% call (no args) *\
   [[fn %%] X] K          -> (K [%% X]) where (symbol? X)
@@ -85,7 +90,7 @@
                              [let (newvar) [set S T] (K T)]))
   [F | E] K             -> (normalize-name F (/. T
                              (normalize-names E (/. Ts
-                               (K [T | Ts])))))
+                               (K (flatten-%%app T Ts))))))
   X K                   -> (K X) where (atomic? X))
 
 (define normalize-name { klambda --> (klambda --> klambda) --> klambda }

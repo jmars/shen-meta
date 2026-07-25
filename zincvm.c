@@ -976,7 +976,7 @@ static int parse_bundle(const char *str) {
         const char *key = name;
 
 
-        /* Parse code list */
+        /* Parse code list (a cur wrapping the closure body) */
         Instr *code = NULL;
         int code_len = parse_csexp_list(&ps, &code);
         if (code_len <= 0 || code == NULL) {
@@ -984,12 +984,22 @@ static int parse_bundle(const char *str) {
             return count;
         }
 
-        /* Resolve jumps in the code */
-        resolve_jumps(code, code_len);
+        /* Unwrap the outer cur: use its closure_code as the lambda body */
+        if (code_len < 1 || code[0].op != OP_CUR || code[0].closure_code == NULL) {
+            fprintf(stderr, "bundle error: expected cur wrapper for '%s'\n", name);
+            free(code);
+            return count;
+        }
+        Instr *body_code = code[0].closure_code;
+        int body_len = code[0].closure_len;
 
-        /* Create a closure from the code (empty env) and store in globals */
-        Value closure = val_lambda(code, code_len, NULL, 0);
+        /* Resolve jumps in the body */
+        resolve_jumps(body_code, body_len);
+
+        /* Create a closure from the body code (empty env) and store in globals */
+        Value closure = val_lambda(body_code, body_len, NULL, 0);
         global_set(key, closure);
+        free(code);
 
         /* Consume closing ')' of entry */
         skip_ws(&ps);
