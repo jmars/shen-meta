@@ -282,6 +282,10 @@ static Value vm_exec(Instr *code, int code_len);
 /* ------------------------------------------------------------------ */
 
 static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
+    /* Strip "raw." prefix so raw.open, raw.close etc. dispatch to the
+       C primitive even when the short name is shadowed by a safe wrapper
+       closure in the global table. */
+    if (strncmp(name, "raw.", 4) == 0) name += 4;
     /* --- Type predicates --- */
     if (strcmp(name, "symbol?") == 0) {
         Value a = va_pop(stack); *acc = val_boolean(a.tag == VAL_SYMBOL); return 0;
@@ -944,6 +948,22 @@ static void init_globals(void) {
         "set","get-time","read-file-as-string","vm.read-file", NULL
     };
     for (int i = 0; prims[i]; i++) global_set(prims[i], val_prim(prims[i]));
+
+    /* Register raw.X aliases for primitives that will be overwritten by
+       safe wrapper closures in parse_bundle.  Bytecode that needs the
+       unchecked C primitive uses raw.X; %% escapes inside safe wrappers
+       use OP_PRIM -> exec_primitive and bypass the global table. */
+    const char *raw_prims[] = {
+        "raw.+","raw.-","raw.*","raw./","raw.=","raw.<","raw.>","raw.>=","raw.<=",
+        "raw.cons","raw.hd","raw.tl","raw.cn",
+        "raw.symbol?","raw.boolean?","raw.number?","raw.string?","raw.cons?",
+        "raw.simple-error","raw.trap-error","raw.error-to-string",
+        "raw.eval-kl","raw.absvector","raw.<-address","raw.address->",
+        "raw.n->string","raw.string->n","raw.str","raw.tlstr","raw.pos",
+        "raw.intern","raw.value","raw.open","raw.close","raw.read-byte","raw.write-byte",
+        "raw.set","raw.get-time", NULL
+    };
+    for (int i = 0; raw_prims[i]; i++) global_set(raw_prims[i], val_prim(raw_prims[i]));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1084,8 +1104,15 @@ int main(int argc, char **argv) {
                 run_test("factorial",
                          "(mn[1:n]5ug[9:s]factorialp)", 0);
 
+                /* Test 4: raw.open / raw.close — prove raw primitives bypass
+                   safe wrapper shadowing, enabling read-compile-eval round-trip */
+                printf("--- Test 4: (raw.open \"Makefile\" in) -> (raw.close stream) ---\n");
+                run_test("raw-io",
+                         "(S[8:S]Makefileus[2:s]inumg[8:s]raw.openpumg[9:s]raw.closep)", 0);
+
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
+                printf("Raw primitive I/O works via raw.X namespace (bypasses safe wrappers).\n");
             }
         } else {
             /* Single bytecode list */

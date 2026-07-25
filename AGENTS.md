@@ -109,7 +109,7 @@ Key files:
 
 ## Self-hosting & C VM gotchas
 
-- `GLOBAL_TABLE_MAX` was 256 — bumped to 2048 to hold all 1189 closures
+- `GLOBAL_TABLE_MAX` was 256 — bumped to 2048 to hold all ~1200 closures
 - `global_get` falls back to `val_prim(name)` for missing names — can cause
   "unknown primitive" errors if a bundled closure overwrites a C primitive
   and then something expects the raw primitive
@@ -117,14 +117,15 @@ Key files:
   C primitives in global table since `parse_bundle` runs after `init_globals`
 - `%%` escapes compile to `[prim X]` which calls `exec_primitive` directly,
   bypassing the global table — so safe wrapper internals still work
-- Calling bundled closures from C: use `push arg, load closure, apply` for
-  lambdas (curried, single-arg); use `pushmark, push args, load prim, apply`
-  for primitives
+- **`raw.X` namespace**: All 37 primitives that get overwritten by safe wrappers
+  are also registered under `raw.X` names (e.g., `raw.open`, `raw.+`, `raw.eval-kl`).
+  `exec_primitive` strips the `raw.` prefix before dispatching. Bytecode that
+  needs the unchecked C primitive uses `raw.X` — this is how the read-compile-eval
+  round-trip can call I/O primitives directly.
 - `shen.repl`, `shen.read-evaluate-print`, `read`, `compile`, `eval-kl` are
   all in the bundle — the full Shen OS is available
-- Full read-compile-eval round-trip needs the `open` → `read` → `eval-kl`
-  chain, but `open` safe wrapper expects curried args from C side — use
-  `vm.read-file` workaround for file I/O from C VM
+- `raw.open` / `raw.close` / `raw.read-byte` / `raw.write-byte` enable I/O
+  from bytecode without hitting safe wrapper currying
 
 ## Commit style
 
