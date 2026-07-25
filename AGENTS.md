@@ -126,6 +126,21 @@ Key files:
   all in the bundle — the full Shen OS is available
 - `raw.open` / `raw.close` / `raw.read-byte` / `raw.write-byte` enable I/O
   from bytecode without hitting safe wrapper currying
+- `gensym`, `@p`, `fst`, `snd`, `variable?` — KLambda primitives added to
+  both `primitive?` (Shen side) and `exec_primitive` (C side)
+
+## ZINC argument convention
+
+- **ZINC evaluates args RIGHT-TO-LEFT**: rightmost Shen arg pushed first,
+  leftmost pushed last (on top of stack)
+- All two-arg C primitives pop `a1` (top = rightmost) then `a2` (below =
+  leftmost). E.g., `cons` does `val_cons(a1, a2)`, `-` does `a1 - a2`
+- `open` was the exception — had `dir`/`path` swapped, causing "open bad
+  types" in bundled `load`. Fixed: pop `path` first, then `dir`
+- **When writing bytecode by hand**, push args in right-to-left order:
+  `(s[2:s]in u S[8:S]Makefile u m g[8:s]raw.open p)` for `(open "Makefile" in)`
+- Built-in tests use `m` (pushmark) before args; mark ends up at stack bottom,
+  not popped by `OP_APPLY` with `VAL_PRIM` (mark must be on top to be popped)
 
 ## Commit style
 
