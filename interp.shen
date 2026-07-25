@@ -107,6 +107,12 @@
   [prim open | C] [string A] E [[symbol out] | S] R             -> (interp C [stream out (open A out)] E S R)
   [prim write-byte | C] [number A] E [[stream out A1] | S] R    -> (interp C [number (write-byte A A1)] E S R)
   [prim cons | C] A E [A1 | S] R                                -> (interp C [cons A A1] E S R)
+  [prim @p | C] A E [A1 | S] R                                  -> (interp C [cons A A1] E S R)
+  [prim fst | C] [cons A _] E S R                               -> (interp C A E S R)
+  [prim snd | C] [cons _ A] E S R                               -> (interp C A E S R)
+  [prim gensym | C] [symbol A] E S R                            -> (interp C [symbol (gensym A)] E S R)
+  [prim variable? | C] [symbol A] E S R                         -> (interp C [boolean (variable? A)] E S R)
+  [prim variable? | C] A E S R                                  -> (interp C [boolean false] E S R)
   [prim <-address | C] [absvector A] E [[number A1] | S] R      -> (interp C (<-address A A1) E S R)
 
   [prim pos | C] [string A] E [[number A1] | S] R               -> (interp C [string (pos A A1)] E S R)

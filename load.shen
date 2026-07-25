@@ -8,4 +8,7 @@
 
 (define interp-eval-all
   [] -> loaded
-  [E | Rest] -> (do (interp-eval E) (interp-eval-all Rest)))
+  [E | Rest] -> (do (interp-eval-safe E) (interp-eval-all Rest)))
+
+(define interp-eval-safe
+  E -> (trap-error (interp-eval E) (/. X X)))

@@ -14,8 +14,8 @@ test: vm
 	./zincvm
 
 bundle: serialize.shen
-	$(SHEN) script serialize.shen 2>/dev/null | grep '^"' | tr -d '"' > globals.csexp
-	@echo "Bundle written to globals.csexp ($(shell wc -c < globals.csexp 2>/dev/null || echo 0) bytes)"
+	$(SHEN) script serialize.shen 2>/dev/null
+	@echo "Bundle written to globals.csexp ($$(wc -c < globals.csexp) bytes)"
 
 run-bundle: vm bundle
 	./zincvm globals.csexp
