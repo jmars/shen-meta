@@ -48,38 +48,55 @@
   Code -> (let Labels (label-positions Code 0 [])
             (resolve-code Code Labels)))
 
-\* Convert native representation to csexp string *\
-\* The instruction stream is flat, e.g. [pushmark number 2 push ...].
-   Process it instruction-by-instruction rather than element-by-element.
-   Each instruction becomes an s-expression (op ARGS). *\
+\* Canonical s-expression encoding *\
+\* Atoms: [len:type]value where type = s(symbol), n(number), S(string), b(boolean) *\
+\* Lists: (elem1 elem2 ...) *\
+(define string-size { string --> number }
+  S -> (string-size-h S 0))
+
+(define string-size-h { string --> number --> number }
+  S N -> (if (= S "")
+            N
+            (string-size-h (tlstr S) (+ N 1))))
+
+(define csexp-atom { klambda --> string }
+  X -> (cn (cn (cn (cn "[" (str (string-size (str X)))) ":s") "]") (str X)) where (symbol? X)
+  X -> (cn (cn (cn (cn "[" (str (string-size (str X)))) ":n") "]") (str X)) where (number? X)
+  X -> (cn (cn (cn (cn "[" (str (string-size X))) ":S") "]") X) where (string? X)
+  X -> (cn (cn (cn (cn "[" (str (string-size (str X)))) ":b") "]") (str X)) where (boolean? X))
+
+(define csexp-list { (list string) --> string }
+  Strs -> (cn (cn "(" (fold-str Strs)) ")"))
+
+(define csexp-str { string --> string }
+  S -> (cn (cn (cn (cn "[" (str (string-size S))) ":S") "]") S))
+
+\* Convert compiled klambda to canonical s-expression *\
 (define nat->csexp { klambda --> string }
   [] -> "()"
   Code -> (cn "(" (csexp-body Code)))
 
 (define csexp-body { klambda --> string }
   [] -> ")"
-  [appterm | C]  -> (cn "appterm" (csexp-body C))
-  [apply | C]    -> (cn "apply" (csexp-body C))
-  [push | C]     -> (cn "push" (csexp-body C))
-  [pushmark | C] -> (cn "pushmark" (csexp-body C))
-  [grab | C]     -> (cn "grab" (csexp-body C))
-  [return | C]   -> (cn "return" (csexp-body C))
-  [letz | C]     -> (cn "let" (csexp-body C))
-  [endlet | C]   -> (cn "endlet" (csexp-body C))
-  [access N | C]  -> (cn (cn (cn "(access " (str N)) ")") (csexp-body C))  where (number? N)
-  [global G | C]  -> (cn (cn (cn "(global " (str G)) ")") (csexp-body C))  where (symbol? G)
-  [jmpf N | C]    -> (cn (cn (cn "(jmpf " (str N)) ")") (csexp-body C))    where (number? N)
-  [jmp N | C]     -> (cn (cn (cn "(jmp " (str N)) ")") (csexp-body C))     where (number? N)
-  [cur C1 | C]    -> (cn (cn (cn "(cur " (nat->csexp C1)) ")") (csexp-body C))
-  [number N | C]  -> (cn (cn (cn "(number " (str N)) ")") (csexp-body C))  where (number? N)
-  [string Ss | C] -> (cn (cn (cn "(string " (csexp-str Ss)) ")") (csexp-body C)) where (string? Ss)
-  [symbol Ss | C] -> (cn (cn (cn "(symbol " (str Ss)) ")") (csexp-body C)) where (symbol? Ss)
-  [boolean B | C] -> (cn (cn (cn "(boolean " (str B)) ")") (csexp-body C)) where (boolean? B)
-  [prim P | C]    -> (cn (cn (cn "(prim " (str P)) ")") (csexp-body C))    where (symbol? P)
+  [appterm | C]  -> (cn (csexp-atom appterm) (csexp-body C))
+  [apply | C]    -> (cn (csexp-atom apply) (csexp-body C))
+  [push | C]     -> (cn (csexp-atom push) (csexp-body C))
+  [pushmark | C] -> (cn (csexp-atom pushmark) (csexp-body C))
+  [grab | C]     -> (cn (csexp-atom grab) (csexp-body C))
+  [return | C]   -> (cn (csexp-atom return) (csexp-body C))
+  [letz | C]     -> (cn (csexp-atom letz) (csexp-body C))
+  [endlet | C]   -> (cn (csexp-atom endlet) (csexp-body C))
+  [access N | C]  -> (cn (csexp-list [(csexp-atom (intern "access")) (csexp-atom N)]) (csexp-body C)) where (number? N)
+  [global G | C]  -> (cn (csexp-list [(csexp-atom (intern "global")) (csexp-atom G)]) (csexp-body C)) where (symbol? G)
+  [jmpf N | C]    -> (cn (csexp-list [(csexp-atom (intern "jmpf")) (csexp-atom N)]) (csexp-body C)) where (number? N)
+  [jmp N | C]     -> (cn (csexp-list [(csexp-atom (intern "jmp")) (csexp-atom N)]) (csexp-body C)) where (number? N)
+  [cur C1 | C]    -> (cn (csexp-atom cur) (cn (nat->csexp C1) (csexp-body C)))
+  [number N | C]  -> (cn (csexp-list [(csexp-atom (intern "number")) (csexp-atom N)]) (csexp-body C)) where (number? N)
+  [string Ss | C] -> (cn (csexp-list [(csexp-atom (intern "string")) (csexp-str Ss)]) (csexp-body C)) where (string? Ss)
+  [symbol Ss | C] -> (cn (csexp-list [(csexp-atom (intern "symbol")) (csexp-atom Ss)]) (csexp-body C)) where (symbol? Ss)
+  [boolean B | C] -> (cn (csexp-list [(csexp-atom (intern "boolean")) (csexp-atom B)]) (csexp-body C)) where (boolean? B)
+  [prim P | C]    -> (cn (csexp-list [(csexp-atom (intern "prim")) (csexp-atom P)]) (csexp-body C)) where (symbol? P)
   [Op | _]        -> (simple-error (cn "compile: nat->csexp bad " (str Op))))
-
-(define csexp-str { string --> string }
-  S -> (cn (cn (str (strlen S)) ":S") S))
 
 (define zinc->native { zinc-code --> string }
   Code -> (nat->csexp (compile-zinc Code)))

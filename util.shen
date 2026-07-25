@@ -24,6 +24,11 @@
   A [H | T] -> (fold-append (append A H) T)
   _ _       -> (simple-error "impossible"))
 
+(define fold-str { (list string) --> string }
+  [] -> ""
+  [S] -> S
+  [S | Rest] -> (cn S (fold-str Rest)))
+
 (define primitive? { symbol --> boolean }
   X -> (element? X [+ / * - trap-error simple-error error-to-string intern
                     set value number? > < >= <= string? pos tlstr cn str
