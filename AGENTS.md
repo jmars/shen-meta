@@ -73,13 +73,20 @@ Key files:
 - Output goes to file via `open`/`pr`/`close` — `print` wraps long lines
   and `grep '^"'` truncates multi-line bundles
 - `pr` writes raw string to a stream; `(stoutput)` is stdout
-- 838 closures currently serialized: 38 safe wrappers + 800 from 22 KLambda files (449KB)
-- Only `stlib.kl` (Shen standard library, 738 lines) and `init.kl` remain
-- `stlib.kl` blocked by host reader macro chicken-and-egg: it defines vector macros
-  (`vector.vector-macros`) that both `read-file` and `read-from-string` try to expand
-  during parsing, before the macros are registered
-- Fix requires a raw s-expression parser that skips macro expansion, or
-  pre-loading `stlib.kl` through the host Shen first
+- 1220 closures serialized: 38 safe wrappers + 1182 from 24 KLambda files (1.3MB)
+- All 24 KLambda files now loaded: core through shen-scheme-extensions + stlib + init
+- `read-file-raw` in `load.shen` parses `.kl` files without macro expansion
+  using `read-file-as-string` + recursive descent with cached `strlen`
+- `interp-load-raw` wraps `read-file-raw` for files with reader macro issues
+
+## Raw s-expression parser (`load.shen`)
+
+- `read-file-raw Path` — reads file, parses all forms without macro expansion
+- Uses `(n->string N)` for all special chars (avoids Shen's `\` escape issues)
+- Shen 41.2 does NOT interpret `\n`/`\t`/`\r` in string literals — use `(n->string 10)` etc.
+- `\` in KLambda strings is literal (not escape) — `parse-string-chars` reads until `"`
+- `strlen` cached once per parse; all parsers thread `Len` parameter
+- `let` destructuring `[A B]` does NOT work with `tc -`; use `hd`/`tl` on returned pairs
 
 ## KLambda primitives (added to `primitive?` + `interp` handlers)
 

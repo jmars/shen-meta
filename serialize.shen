@@ -2,6 +2,7 @@
 (load "interp.shen")
 (tc -)
 (load "compile.shen")
+(load "load.shen")
 
 (interp-load "/home/arch/github/shen-scheme/kl/core.kl")
 (interp-load "/home/arch/github/shen-scheme/kl/declarations.kl")
@@ -25,6 +26,8 @@
 (interp-load "/home/arch/github/shen-scheme/kl/extension-launcher.kl")
 (interp-load "/home/arch/github/shen-scheme/kl/extension-programmable-pattern-matching.kl")
 (interp-load "/home/arch/github/shen-scheme/kl/shen-scheme-extensions.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/kl/stlib.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/kl/init.kl")
 
 (define entry-str
   [N [lambda Code []]] -> (cn (cn (cn (cn "(" (csexp-atom N)) " ")
