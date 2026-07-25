@@ -29,6 +29,19 @@
   [S] -> S
   [S | Rest] -> (cn S (fold-str Rest)))
 
+(define defun->lambda { klambda --> klambda }
+  [defun Name [] Body]           -> [lambda (newvar) Body]
+  [defun Name [Arg] Body]        -> [lambda Arg Body]
+  [defun Name [Arg | Args] Body] -> [lambda Arg (defun->lambda [defun Name Args Body])]
+  _                              -> (simple-error "defun->lambda: invalid arg"))
+
+(define dedupe-globals { (list (list symbol zinc-value)) --> (list (list symbol zinc-value)) }
+  [] -> []
+  [[N V] | Rest] -> (if (empty? (assoc N Rest))
+                         [[N V] | (dedupe-globals Rest)]
+                         (dedupe-globals Rest))
+  _ -> [])
+
 (define primitive? { symbol --> boolean }
   X -> (element? X [+ / * - trap-error simple-error error-to-string intern
                     set value number? > < >= <= string? pos tlstr cn str

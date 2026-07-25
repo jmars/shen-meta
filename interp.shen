@@ -87,6 +87,8 @@
   [prim cons? | C] [cons] E S R                                 -> (interp C [boolean true] E S R)
   [prim cons? | C] A E S R                                      -> (interp C [boolean false] E S R)
   [prim absvector | C] [number A] E S R                         -> (interp C [absvector (absvector A)] E S R)
+  [prim absvector? | C] [absvector _] E S R                     -> (interp C [boolean true] E S R)
+  [prim absvector? | C] A E S R                                 -> (interp C [boolean false] E S R)
   [prim n->string | C] [number A] E S R                         -> (interp C [string (n->string A)] E S R)
   [prim string->n | C] [string A] E S R                         -> (interp C [number (string->n A)] E S R)
   [prim str | C] [symbol A] E S R                               -> (interp C [string (str A)] E S R) \* TODO: other datatypes *\
@@ -126,12 +128,6 @@
   [prim P | _] _ _ _ _                                          -> (simple-error (cn "interp: unknown prim - " (str P)))
   [Op | _] _ _ _ _                                              -> (simple-error (str Op))
   _ _ _ _ _                                                     -> (simple-error "interp: unknown expression"))
-
-(define defun->lambda { klambda --> klambda }
-  [defun Name [] Body]           -> [lambda (newvar) Body]
-  [defun Name [Arg] Body]        -> [lambda Arg Body]
-  [defun Name [Arg | Args] Body] -> [lambda Arg (defun->lambda [defun Name Args Body])]
-  _                              -> (simple-error "defun->lambda: invalid arg"))
 
 (define toplevel-interp { zinc-code --> zinc-value }
   X -> (interp X [cons] [] [] []))
@@ -188,4 +184,10 @@
 (set-toplevel + safe.+)
 (set-toplevel address-> safe.address->)
 (set-toplevel eval-kl safe.eval-kl)
+
+\* Load eval/load infrastructure into the host for serialization *\
+(tc -)
+(load "toplevel.shen")
+(load "load.shen")
+(tc +)
 
