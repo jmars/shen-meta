@@ -6,9 +6,9 @@
 \* Disable type checker for loading untyped Shen 22.2 code *\
 (tc -)
 
-(load "normalize.shen")
-(load "zinc.shen")
-(load "compile.shen")
+(load "shen/normalize.shen")
+(load "shen/zinc.shen")
+(load "shen/compile.shen")
 
 (define compile-expr { klambda --> string }
   X -> (zinc->native (zinc-c (debruijn [] (normalize-term (kmacros X))))))

@@ -14,16 +14,16 @@ Shen source → kmacros → normalize → debruijn → zinc-c → csexp → C VM
 
 | Layer | File | Description |
 |---|---|---|
-| **Normalizer** | `normalize.shen` | KLambda expansion, A-normal form, debruijn indices |
-| **ZINC compiler** | `zinc.shen` | KLambda → ZINC bytecode |
-| **Meta-circular VM** | `interp.shen` | ZINC interpreter in Shen — loads, compiles, and runs Shen OS |
-| **Safe wrappers** | `primitives.shen` | Type-checked wrappers for all 37 primitives |
-| **Eval/load** | `toplevel.shen` | `interp-eval` — compiles `defun` forms through the pipeline |
-| **KLambda loader** | `load.shen` | Raw s-expression parser + `interp-load` for `.kl` files |
-| **Utilities** | `util.shen` | `defun->lambda`, `primitive?`, `dedupe-globals` |
-| **Native compiler** | `compile.shen` | ZINC → canonical s-expression bytecode |
-| **C VM** | `zincvm.c` | Native parser + VM (~1000 lines, all primitives, closures, tail calls) |
-| **Serializer** | `serialize.shen` | Compiles safe wrappers to csexp bundle for native VM |
+| **Normalizer** | `shen/normalize.shen` | KLambda expansion, A-normal form, debruijn indices |
+| **ZINC compiler** | `shen/zinc.shen` | KLambda → ZINC bytecode |
+| **Meta-circular VM** | `shen/interp.shen` | ZINC interpreter in Shen — loads, compiles, and runs Shen OS |
+| **Safe wrappers** | `shen/primitives.shen` | Type-checked wrappers for all 37 primitives |
+| **Eval/load** | `shen/toplevel.shen` | `interp-eval` — compiles `defun` forms through the pipeline |
+| **KLambda loader** | `shen/load.shen` | Raw s-expression parser + `interp-load` for `.kl` files |
+| **Utilities** | `shen/util.shen` | `defun->lambda`, `primitive?`, `dedupe-globals` |
+| **Native compiler** | `shen/compile.shen` | ZINC → canonical s-expression bytecode |
+| **C VM** | `vm/zincvm.c` | Native parser + VM (~1000 lines, all primitives, closures, tail calls) |
+| **Serializer** | `shen/serialize.shen` | Compiles safe wrappers to csexp bundle for native VM |
 
 ## Build & Run
 

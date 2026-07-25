@@ -1,8 +1,8 @@
 (tc -)
-(load "interp.shen")
+(load "shen/interp.shen")
 (tc -)
-(load "compile.shen")
-(load "load.shen")
+(load "shen/compile.shen")
+(load "shen/load.shen")
 
 (interp-load "/home/arch/github/shen-scheme/kl/core.kl")
 (interp-load "/home/arch/github/shen-scheme/kl/declarations.kl")

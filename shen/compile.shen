@@ -1,4 +1,4 @@
-(load "util.shen")
+(load "shen/util.shen")
 
 \* Count instructions in flat code, skipping labels *\
 (define instr-count { zinc-code --> number }

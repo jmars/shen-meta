@@ -1,6 +1,6 @@
 \* https://github.com/Shen-Language/wiki/wiki/KLambda#equivalent-forms *\
-(load "util.shen")
-(load "types.shen")
+(load "shen/util.shen")
+(load "shen/types.shen")
 
 (define map-kmacros { (list klambda) --> (list klambda) }
   []      -> []

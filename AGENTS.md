@@ -15,18 +15,18 @@ make bundle   # serialize all safe wrappers → globals.csexp
 Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-zinc → nat->csexp → C VM
 ```
 
-Key files:
-- `interp.shen` — meta-circular ZINC VM (loads everything)
-- `normalize.shen` — KLambda normalization + debruijn indices
-- `zinc.shen` — KLambda → ZINC bytecode compiler
-- `compile.shen` — ZINC → canonical s-expression (csexp)
-- `primitives.shen` — 37 type-checked safe wrappers
-- `zincvm.c` — native C parser + VM (~970 lines)
-- `serialize.shen` — compile all closures from global-table to csexp bundle
-- `toplevel.shen` — `interp-eval` — compiles defun forms through interpreter
-- `load.shen` — `interp-load` / `interp-load-raw` — file loading
-- `util.shen` — `defun->lambda`, `primitive?` (single source of truth), `dedupe-globals`
-- `types.shen` — type definitions + DUPLICATE `primitive?` list (must stay synced!)
+Key files (under `shen/` unless noted):
+- `shen/interp.shen` — meta-circular ZINC VM (loads everything)
+- `shen/normalize.shen` — KLambda normalization + debruijn indices
+- `shen/zinc.shen` — KLambda → ZINC bytecode compiler
+- `shen/compile.shen` — ZINC → canonical s-expression (csexp)
+- `shen/primitives.shen` — 37 type-checked safe wrappers
+- `vm/zincvm.c` — native C parser + VM (~970 lines)
+- `shen/serialize.shen` — compile all closures from global-table to csexp bundle
+- `shen/toplevel.shen` — `interp-eval` — compiles defun forms through interpreter
+- `shen/load.shen` — `interp-load` / `interp-load-raw` — file loading
+- `shen/util.shen` — `defun->lambda`, `primitive?` (single source of truth), `dedupe-globals`
+- `shen/types.shen` — type definitions + DUPLICATE `primitive?` list (must stay synced!)
 
 ## Shen quirks
 

@@ -1,5 +1,5 @@
 (tc -)
-(load "toplevel.shen")
+(load "shen/toplevel.shen")
 
 (define interp-load
   File -> (interp-eval-all (read-file File)))
