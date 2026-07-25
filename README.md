@@ -1,207 +1,57 @@
+# shen-meta
+
+A meta-circular Shen ZINC abstract machine — Shen evaluating Shen, compiling itself to native bytecode.
+
+## Architecture
+
 ```
-λ[jaye@hydra]: ~/repos/bta [master ≡ +0 ~2 -0 !]>  rlwrap shen-scheme
-
-Shen, copyright (C) 2010-2015 Mark Tarver
-www.shenlanguage.org, Shen 22.2
-running under Scheme, implementation: chez-scheme
-port 0.23 ported by Bruno Deferrari
-
-
-(0-) (tc +)
-true
-
-(1+) (load "interp.shen")
-
-
-
-id : (A --> A)
-newvar : (--> symbol)
-index_h : (A --> ((list A) --> (number --> number)))
-index : (A --> ((list A) --> number))
-intersperse : (A --> ((list A) --> (list A)))
-fold-append : ((list A) --> ((list (list A)) --> (list A)))
-primitive? : (symbol --> boolean)
-run time: 0.008331075000000007 secs
-
-typechecked in 1980 inferences
-loaded : symbol
-
-primitive? : (symbol --> boolean)
-primitive#type : symbol
-klambda#type : symbol
-zinc-value#type : symbol
-bytecode? : (symbol --> boolean)
-zinc-code#type : symbol
-run time: 0.19925938400000004 secs
-
-typechecked in 2894 inferences
-loaded : symbol
-map-kmacros : ((list klambda) --> (list klambda))
-kmacros : (klambda --> klambda)
-atomic? : (A --> boolean)
-normalize-term : (klambda --> klambda)
-normalize : (klambda --> ((klambda --> klambda) --> klambda))
-normalize-name : (klambda --> ((klambda --> klambda) --> klambda))
-normalize-names : (klambda --> ((klambda --> klambda) --> klambda))
-map-debruijn : ((list symbol) --> ((list klambda) --> (list klambda)))
-debruijn : ((list symbol) --> (klambda --> klambda))
-run time: 0.27253319600000003 secs
-
-typechecked in 67863 inferences
-loaded : symbol
-
-id : (A --> A)
-newvar : (--> symbol)
-index_h : (A --> ((list A) --> (number --> number)))
-index : (A --> ((list A) --> number))
-intersperse : (A --> ((list A) --> (list A)))
-fold-append : ((list A) --> ((list (list A)) --> (list A)))
-primitive? : (symbol --> boolean)
-run time: 0.010807946000000013 secs
-
-typechecked in 69746 inferences
-loaded : symbol
-
-map-zinc-c : (klambda --> (list zinc-code))
-zinc-t : (klambda --> zinc-code)
-zinc-c : (klambda --> zinc-code)
-run time: 0.01829968000000004 secs
-
-typechecked in 97791 inferences
-loaded : symbol
-lookup : (number --> ((list zinc-value) --> zinc-value))
-interp-jmp : (zinc-code --> (symbol --> zinc-code))
-extract-kl : (zinc-value --> klambda)
-interp : (zinc-code --> (zinc-value --> ((list zinc-value) --> ((list zinc-value) --> ((list zinc-value) --> zinc-value)))))
-defun->lambda : (klambda --> klambda)
-toplevel-interp : (zinc-code --> zinc-value)
-kl->zinc : (klambda --> zinc-code)
-set-toplevel : (symbol --> (symbol --> symbol))
-true : boolean
-false : boolean
-safe.number?
-safe.symbol?
-safe.string?
-safe.boolean?
-safe.cons?
-safe.simple-error
-safe.get-time
-safe.close
-safe.read-byte
-safe.tl
-safe.hd
-safe.absvector
-safe.n->string
-safe.string->n
-safe.str
-safe.tlstr
-safe.value
-safe.intern
-safe.error-to-string
-safe.trap-error
-safe.=
-safe.open
-safe.write-byte
-safe.cons
-safe.<-address
-safe.cn
-safe.pos
-safe.<=
-safe.>=
-safe.<
-safe.>
-safe.set
-safe.-
-safe.*
-safe./
-safe.+
-safe.address->
-safe.eval-kl
-
-run time: 0.012638937999999933 secs
-loaded : symbol
-number? : symbol
-symbol? : symbol
-string? : symbol
-boolean? : symbol
-cons? : symbol
-simple-error : symbol
-get-time : symbol
-close : symbol
-read-byte : symbol
-tl : symbol
-hd : symbol
-absvector : symbol
-n->string : symbol
-string->n : symbol
-str : symbol
-tlstr : symbol
-value : symbol
-intern : symbol
-error-to-string : symbol
-trap-error : symbol
-= : symbol
-open : symbol
-write-byte : symbol
-cons : symbol
-<-address : symbol
-cn : symbol
-pos : symbol
-<= : symbol
->= : symbol
-< : symbol
-> : symbol
-set : symbol
-- : symbol
-* : symbol
-/ : symbol
-+ : symbol
-address-> : symbol
-eval-kl : symbol
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-[lambda [grab access 1 return] []] : klambda
-[lambda [access 0 return] []] : klambda
-[lambda [boolean true return] []] : klambda
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-true : boolean
-run time: 0.510607153 secs
-loaded : symbol
+Shen source → KLambda → normalize → debruijn → ZINC bytecode → csexp → C VM
 ```
+
+| Layer | File | Description |
+|---|---|---|
+| **Normalizer** | `normalize.shen` | KLambda expansion, A-normal form, debruijn indices |
+| **ZINC compiler** | `zinc.shen` | KLambda → ZINC bytecode (37 primitives) |
+| **Shen VM** | `interp.shen` | Meta-circular ZINC interpreter (Shen 41.2 on Chez Scheme) |
+| **Safe wrappers** | `primitives.shen` | Type-checked wrappers for all 37 primitives |
+| **Native compiler** | `compile.shen` | ZINC → canonical s-expression bytecode |
+| **C VM** | `zincvm.c` | Native parser + VM (all 37 primitives, closures, tail calls) |
+| **Serializer** | `serialize.shen` | Compiles safe wrappers to csexp bundle for native VM |
+
+## Build & Run
+
+```sh
+make vm          # build C VM
+make test        # run built-in tests (28 tests)
+make bundle      # compile all safe wrappers → globals.csexp
+make run-bundle  # load serialized globals + run (+ 1 2)
+make pipeline    # compile (+ 1 2) through full Shen→csexp pipeline
+make interp      # run meta-circular interpreter on Chez Scheme
+```
+
+Requires [shen-scheme](https://github.com/tizoc/shen-scheme) (Shen 41.2 on Chez Scheme).
+
+## Bytecode format
+
+Canonical s-expressions with `[len:type]value` atoms:
+
+- `s` — symbol, `n` — number, `S` — string, `b` — boolean
+- Single-char opcodes: `m` pushmark, `p` apply, `u` push, `r` grab, `v` return, `c` cur, `g` global, `a` access, `f` jmpf, `j` jmp, `e` let, `d` endlet, `t` appterm, `n` number, `S` string, `s` symbol, `b` boolean, `P` prim
+
+Example: `(+ 1 2)` → `(mn[1:n]2un[1:n]1ug[1:s]+p)`
+
+## Status
+
+- [x] 37 primitives in C VM (arithmetic, comparison, types, strings, I/O, error handling)
+- [x] Closures, tail calls, `trap-error`/`simple-error`
+- [x] Full Shen→csexp→C VM pipeline
+- [x] Serialized global table (38 closures) loaded by native VM
+- [ ] Calling serialized safe wrappers from native VM (known `P+p` issue in zinc-c)
+- [ ] GC integration (bartlett-gc ready)
+- [ ] Full Shen OS serialization
+
+## Credits
+
+ZINC abstract machine: Xavier Leroy (INRIA).  
+Original Shen 22.2 interpreter and native compiler by the repo author.  
+Shen 41.2 port, C VM, and pipeline by the repo author.
