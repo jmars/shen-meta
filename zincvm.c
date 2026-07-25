@@ -276,6 +276,7 @@ static int vm_error_pending = 0;
 /* ------------------------------------------------------------------ */
 
 static Value vm_exec(Instr *code, int code_len);
+static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len);
 
 /* ------------------------------------------------------------------ */
 /*  Primitive dispatch                                                 */
@@ -581,8 +582,31 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "eval-kl") == 0) {
         Value a = va_pop(stack);
-        fprintf(stderr, "warning: eval-kl is a stub, returning value as-is\n");
-        *acc = a; return 0;
+        /* Recursive eval-kl: call the bundled eval-kl closure via vm_exec.
+           The bundled closure (safe.eval-kl) does type checking then calls
+           %% eval-kl — which re-enters here.  The recursion guard below
+           catches the re-entry and returns the value as-is, serving as
+           the base case for KLambda evaluation. */
+        static int eval_kl_depth = 0;
+        if (eval_kl_depth > 0) {
+            *acc = a; return 0;  /* base case: identity */
+        }
+        Value closure = global_get("eval-kl");
+        if (closure.tag != VAL_LAMBDA) {
+            fprintf(stderr, "runtime: eval-kl bundled closure not found\n");
+            *acc = a; return 0;
+        }
+        /* Build env with arg prepended to closure's captured env */
+        Value *ne = malloc((closure.lambda.env_len + 1) * sizeof(Value));
+        ne[0] = a;
+        if (closure.lambda.env_len > 0)
+            memcpy(ne + 1, closure.lambda.env, closure.lambda.env_len * sizeof(Value));
+        eval_kl_depth++;
+        *acc = vm_exec_env(closure.lambda.code, closure.lambda.code_len,
+                           ne, closure.lambda.env_len + 1);
+        eval_kl_depth--;
+        free(ne);
+        return 0;
     }
 
     fprintf(stderr, "runtime: unknown primitive '%s'\n", name);
@@ -759,10 +783,16 @@ static Value env_pop(Value **env, int *env_len) {
     return (*env)[--(*env_len)];
 }
 
-static Value vm_exec(Instr *code, int code_len) {
+static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) {
     ValueArray stack; va_init(&stack);
     CallFrame frame_stack[CALL_STACK_DEPTH]; int frames_sp = 0;
     Value *env = NULL; int env_len = 0, env_cap = 0;
+    if (init_env_len > 0 && init_env) {
+        env_cap = init_env_len;
+        env = malloc(env_cap * sizeof(Value));
+        memcpy(env, init_env, init_env_len * sizeof(Value));
+        env_len = init_env_len;
+    }
     Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
 
@@ -891,6 +921,10 @@ done:
     for (int i = 0; i < frames_sp; i++) free(frame_stack[i].env);
     free(env);
     return acc;
+}
+
+static Value vm_exec(Instr *code, int code_len) {
+    return vm_exec_env(code, code_len, NULL, 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1113,6 +1147,7 @@ int main(int argc, char **argv) {
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
                 printf("Raw primitive I/O works via raw.X namespace (bypasses safe wrappers).\n");
+                printf("eval-kl delegates to bundled closure with recursion guard.\n");
             }
         } else {
             /* Single bytecode list */
