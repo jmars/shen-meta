@@ -69,8 +69,11 @@ Key files:
 - Output goes to file via `open`/`pr`/`close` — `print` wraps long lines
   and `grep '^"'` truncates multi-line bundles
 - `pr` writes raw string to a stream; `(stoutput)` is stdout
-- 95 closures currently serialized: 38 safe wrappers + 57 from `core.kl`
-- 8 of 65 `core.kl` defuns still fail (nested `lambda`, missing `shen.*` deps)
+- 838 closures currently serialized: 38 safe wrappers + 800 from 22 KLambda files (449KB)
+- Only `stlib.kl` and `init.kl` remain — `stlib.kl` blocked by host reader macros
+- `read-file` triggers host Shen reader macro expansion; `stlib.kl` defines
+  vector macros (`vector.vector-macros` etc.) that fail before registration
+- Fix: use `read-file-as-string` to bypass reader macros, or pre-register them
 
 ## KLambda primitives (added to `primitive?` + `interp` handlers)
 
