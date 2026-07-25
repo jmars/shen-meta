@@ -125,6 +125,6 @@
   Scope [X | Y]      <- (if (not (element? X Scope)) [[function X] | (map-debruijn Scope Y)] (fail)) where (symbol? X)
   Scope [X Y]        -> [(debruijn Scope X) (debruijn Scope Y)]
   Scope [X | Y]      -> [(debruijn Scope X) | (map-debruijn Scope Y)]
-  Scope X            <- (if (element? X Scope) [lookup (idx X Scope)] (fail)) where (variable? X)
+  Scope X            <- (if (element? X Scope) [lookup (idx X Scope)] [symbol X]) where (variable? X)
   Scope X            <- (if (and (not (variable? X)) (symbol? X) (not (element? X Scope))) [symbol X] (fail))
   Scope X            -> X)
