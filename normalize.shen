@@ -88,6 +88,8 @@
                              (K [if T (normalize-term Y) (normalize-term Z)])))
   [set S E] K           -> (normalize-name E (/. T
                              [let (newvar) [set S T] (K T)]))
+  \* Bare primitive (Shen 41.2 ps strips %% from unary primitives) *\
+  [F | E] K -> (normalize-names E (/. Ts (K [%% F | Ts]))) where (primitive? F)
   [F | E] K             -> (normalize-name F (/. T
                              (normalize-names E (/. Ts
                                (K (flatten-%%app T Ts))))))
