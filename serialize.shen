@@ -4,6 +4,18 @@
 (load "compile.shen")
 
 (interp-load "/home/arch/github/shen-scheme/kl/core.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/declarations.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/types.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/macros.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/load.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/toplevel.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/sys.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/dict.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/track.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/reader.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/compiler.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/writer.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/yacc.kl")
 
 (define entry-str
   [N [lambda Code []]] -> (cn (cn (cn (cn "(" (csexp-atom N)) " ")
