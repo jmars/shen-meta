@@ -16,6 +16,10 @@
 (interp-load "/home/arch/github/shen-scheme/kl/compiler.kl")
 (interp-load "/home/arch/github/shen-scheme/kl/writer.kl")
 (interp-load "/home/arch/github/shen-scheme/kl/yacc.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/prolog.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/sequent.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/t-star.kl")
+(interp-load "/home/arch/github/shen-scheme/kl/overrides.kl")
 
 (define entry-str
   [N [lambda Code []]] -> (cn (cn (cn (cn "(" (csexp-atom N)) " ")
