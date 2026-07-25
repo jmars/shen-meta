@@ -10,7 +10,7 @@
 \* First pass: build label -> position map *\
 (define label-positions { zinc-code --> number --> (list (list symbol number)) --> (list (list symbol number)) }
   [label L | C]  N Acc -> (label-positions C N (cons [L N] Acc))
-  [cur C1 | C]   N Acc -> (label-positions C (+ N (instr-count C1)) Acc)  \* cur itself takes no slot *\
+  [cur C1 | C]   N Acc -> (label-positions C (+ N 1 (instr-count C1)) (label-positions C1 0 Acc))  \* cur takes 1 slot + recurse into body *\
   [_ | C]        N Acc -> (label-positions C (+ 1 N) Acc)
   []             _ Acc -> Acc)
 
