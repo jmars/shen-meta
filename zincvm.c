@@ -306,11 +306,35 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "error?") == 0) {
         Value a = va_pop(stack); *acc = val_boolean(a.tag == VAL_ERROR); return 0;
     }
+    if (strcmp(name, "absvector?") == 0) {
+        Value a = va_pop(stack); *acc = val_boolean(a.tag == VAL_VECTOR); return 0;
+    }
     if (strcmp(name, "function?") == 0) {
         Value a = va_pop(stack); *acc = val_boolean(a.tag == VAL_LAMBDA || a.tag == VAL_PRIM); return 0;
     }
     if (strcmp(name, "stream?") == 0) {
         Value a = va_pop(stack); *acc = val_boolean(a.tag == VAL_STREAM); return 0;
+    }
+    if (strcmp(name, "variable?") == 0) {
+        /* KLambda variable? — true for symbols that look like ZINC variables */
+        Value a = va_pop(stack);
+        *acc = val_boolean(a.tag == VAL_SYMBOL); return 0;
+    }
+
+    /* --- KLambda tuple ops --- */
+    if (strcmp(name, "@p") == 0) {
+        Value a1 = va_pop(stack), a2 = va_pop(stack);
+        *acc = val_cons(a1, a2); return 0;
+    }
+    if (strcmp(name, "fst") == 0) {
+        Value a = va_pop(stack);
+        if (a.tag != VAL_CONS) { fprintf(stderr, "runtime: fst on non-cons\n"); return -1; }
+        *acc = *a.cons.car; return 0;
+    }
+    if (strcmp(name, "snd") == 0) {
+        Value a = va_pop(stack);
+        if (a.tag != VAL_CONS) { fprintf(stderr, "runtime: snd on non-cons\n"); return -1; }
+        *acc = *a.cons.cdr; return 0;
     }
 
     /* --- Arithmetic --- */
@@ -514,7 +538,10 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
 
     /* --- I/O --- */
     if (strcmp(name, "open") == 0) {
-        Value dir = va_pop(stack), path = va_pop(stack);
+        /* ZINC evaluates args right-to-left, so the stack has:
+           [rightmost, leftmost] with leftmost on top.
+           For (open path dir): stack=[dir, path], path on top. */
+        Value path = va_pop(stack), dir = va_pop(stack);
         if (path.tag != VAL_STRING || dir.tag != VAL_SYMBOL) { fprintf(stderr, "runtime: open bad types\n"); return -1; }
         char pb[256]; int n = path.str.len < 255 ? path.str.len : 255;
         memcpy(pb, path.str.data, n); pb[n] = '\0';
@@ -575,6 +602,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
 
     /* --- Meta --- */
+    if (strcmp(name, "gensym") == 0) {
+        static long gensym_counter = 0;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "shen.gensym_%ld", gensym_counter++);
+        *acc = val_symbol(buf); return 0;
+    }
     if (strcmp(name, "set") == 0) {
         Value v = va_pop(stack), sym = va_pop(stack);
         if (sym.tag != VAL_SYMBOL) { fprintf(stderr, "runtime: set requires symbol\n"); return -1; }
@@ -979,7 +1012,8 @@ static void init_globals(void) {
         "eval-kl","absvector","<-address","address->",
         "n->string","string->n","str","tlstr","pos",
         "intern","value","open","close","read-byte","write-byte",
-        "set","get-time","read-file-as-string","vm.read-file", NULL
+        "set","get-time","read-file-as-string","vm.read-file",
+        "@p","fst","snd","gensym","variable?", NULL
     };
     for (int i = 0; prims[i]; i++) global_set(prims[i], val_prim(prims[i]));
 
@@ -1142,7 +1176,7 @@ int main(int argc, char **argv) {
                    safe wrapper shadowing, enabling read-compile-eval round-trip */
                 printf("--- Test 4: (raw.open \"Makefile\" in) -> (raw.close stream) ---\n");
                 run_test("raw-io",
-                         "(S[8:S]Makefileus[2:s]inumg[8:s]raw.openpumg[9:s]raw.closep)", 0);
+                         "(s[2:s]inuS[8:S]Makefileumg[8:s]raw.openpumg[9:s]raw.closep)", 0);
 
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
