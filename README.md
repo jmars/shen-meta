@@ -1,35 +1,40 @@
 # shen-meta
 
-A meta-circular Shen ZINC abstract machine — Shen evaluating Shen, compiling itself to native bytecode.
+A meta-circular Shen ZINC abstract machine — Shen evaluating Shen, compiling itself to native bytecode, running on a native C VM.
 
 ## Architecture
 
 ```
-Shen source → KLambda → normalize → debruijn → ZINC bytecode → csexp → C VM
+Shen source → kmacros → normalize → debruijn → zinc-c → csexp → C VM
+                                                    ↑
+                         interp.shen (meta-circular ZINC VM on Shen/Chez)
+                                    ↓
+                      serialize → globals.csexp → C VM (self-hosting)
 ```
 
 | Layer | File | Description |
 |---|---|---|
 | **Normalizer** | `normalize.shen` | KLambda expansion, A-normal form, debruijn indices |
-| **ZINC compiler** | `zinc.shen` | KLambda → ZINC bytecode (37 primitives) |
-| **Shen VM** | `interp.shen` | Meta-circular ZINC interpreter (Shen 41.2 on Chez Scheme) |
+| **ZINC compiler** | `zinc.shen` | KLambda → ZINC bytecode |
+| **Meta-circular VM** | `interp.shen` | ZINC interpreter in Shen — loads, compiles, and runs Shen OS |
 | **Safe wrappers** | `primitives.shen` | Type-checked wrappers for all 37 primitives |
+| **Eval/load** | `toplevel.shen` | `interp-eval` — compiles `defun` forms through the pipeline |
+| **KLambda loader** | `load.shen` | Raw s-expression parser + `interp-load` for `.kl` files |
+| **Utilities** | `util.shen` | `defun->lambda`, `primitive?`, `dedupe-globals` |
 | **Native compiler** | `compile.shen` | ZINC → canonical s-expression bytecode |
-| **C VM** | `zincvm.c` | Native parser + VM (all 37 primitives, closures, tail calls) |
+| **C VM** | `zincvm.c` | Native parser + VM (~1000 lines, all primitives, closures, tail calls) |
 | **Serializer** | `serialize.shen` | Compiles safe wrappers to csexp bundle for native VM |
 
 ## Build & Run
 
 ```sh
-make vm          # build C VM
-make test        # run built-in tests (28 tests)
-make bundle      # compile all safe wrappers → globals.csexp
-make run-bundle  # load serialized globals + run (+ 1 2)
-make pipeline    # compile (+ 1 2) through full Shen→csexp pipeline
-make interp      # run meta-circular interpreter on Chez Scheme
+make          # build C VM
+make test     # run 28 built-in tests
+make pipeline # compile (+ 1 2) through full pipeline
+make bundle   # serialize all safe wrappers → globals.csexp
 ```
 
-Requires [shen-scheme](https://github.com/tizoc/shen-scheme) (Shen 41.2 on Chez Scheme).
+Requires [shen-scheme](https://github.com/tizoc/shen-scheme) (Shen 41.2 on Chez Scheme) at `../shen-scheme/`.
 
 ## Bytecode format
 
@@ -40,15 +45,43 @@ Canonical s-expressions with `[len:type]value` atoms:
 
 Example: `(+ 1 2)` → `(mn[1:n]2un[1:n]1ug[1:s]+p)`
 
+**ZINC evaluates arguments right-to-left**: the rightmost arg is pushed first, the leftmost last (on top of stack). All two-arg C primitives pop `a1` (top = rightmost) then `a2` (below = leftmost). When writing bytecode by hand, push args in right-to-left order:
+
+```
+(open "Makefile" in) → (s[2:s]inuS[8:S]Makefileumg[8:s]raw.openp)
+```
+
+## Self-hosting proof
+
+The C VM (`zincvm`) loads `globals.csexp` — a 1.3MB bundle of **~1200 closures** compiled by the metacircular interpreter from all 24 Shen OS KLambda files. Four self-hosting tests run automatically:
+
+| Test | What it proves |
+|---|---|
+| `(+ 1 2)` | Bundled closures execute correctly (via `%%` primitives) |
+| `(reverse [1 2 3])` | Bundled data-structure functions work |
+| `(factorial 5)` | Bundled recursive functions work |
+| `raw.open` / `raw.close` | Raw primitives bypass safe wrapper shadowing |
+
+## Key design decisions
+
+### raw.X primitive namespace
+
+`parse_bundle` overwrites 37 C primitives with compiled safe wrapper closures in the global table. `%%` escapes inside safe wrappers use `OP_PRIM` → `exec_primitive` (bypasses global table), so safe wrapper internals still work. But bytecode that needs the C primitive directly uses `raw.X` names (`raw.open`, `raw.+`, `raw.eval-kl`, etc.). `exec_primitive` strips the `raw.` prefix before dispatch.
+
+### Recursive eval-kl
+
+`eval-kl` in the C VM delegates to the bundled `eval-kl` closure via `vm_exec_env` with a static recursion guard. The bundled closure (`safe.eval-kl`: `A → %% eval-kl A`) calls `%% eval-kl` which re-enters `exec_primitive`; the guard catches re-entry and returns identity as the base case.
+
 ## Status
 
-- [x] 37 primitives in C VM (arithmetic, comparison, types, strings, I/O, error handling)
-- [x] Closures, tail calls, `trap-error`/`simple-error`
-- [x] Full Shen→csexp→C VM pipeline
-- [x] Serialized global table (38 closures) loaded by native VM
-- [ ] Calling serialized safe wrappers from native VM (known `P+p` issue in zinc-c)
-- [ ] GC integration (bartlett-gc ready)
-- [ ] Full Shen OS serialization
+- [x] 28 built-in VM tests (arithmetic, types, closures, error handling, I/O)
+- [x] ~1200 bundled closures loaded and executing (full Shen OS)
+- [x] `raw.X` namespace — bytecode calls C primitives directly, bypassing safe wrappers
+- [x] Recursive `eval-kl` delegating to bundled closure
+- [x] Raw I/O from C VM (`raw.open` / `raw.close` / `raw.read-byte`)
+- [x] Missing KLambda primitives: `gensym`, `@p`, `fst`, `snd`, `variable?`
+- [ ] Full read-compile-eval round-trip (bundled `load` runs but crashes — being investigated)
+- [ ] Bartlet GC integration (`~/github/bartlet-gc`, ~350 lines, conservative mostly-copying)
 
 ## Credits
 
