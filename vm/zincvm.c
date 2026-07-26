@@ -615,11 +615,21 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "eval-kl") == 0) {
         Value a = va_pop(stack);
-        /* Recursive eval-kl: call the bundled eval-kl closure via vm_exec.
+        /* eval-kl: delegate to the bundled eval-kl closure via vm_exec.
            The bundled closure (safe.eval-kl) does type checking then calls
            %% eval-kl — which re-enters here.  The recursion guard below
            catches the re-entry and returns the value as-is, serving as
-           the base case for KLambda evaluation. */
+           the base case for KLambda evaluation.
+
+           TODO: the correct implementation is the chain from
+           interp.shen:80 — extract-kl → kl->zinc → toplevel-interp.
+           All three are now in the bundle (set-toplevel in interp.shen).
+           But the C VM's native Value representation (VAL_NUMBER etc.)
+           differs from the meta-circular tagged representation
+           ([number X] = cons(symbol("number"), cons(X, nil))).
+           extract-kl expects the tagged form and is a no-op on native
+           values.  A marshaling layer is needed between native and
+           meta-circular representations before the chain can work. */
         static int eval_kl_depth = 0;
         if (eval_kl_depth > 0) {
             *acc = a; return 0;  /* base case: identity */
@@ -1182,6 +1192,7 @@ int main(int argc, char **argv) {
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
                 printf("Raw primitive I/O works via raw.X namespace (bypasses safe wrappers).\n");
                 printf("eval-kl delegates to bundled closure with recursion guard.\n");
+                printf("(extract-kl, kl->zinc, toplevel-interp are bundled — ready for marshaling layer.)\n");
             }
         } else {
             /* Single bytecode list */

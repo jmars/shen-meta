@@ -190,6 +190,9 @@
 (set-toplevel + safe.+)
 (set-toplevel address-> safe.address->)
 (set-toplevel eval-kl safe.eval-kl)
+(set-toplevel extract-kl extract-kl)
+(set-toplevel kl->zinc kl->zinc)
+(set-toplevel toplevel-interp toplevel-interp)
 
 \* Load eval/load infrastructure into the host for serialization *\
 (tc -)
