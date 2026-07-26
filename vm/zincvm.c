@@ -279,6 +279,80 @@ static Value vm_exec(Instr *code, int code_len);
 static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len);
 
 /* ------------------------------------------------------------------ */
+/*  Marshal layer: convert C Value ↔ Shen tagged representation        */
+/* ------------------------------------------------------------------ */
+
+/* marshal_to_tagged: C Value → Shen tagged form.
+   Tagged forms (from interp.shen extract-kl):
+     [number X]  = cons(symbol("number"), cons(X, nil))
+     [symbol X]  = cons(symbol("symbol"), cons(X, nil))
+     [string X]  = cons(symbol("string"), cons(X, nil))
+     [boolean X] = cons(symbol("boolean"), cons(X, nil))
+     [cons X Y]  = cons(symbol("cons"), cons(X', cons(Y', nil)))
+     [cons]      = cons(symbol("cons"), nil)   — empty list
+     mark        = symbol("mark")
+   Unmarshallable types (lambdas, prims, errors, vectors, streams)
+   pass through unchanged. */
+static Value marshal_to_tagged(Value v) {
+    switch (v.tag) {
+    case VAL_NUMBER:
+        return val_cons(val_symbol("number"), val_cons(v, val_nil()));
+    case VAL_SYMBOL:
+        return val_cons(val_symbol("symbol"), val_cons(v, val_nil()));
+    case VAL_STRING:
+        return val_cons(val_symbol("string"), val_cons(v, val_nil()));
+    case VAL_BOOLEAN:
+        return val_cons(val_symbol("boolean"), val_cons(v, val_nil()));
+    case VAL_CONS: {
+        Value car = marshal_to_tagged(*v.cons.car);
+        Value cdr = marshal_to_tagged(*v.cons.cdr);
+        return val_cons(val_symbol("cons"),
+                        val_cons(car, val_cons(cdr, val_nil())));
+    }
+    case VAL_NIL:
+        return val_cons(val_symbol("cons"), val_nil());
+    case VAL_MARK:
+        return val_symbol("mark");
+    default:
+        return v;  /* lambdas, prims, errors, vectors, streams */
+    }
+}
+
+/* demarshal_from_tagged: Shen tagged form → C Value.
+   Inverse of marshal_to_tagged.  Non-tagged atoms pass through. */
+static Value demarshal_from_tagged(Value tagged) {
+    if (tagged.tag == VAL_NUMBER || tagged.tag == VAL_STRING ||
+        tagged.tag == VAL_BOOLEAN) return tagged;
+    if (tagged.tag == VAL_SYMBOL) {
+        if (strcmp(tagged.sym.name, "mark") == 0) return val_nil();
+        return tagged;
+    }
+    if (tagged.tag != VAL_CONS) return tagged;
+    /* Check for tagged form: car is a symbol tag */
+    Value car = *tagged.cons.car;
+    if (car.tag != VAL_SYMBOL) return tagged;
+    const char *tag = car.sym.name;
+
+    if (strcmp(tag, "number") == 0 || strcmp(tag, "symbol") == 0 ||
+        strcmp(tag, "string") == 0 || strcmp(tag, "boolean") == 0) {
+        /* [tag X] — extract the value: cadr of the tagged form */
+        Value cdr = *tagged.cons.cdr;
+        return *cdr.cons.car;
+    }
+    if (strcmp(tag, "cons") == 0) {
+        Value cdr = *tagged.cons.cdr;
+        if (cdr.tag == VAL_NIL) return val_nil();  /* [cons] — empty list */
+        /* [cons X Y] — recursively demarshal car and cdr */
+        Value tagged_car = *cdr.cons.car;
+        Value tagged_cdr = *cdr.cons.cdr;
+        Value actual_cdr = *tagged_cdr.cons.car;
+        return val_cons(demarshal_from_tagged(tagged_car),
+                        demarshal_from_tagged(actual_cdr));
+    }
+    return tagged;  /* unknown tag */
+}
+
+/* ------------------------------------------------------------------ */
 /*  Primitive dispatch                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -615,40 +689,72 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "eval-kl") == 0) {
         Value a = va_pop(stack);
-        /* eval-kl: delegate to the bundled eval-kl closure via vm_exec.
-           The bundled closure (safe.eval-kl) does type checking then calls
-           %% eval-kl — which re-enters here.  The recursion guard below
-           catches the re-entry and returns the value as-is, serving as
-           the base case for KLambda evaluation.
+        /* eval-kl chain (interp.shen:80):
+           marshal native → tagged form
+           → extract-kl    (tagged → raw KLambda)
+           → kl->zinc      (KLambda → ZINC bytecode)
+           → toplevel-interp (ZINC bytecode → tagged result)
+           → demarshal tagged result → native Value
 
-           TODO: the correct implementation is the chain from
-           interp.shen:80 — extract-kl → kl->zinc → toplevel-interp.
-           All three are now in the bundle (set-toplevel in interp.shen).
-           But the C VM's native Value representation (VAL_NUMBER etc.)
-           differs from the meta-circular tagged representation
-           ([number X] = cons(symbol("number"), cons(X, nil))).
-           extract-kl expects the tagged form and is a no-op on native
-           values.  A marshaling layer is needed between native and
-           meta-circular representations before the chain can work. */
+           The three closures are in the bundle via set-toplevel
+           in interp.shen:193-195.  The recursion guard prevents
+           infinite re-entry when %% eval-kl is called from within
+           Shen code executed by the chain. */
         static int eval_kl_depth = 0;
         if (eval_kl_depth > 0) {
-            *acc = a; return 0;  /* base case: identity */
+            *acc = a; return 0;  /* recursion guard: identity base case */
         }
-        Value closure = global_get("eval-kl");
-        if (closure.tag != VAL_LAMBDA) {
-            fprintf(stderr, "runtime: eval-kl bundled closure not found\n");
-            *acc = a; return 0;
-        }
-        /* Build env with arg prepended to closure's captured env */
-        Value *ne = malloc((closure.lambda.env_len + 1) * sizeof(Value));
-        ne[0] = a;
-        if (closure.lambda.env_len > 0)
-            memcpy(ne + 1, closure.lambda.env, closure.lambda.env_len * sizeof(Value));
         eval_kl_depth++;
-        *acc = vm_exec_env(closure.lambda.code, closure.lambda.code_len,
-                           ne, closure.lambda.env_len + 1);
+
+        /* Marshal native Value → Shen tagged form */
+        Value tagged = marshal_to_tagged(a);
+
+        /* Step 1: extract-kl — tagged form → raw KLambda */
+        Value extkl = global_get("extract-kl");
+        if (extkl.tag != VAL_LAMBDA) {
+            fprintf(stderr, "runtime: eval-kl: extract-kl not found in bundle\n");
+            eval_kl_depth--; *acc = a; return 0;
+        }
+        Value *env1 = malloc((extkl.lambda.env_len + 1) * sizeof(Value));
+        env1[0] = tagged;
+        if (extkl.lambda.env_len > 0)
+            memcpy(env1 + 1, extkl.lambda.env, extkl.lambda.env_len * sizeof(Value));
+        Value klambda = vm_exec_env(extkl.lambda.code, extkl.lambda.code_len,
+                                     env1, extkl.lambda.env_len + 1);
+        free(env1);
+
+        /* Step 2: kl->zinc — raw KLambda → ZINC bytecode */
+        Value klzinc = global_get("kl->zinc");
+        if (klzinc.tag != VAL_LAMBDA) {
+            fprintf(stderr, "runtime: eval-kl: kl->zinc not found in bundle\n");
+            eval_kl_depth--; *acc = a; return 0;
+        }
+        Value *env2 = malloc((klzinc.lambda.env_len + 1) * sizeof(Value));
+        env2[0] = klambda;
+        if (klzinc.lambda.env_len > 0)
+            memcpy(env2 + 1, klzinc.lambda.env, klzinc.lambda.env_len * sizeof(Value));
+        Value zinc_code = vm_exec_env(klzinc.lambda.code, klzinc.lambda.code_len,
+                                       env2, klzinc.lambda.env_len + 1);
+        free(env2);
+
+        /* Step 3: toplevel-interp — ZINC bytecode → tagged result */
+        Value tli = global_get("toplevel-interp");
+        if (tli.tag != VAL_LAMBDA) {
+            fprintf(stderr, "runtime: eval-kl: toplevel-interp not found in bundle\n");
+            eval_kl_depth--; *acc = a; return 0;
+        }
+        Value *env3 = malloc((tli.lambda.env_len + 1) * sizeof(Value));
+        env3[0] = zinc_code;
+        if (tli.lambda.env_len > 0)
+            memcpy(env3 + 1, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
+        Value tagged_result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
+                                           env3, tli.lambda.env_len + 1);
+        free(env3);
+
         eval_kl_depth--;
-        free(ne);
+
+        /* Step 4: demarshal tagged result → native Value */
+        *acc = demarshal_from_tagged(tagged_result);
         return 0;
     }
 
@@ -1142,6 +1248,24 @@ int main(int argc, char **argv) {
             /* Bundle format: ((name code) (name code) ...) */
             int n = parse_bundle(p);
             printf("Loaded %d closures into global table\n\n", n);
+
+            /* Register ZINC pattern keywords as symbols. When zinc-c, zinc-t,
+               normalize-term, debruijn etc. were self-compiled via set-toplevel,
+               their patterns like [number X], [cons X Y], [lambda C E] etc.
+               became bytecode with "global number", "global cons" etc. to
+               obtain the tag symbol for structural matching at runtime.
+               These must resolve to val_symbol, not val_prim or a closure. */
+            const char *keywords[] = {
+                "number", "symbol", "string", "boolean", "cons",
+                "lambda", "function", "error", "absvector",
+                "stream in", "stream out", "let", "if",
+                "lookup", "freeze", "type", "defun", "define",
+                "cond", "and", "or", "do", "fn",
+                "list", "where", "fail", "empty?", "element?",
+                NULL
+            };
+            for (int i = 0; keywords[i]; i++)
+                global_set(keywords[i], val_symbol(keywords[i]));
             free(buf);
             /* If second arg, run it as bytecode; otherwise run a test */
             if (argc > 2) {
@@ -1188,11 +1312,28 @@ int main(int argc, char **argv) {
                 run_test("raw-io",
                          "(s[2:s]inuS[8:S]Makefileumg[8:s]raw.openpumg[9:s]raw.closep)", 0);
 
+                /* Test 5: eval-kl [+ 1 2] through the marshal chain.
+                   The C VM marshals the native Value to tagged form,
+                   then calls the bundled extract-kl → kl->zinc →
+                   toplevel-interp chain, then demarshals the result
+                   back to a native Value.  This proves the marshal
+                   layer bridges the representation gap. */
+                printf("--- Test 5: eval-kl [+ 1 2] via marshal chain ---\n");
+                Value plus_sym = val_symbol("+");
+                Value ev_one = val_number(1);
+                Value ev_two = val_number(2);
+                Value ev_nil = val_nil();
+                Value ev_list = val_cons(ev_two, ev_nil);          /* [2] */
+                ev_list = val_cons(ev_one, ev_list);               /* [1 2] */
+                ev_list = val_cons(plus_sym, ev_list);             /* [+ 1 2] */
+                global_set("*ev1*", ev_list);
+                run_test("eval-kl-add",
+                         "(mg[5:s]*ev1*ug[11:s]raw.eval-klp)", 0);
+
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
                 printf("Raw primitive I/O works via raw.X namespace (bypasses safe wrappers).\n");
-                printf("eval-kl delegates to bundled closure with recursion guard.\n");
-                printf("(extract-kl, kl->zinc, toplevel-interp are bundled — ready for marshaling layer.)\n");
+                printf("eval-kl chain (marshal → extract-kl → kl->zinc → toplevel-interp → demarshal) works.\n");
             }
         } else {
             /* Single bytecode list */

@@ -194,6 +194,30 @@
 (set-toplevel kl->zinc kl->zinc)
 (set-toplevel toplevel-interp toplevel-interp)
 
+\* Bundle compiler dependencies: kl->zinc calls zinc-c → zinc-t, map-zinc-c,
+  debruijn → map-debruijn, normalize-term → normalize → normalize-name →
+  normalize-names → flatten-%%app, kmacros → map-kmacros, plus
+  atomic?, primitive?, fold-append, intersperse.  Without these in
+  global-table, bundled closures that use them will fail at runtime. *\
+(tc -)
+(set-toplevel zinc-c zinc-c)
+(set-toplevel zinc-t zinc-t)
+(set-toplevel map-zinc-c map-zinc-c)
+(set-toplevel kmacros kmacros)
+(set-toplevel map-kmacros map-kmacros)
+(set-toplevel normalize-term normalize-term)
+(set-toplevel normalize normalize)
+(set-toplevel normalize-name normalize-name)
+(set-toplevel normalize-names normalize-names)
+(set-toplevel flatten-%%app flatten-%%app)
+(set-toplevel atomic? atomic?)
+(set-toplevel debruijn debruijn)
+(set-toplevel map-debruijn map-debruijn)
+(set-toplevel intersperse intersperse)
+(set-toplevel fold-append fold-append)
+(set-toplevel primitive? primitive?)
+(tc +)
+
 \* Load eval/load infrastructure into the host for serialization *\
 (tc -)
 (load "shen/toplevel.shen")
