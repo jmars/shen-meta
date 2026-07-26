@@ -121,6 +121,12 @@
   Scope [%% X Y]     <- (if (primitive? X) [X (debruijn Scope Y)] (fail)) where (symbol? X)
   Scope [%% X | Y]   <- (if (primitive? X) [X | (map-debruijn Scope Y)] (fail)) where (symbol? X)
 
+  \* [function X] is a KLambda global reference — must NOT be wrapped
+     in another [function ...].  Without this rule, debruijn wraps the
+     'function' keyword itself, producing [[function function] X] which
+     zinc-c compiles to [global function] instead of [global X]. *\
+  Scope [function X] -> [function X] where (symbol? X)
+
   Scope [X Y]        <- (if (not (element? X Scope)) [[function X] (debruijn Scope Y)] (fail)) where (symbol? X)
   Scope [X | Y]      <- (if (not (element? X Scope)) [[function X] | (map-debruijn Scope Y)] (fail)) where (symbol? X)
   Scope [X Y]        -> [(debruijn Scope X) (debruijn Scope Y)]

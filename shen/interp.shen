@@ -198,8 +198,14 @@
   debruijn → map-debruijn, normalize-term → normalize → normalize-name →
   normalize-names → flatten-%%app, kmacros → map-kmacros, plus
   atomic?, primitive?, fold-append, intersperse.  Without these in
-  global-table, bundled closures that use them will fail at runtime. *\
+  global-table, bundled closures that use them will fail at runtime.
+  
+  id must be bundled BEFORE normalize-term — normalize-term's source
+  contains (function id), and when set-toplevel executes the compiled
+  bytecode via toplevel-interp → interp, interp resolves global id
+  via lookup-global which checks global-table. *\
 (tc -)
+(set-toplevel id id)
 (set-toplevel zinc-c zinc-c)
 (set-toplevel zinc-t zinc-t)
 (set-toplevel map-zinc-c map-zinc-c)
@@ -216,6 +222,17 @@
 (set-toplevel intersperse intersperse)
 (set-toplevel fold-append fold-append)
 (set-toplevel primitive? primitive?)
+
+\* Bundle the meta-circular interpreter and its helpers.
+   Without interp in global-table, toplevel-interp's bytecode
+   falls through to val_prim("interp") — hence the "[prim interp]"
+   result from eval-kl.  lookup-global, lookup, and interp-jmp
+   are transitive dependencies; interp's 97 rules call them via
+   global lookups at runtime. *\
+(set-toplevel lookup-global lookup-global)
+(set-toplevel lookup lookup)
+(set-toplevel interp-jmp interp-jmp)
+(set-toplevel interp interp)
 (tc +)
 
 \* Load eval/load infrastructure into the host for serialization *\
