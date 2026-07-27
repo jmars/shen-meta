@@ -767,9 +767,9 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            instead of correct values).  For simple primitive calls like
            (+ 1 2), construct ZINC bytecode directly.
            TODO: fix self-compiled zinc-c to remove this workaround. */
-        if (klambda.tag == 4) {
+        if (klambda.tag == VAL_CONS) {
             Value car = *klambda.cons.car;
-            if (car.tag == 1 && strcmp(car.sym.name, "+") == 0) {
+            if (car.tag == VAL_SYMBOL && strcmp(car.sym.name, "+") == 0) {
                 zinc_code = val_cons(val_symbol("number"),
                             val_cons(val_number(2),
                             val_cons(val_symbol("push"),
