@@ -523,7 +523,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         else snprintf(b2, sizeof(b2), "[?]");
         int len = strlen(b2) + strlen(b1);
         char *r = malloc(len + 1);
-        strcpy(r, b2); strcat(r, b1);
+        strcpy(r, b1); strcat(r, b2);
         *acc = val_string(r, len); free(r); return 0;
     }
     if (strcmp(name, "n->string") == 0) {
@@ -580,14 +580,14 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         *acc = val_vector((int)a.number); return 0;
     }
     if (strcmp(name, "<-address") == 0) {
-        Value idx = va_pop(stack), vec = va_pop(stack);
+        Value vec = va_pop(stack), idx = va_pop(stack);
         if (vec.tag != VAL_VECTOR || idx.tag != VAL_NUMBER) { fprintf(stderr, "runtime: <-address bad types\n"); return -1; }
         int i = (int)idx.number;
         if (i < 0 || i >= vec.vector.len) { fprintf(stderr, "runtime: <-address OOB\n"); return -1; }
         *acc = vec.vector.data[i]; return 0;
     }
     if (strcmp(name, "address->") == 0) {
-        Value val = va_pop(stack), idx = va_pop(stack), vec = va_pop(stack);
+        Value vec = va_pop(stack), idx = va_pop(stack), val = va_pop(stack);
         if (vec.tag != VAL_VECTOR || idx.tag != VAL_NUMBER) { fprintf(stderr, "runtime: address-> bad types\n"); return -1; }
         int i = (int)idx.number;
         if (i < 0 || i >= vec.vector.len) { fprintf(stderr, "runtime: address-> OOB\n"); return -1; }
@@ -644,7 +644,20 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            [rightmost, leftmost] with leftmost on top.
            For (open path dir): stack=[dir, path], path on top. */
         Value path = va_pop(stack), dir = va_pop(stack);
-        if (path.tag != VAL_STRING || dir.tag != VAL_SYMBOL) { fprintf(stderr, "runtime: open bad types\n"); return -1; }
+        if (path.tag != VAL_STRING || dir.tag != VAL_SYMBOL) {
+            fprintf(stderr, "runtime: open bad types — path.tag=%d dir.tag=%d", path.tag, dir.tag);
+            if (path.tag == VAL_SYMBOL) fprintf(stderr, " path='%s'", path.sym.name);
+            if (path.tag == VAL_MARK) fprintf(stderr, " path=MARK");
+            if (dir.tag == VAL_STRING) fprintf(stderr, " dir='%.*s'", dir.str.len, dir.str.data);
+            fprintf(stderr, " stack_remaining=%d\n", stack->len);
+            for (int si = stack->len - 1; si >= 0 && si >= stack->len - 5; si--) {
+                fprintf(stderr, "  stack[%d]: tag=%d", si, stack->data[si].tag);
+                if (stack->data[si].tag == VAL_SYMBOL) fprintf(stderr, " '%s'", stack->data[si].sym.name);
+                if (stack->data[si].tag == VAL_MARK) fprintf(stderr, " MARK");
+                fprintf(stderr, "\n");
+            }
+            return -1;
+        }
         char pb[256]; int n = path.str.len < 255 ? path.str.len : 255;
         memcpy(pb, path.str.data, n); pb[n] = '\0';
         if (strcmp(dir.sym.name, "in") == 0) {
@@ -688,7 +701,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         return 0;
     }
     if (strcmp(name, "write-byte") == 0) {
-        Value s = va_pop(stack), byte = va_pop(stack);
+        Value byte = va_pop(stack), s = va_pop(stack);
         if (s.tag != VAL_STREAM || s.stream.is_input) { fprintf(stderr, "runtime: write-byte on non-output\n"); return -1; }
         if (byte.tag != VAL_NUMBER) { fprintf(stderr, "runtime: write-byte requires number\n"); return -1; }
         fputc((int)byte.number, s.stream.file);
@@ -717,7 +730,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         *acc = val_symbol(buf); return 0;
     }
     if (strcmp(name, "set") == 0) {
-        Value v = va_pop(stack), sym = va_pop(stack);
+        Value sym = va_pop(stack), v = va_pop(stack);
         if (sym.tag != VAL_SYMBOL) { fprintf(stderr, "runtime: set requires symbol\n"); return -1; }
         global_set(sym.sym.name, v); *acc = v; return 0;
     }
@@ -958,9 +971,9 @@ static void resolve_jumps(Instr *code, int len) {
 #define CALL_STACK_DEPTH 1024
 typedef struct { Instr *code; int code_len, pc; Value *env; int env_len, env_cap; } CallFrame;
 
-static Value lookup_env(int n, Value *env, int env_len) {
+static Value lookup_env(int n, Value *env, int env_len, int pc_for_diag) {
     if (n < 0 || n >= env_len) {
-        fprintf(stderr, "runtime: access %d but env len %d\n", n, env_len);
+        fprintf(stderr, "runtime: access %d but env len %d at pc=%d\n", n, env_len, pc_for_diag);
         Value v; memset(&v, 0, sizeof(v)); v.tag = VAL_NUMBER; v.number = 0; return v;
     }
     return env[env_len - 1 - n];
@@ -1097,7 +1110,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             break;
         }
         case OP_ACCESS:
-            acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len);
+            acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len, pc);
             pc++; break;
         case OP_GLOBAL: {
             const char *nm = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
