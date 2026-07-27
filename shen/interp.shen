@@ -139,6 +139,11 @@
   X -> (interp X [cons] [] [] []))
 
 (define kl->zinc { klambda --> zinc-code }
+  \* Primitive call: zinc-c handles primitive? check directly.
+     Bypass normalize/debruijn to avoid CPS closure capture bugs
+     in the self-compiled normalize-term chain. *\
+  [F | Args] -> (zinc-c [F | Args]) where (primitive? F)
+  \* General case: full normalize/debruijn pipeline *\
   X -> (zinc-c (debruijn [] (normalize-term (kmacros X)))))
 
 (define set-toplevel { symbol --> symbol --> symbol }
