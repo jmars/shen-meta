@@ -304,10 +304,12 @@ static Value marshal_to_tagged(Value v) {
     case VAL_BOOLEAN:
         return val_cons(val_symbol("boolean"), val_cons(v, val_nil()));
     case VAL_CONS: {
-        Value car = marshal_to_tagged(*v.cons.car);
-        Value cdr = marshal_to_tagged(*v.cons.cdr);
+        /* Don't recursively marshal car/cdr — extract-kl handles its own
+           recursion on [cons X Y] by calling extract-kl on X and Y directly.
+           Recursive marshalling creates deeply nested structures that the
+           compiled interp patterns can't match. */
         return val_cons(val_symbol("cons"),
-                        val_cons(car, val_cons(cdr, val_nil())));
+                        val_cons(*v.cons.car, val_cons(*v.cons.cdr, val_nil())));
     }
     case VAL_NIL:
         return val_cons(val_symbol("cons"), val_nil());
@@ -1423,12 +1425,14 @@ int main(int argc, char **argv) {
                         }
                         free(env);
 
-                        /* Test B: [number 42] → should return [number 42] */
+                        /* Test B: [number 42] → should return [number 42]
+                           ZINC bytecode is a FLAT list: opcode + operands
+                           are separate elements.  [number 42] as code =
+                           cons('number, cons(42, nil)) — two elements. */
                         printf("  Test B ([number 42] -> [number 42]):\n");
                         Value num_sym = val_symbol("number");
                         Value n42 = val_number(42);
-                        Value instr_num42 = val_cons(num_sym, val_cons(n42, nil));
-                        Value bc = val_cons(instr_num42, nil);
+                        Value bc = val_cons(num_sym, val_cons(n42, nil));
 
                         Value *env2 = malloc((tli.lambda.env_len + 1) * sizeof(Value));
                         env2[0] = bc;
