@@ -597,6 +597,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         vm_error_val = val_error(msg); vm_error_pending = 1;
         longjmp(vm_error_jmp, 1);
     }
+    if (strcmp(name, "shen.fail!") == 0) {
+        /* (defun fail () shen.fail!) — called as (fail) */
+        vm_error_val = val_error("fail"); vm_error_pending = 1;
+        longjmp(vm_error_jmp, 1);
+    }
     if (strcmp(name, "error-to-string") == 0) {
         Value a = va_pop(stack);
         if (a.tag == VAL_ERROR) *acc = val_string(a.error.message, strlen(a.error.message));
@@ -1066,7 +1071,16 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 const char *pn = acc.prim.name;
                 if (exec_primitive(pn, &acc, &stack) < 0) goto done;
                 pc++;
-            } else { fprintf(stderr, "runtime: apply non-callable tag=%d\n", acc.tag); goto done; }
+            } else {
+                fprintf(stderr, "runtime: apply non-callable tag=%d", acc.tag);
+                if (acc.tag == VAL_SYMBOL) {
+                    fprintf(stderr, " sym='%s'", acc.sym.name);
+                    /* Show recent globals that resolved to this symbol */
+                    fprintf(stderr, " at pc=%d depth=%d", pc, frames_sp);
+                }
+                fprintf(stderr, "\n");
+                goto done;
+            }
             break;
         }
         case OP_RETURN: {
@@ -1196,7 +1210,8 @@ static void init_globals(void) {
         "n->string","string->n","str","tlstr","pos",
         "intern","value","open","close","read-byte","write-byte",
         "set","get-time","read-file-as-string","vm.read-file",
-        "@p","fst","snd","gensym","variable?","newvar", NULL
+        "@p","fst","snd","gensym","variable?","newvar",
+        "shen.fail!", NULL
     };
     for (int i = 0; prims[i]; i++) global_set(prims[i], val_prim(prims[i]));
 
@@ -1328,7 +1343,7 @@ int main(int argc, char **argv) {
                 "stream in", "stream out", "let", "if",
                 "lookup", "freeze", "type", "defun", "define",
                 "cond", "and", "or", "do", "fn",
-                "list", "where", "fail",
+                "list", "where",
                 NULL
             };
             for (int i = 0; keywords[i]; i++)
