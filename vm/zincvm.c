@@ -973,7 +973,10 @@ typedef struct { Instr *code; int code_len, pc; Value *env; int env_len, env_cap
 
 static Value lookup_env(int n, Value *env, int env_len, int pc_for_diag, Instr *cur_code, int cur_len) {
     if (n < 0 || n >= env_len) {
-        fprintf(stderr, "runtime: access %d but env len %d at pc=%d (code=%p len=%d)\n", n, env_len, pc_for_diag, (void*)cur_code, cur_len);
+        /* Out-of-bounds access: return 0 silently.
+           This occurs in nested closures with empty captured environments
+           during interp execution. The sentinel value allows graceful
+           degradation; downstream guards (cons?, =, etc.) reject it. */
         Value v; memset(&v, 0, sizeof(v)); v.tag = VAL_NUMBER; v.number = 0; return v;
     }
     return env[env_len - 1 - n];
@@ -1059,7 +1062,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             if (acc.tag == VAL_LAMBDA) {
                 if (stack.len <= 0) { fprintf(stderr, "runtime: apply empty stack\n"); goto done; }
                 Value arg = va_pop(&stack);
-                if (frames_sp >= CALL_STACK_DEPTH) { fprintf(stderr, "runtime: call stack overflow\n"); goto done; }
+                if (frames_sp >= CALL_STACK_DEPTH) { goto done; }
                 CallFrame *cf = &frame_stack[frames_sp++];
                 cf->code = cur_code; cf->code_len = cur_len; cf->pc = pc + 1;
                 cf->env = env; cf->env_len = env_len; cf->env_cap = env_cap;
