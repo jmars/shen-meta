@@ -2,6 +2,12 @@
 
 A meta-circular Shen ZINC abstract machine — Shen evaluating Shen, compiling itself to native bytecode, running on a native C VM.
 
+> **Note for anyone watching this repo** — the thing that works runs on shen-scheme. This project is me building the self-hosted native VM so I can drop the Chez dependency. The meta-circular evaluator was never the hard part.
+>
+> The architecture was. Sequent calculus provides the inference kernel — cut elimination as computation, consistency per inference step. A small LLM handles pattern completion over the proof space. Shen ties them together: the LLM proposes, the sequent calculus disposes, and Lisp macros wire the feedback loop. Three old ideas. The trick was realizing they're not competitors — they're layers.
+>
+> This repo is just packaging. The actual system doesn't need shen-meta. It just needs Shen.
+
 ## Architecture
 
 ```
