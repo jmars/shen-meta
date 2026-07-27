@@ -682,6 +682,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         snprintf(buf, sizeof(buf), "shen.gensym_%ld", gensym_counter++);
         *acc = val_symbol(buf); return 0;
     }
+    if (strcmp(name, "newvar") == 0) {
+        static long newvar_counter = 0;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "shen.V%d", newvar_counter++);
+        *acc = val_symbol(buf); return 0;
+    }
     if (strcmp(name, "set") == 0) {
         Value v = va_pop(stack), sym = va_pop(stack);
         if (sym.tag != VAL_SYMBOL) { fprintf(stderr, "runtime: set requires symbol\n"); return -1; }
@@ -708,6 +714,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
 
         /* Marshal native Value → Shen tagged form */
         Value tagged = marshal_to_tagged(a);
+
+        /* Step 1: extract-kl — tagged form → raw KLambda */
 
         /* Step 1: extract-kl — tagged form → raw KLambda */
         Value extkl = global_get("extract-kl");
@@ -1129,7 +1137,7 @@ static void init_globals(void) {
         "n->string","string->n","str","tlstr","pos",
         "intern","value","open","close","read-byte","write-byte",
         "set","get-time","read-file-as-string","vm.read-file",
-        "@p","fst","snd","gensym","variable?", NULL
+        "@p","fst","snd","gensym","variable?","newvar", NULL
     };
     for (int i = 0; prims[i]; i++) global_set(prims[i], val_prim(prims[i]));
 
@@ -1261,7 +1269,7 @@ int main(int argc, char **argv) {
                 "stream in", "stream out", "let", "if",
                 "lookup", "freeze", "type", "defun", "define",
                 "cond", "and", "or", "do", "fn",
-                "list", "where", "fail", "empty?", "element?",
+                "list", "where", "fail",
                 NULL
             };
             for (int i = 0; keywords[i]; i++)

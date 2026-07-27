@@ -4,7 +4,7 @@
                     string->n n->string absvector address-> <-address emptylist
                     absvector? cons? cons hd tl write-byte read-byte open function?
                     close = eval-kl get-time symbol? boolean? error? stream?
-                    @p fst snd gensym variable?]))
+                    @p fst snd gensym variable? newvar]))
 
 (datatype primitive
   X : primitive >> T : Y;
