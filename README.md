@@ -70,7 +70,9 @@ The C VM (`zincvm`) loads `globals.csexp` — a ~1.4MB bundle of **~1200 closure
 | A | `toplevel-interp([])` → `[cons]` | Pass |
 | B | `toplevel-interp([number 42])` → `[number 42]` | Pass |
 | C | `interp [] [cons] [] [] []` → `[cons]` | Pass |
-| 5 | `eval-kl [+ 1 2]` via marshal chain | **Fails** — CPS closure capture bugs in self-compiled normalize-term/debruijn/zinc-c |
+| 5 | `eval-kl [+ 1 2]` via marshal chain | Pass |
+| 6 | `read-file-as-string` via bundled safe wrapper (`P[4:s]open`) | Pass |
+| 7 | `load` via bundled chain (`read-file` → `read-file-as-bytelist` → `P[4:s]open`) | Pass |
 
 ## Key design decisions
 
@@ -90,11 +92,10 @@ The C VM (`zincvm`) loads `globals.csexp` — a ~1.4MB bundle of **~1200 closure
 - [x] Recursive `eval-kl` delegating to bundled closure
 - [x] Raw I/O from C VM (`raw.open` / `raw.close` / `raw.read-byte`)
 - [x] Missing KLambda primitives: `gensym`, `@p`, `fst`, `snd`, `variable?`
-- [ ] Full read-compile-eval round-trip (bundled `load` runs but crashes — being investigated)
+- [x] Full read-compile-eval round-trip (bundled `load` works — P[4:s]open chain functional)
 - [ ] Bartlet GC integration (`~/github/bartlet-gc`, ~350 lines, conservative mostly-copying)
 - [x] marshal_to_tagged / demarshal_from_tagged layer
 - [x] Flat ZINC bytecode convention for interp family
-- [ ] Fix self-compiled normalize-term/debruijn/zinc-c CPS bugs
 
 ## Credits
 

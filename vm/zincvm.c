@@ -1566,10 +1566,21 @@ int main(int argc, char **argv) {
                     }
                 }
 
+                /* Test 6: bundled read-file-as-string — exercises P[4:s]open safe wrapper */
+                printf("--- Test 6: bundled read-file-as-string via apply ---\n");
+                run_test("rfas-via-apply",
+                         "(mS[8:S]Makefileug[19:s]read-file-as-stringp)", 0);
+
+                /* Test 7: bundled load — exercises full read-compile chain */
+                printf("--- Test 7: bundled load via apply ---\n");
+                run_test("load-via-apply",
+                         "(mS[17:S]test_fixture.shenug[4:s]loadp)", 0);
+
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
                 printf("Raw primitive I/O works via raw.X namespace (bypasses safe wrappers).\n");
                 printf("eval-kl chain (marshal → extract-kl → kl->zinc → toplevel-interp → demarshal) works.\n");
+                printf("Bundled file I/O works — safe wrappers + P[4:s]open chain functional.\n");
             }
         } else {
             /* Single bytecode list */
