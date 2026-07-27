@@ -709,7 +709,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         *acc = val_symbol(buf); return 0;
     }
     if (strcmp(name, "newvar") == 0) {
-        static long newvar_counter = 0;
+        static int newvar_counter = 0;
         char buf[64];
         snprintf(buf, sizeof(buf), "shen.V%d", newvar_counter++);
         *acc = val_symbol(buf); return 0;
@@ -747,8 +747,6 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         Value tagged = marshal_to_tagged(a);
 
         /* Step 1: extract-kl — tagged form → raw KLambda */
-
-        /* Step 1: extract-kl — tagged form → raw KLambda */
         Value extkl = global_get("extract-kl");
         if (extkl.tag != VAL_LAMBDA) {
             fprintf(stderr, "runtime: eval-kl: extract-kl not found in bundle\n");
@@ -775,23 +773,6 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         Value zinc_code = vm_exec_env(klzinc.lambda.code, klzinc.lambda.code_len,
                                        env2, klzinc.lambda.env_len + 1);
         free(env2);
-
-        /* Bypass: self-compiled zinc-c has bugs (returns [number 0]
-           instead of correct values).  For simple primitive calls like
-           (+ 1 2), construct ZINC bytecode directly.
-           TODO: fix self-compiled zinc-c to remove this workaround. */
-        if (klambda.tag == VAL_CONS) {
-            Value car = *klambda.cons.car;
-            if (car.tag == VAL_SYMBOL && strcmp(car.sym.name, "+") == 0) {
-                zinc_code = val_cons(val_symbol("number"),
-                            val_cons(val_number(2),
-                            val_cons(val_symbol("push"),
-                            val_cons(val_symbol("number"),
-                            val_cons(val_number(1),
-                            val_cons(val_symbol("prim"),
-                            val_cons(val_symbol("+"), val_nil())))))));
-            }
-        }
 
         /* Step 3: toplevel-interp — ZINC bytecode → tagged result */
         Value tli = global_get("toplevel-interp");
@@ -1358,9 +1339,10 @@ int main(int argc, char **argv) {
             };
             for (int i = 0; keywords[i]; i++)
                 global_set(keywords[i], val_symbol(keywords[i]));
-            /* fail must be VAL_PRIM (not symbol) — it's both a pattern-match
-               sentinel in where clauses and a callable function. */
-            global_set("fail", val_prim("fail"));
+            /* fail kept as bundled closure — VAL_PRIM override was causing
+               bundled zinc-c to trigger longjmp on where-clause failures.
+               The closure calls shen.fail! which triggers the error correctly. */
+            /* global_set("fail", val_prim("fail")); */
             free(buf);
             /* If second arg, run it as bytecode; otherwise run a test */
             if (argc > 2) {
