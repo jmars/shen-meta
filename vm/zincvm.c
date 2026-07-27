@@ -971,9 +971,9 @@ static void resolve_jumps(Instr *code, int len) {
 #define CALL_STACK_DEPTH 1024
 typedef struct { Instr *code; int code_len, pc; Value *env; int env_len, env_cap; } CallFrame;
 
-static Value lookup_env(int n, Value *env, int env_len, int pc_for_diag) {
+static Value lookup_env(int n, Value *env, int env_len, int pc_for_diag, Instr *cur_code, int cur_len) {
     if (n < 0 || n >= env_len) {
-        fprintf(stderr, "runtime: access %d but env len %d at pc=%d\n", n, env_len, pc_for_diag);
+        fprintf(stderr, "runtime: access %d but env len %d at pc=%d (code=%p len=%d)\n", n, env_len, pc_for_diag, (void*)cur_code, cur_len);
         Value v; memset(&v, 0, sizeof(v)); v.tag = VAL_NUMBER; v.number = 0; return v;
     }
     return env[env_len - 1 - n];
@@ -1110,7 +1110,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             break;
         }
         case OP_ACCESS:
-            acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len, pc);
+            acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len, pc, cur_code, cur_len);
             pc++; break;
         case OP_GLOBAL: {
             const char *nm = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
