@@ -618,7 +618,9 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         return 0;
     }
     if (strcmp(name, "trap-error") == 0) {
-        Value handler = va_pop(stack), body = va_pop(stack);
+        /* RTL: (trap-error Body Handler) — Handler pushed first, then Body.
+           Stack: [mark, Handler, Body] → pop Body first, then Handler. */
+        Value body = va_pop(stack), handler = va_pop(stack);
         if (handler.tag != VAL_LAMBDA) { fprintf(stderr, "runtime: trap-error handler not fn\n"); return -1; }
         vm_error_pending = 0;
         if (setjmp(vm_error_jmp)) {
