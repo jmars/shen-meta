@@ -445,6 +445,15 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             *acc = val_boolean(strcmp(a1.sym.name, a2.sym.name) == 0);
         else if (a1.tag == VAL_BOOLEAN && a2.tag == VAL_BOOLEAN)
             *acc = val_boolean(a1.boolean == a2.boolean);
+        /* HACK: zinc-c generates flat comparisons like = [number 42] "number"
+           instead of = hd(hd(Code)) "number".  Treat cons-vs-symbol as
+           comparing the cons's car to the symbol (both directions). */
+        else if (a1.tag == VAL_CONS && a2.tag == VAL_SYMBOL)
+            *acc = val_boolean(a1.cons.car->tag == VAL_SYMBOL &&
+                               strcmp(a1.cons.car->sym.name, a2.sym.name) == 0);
+        else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_CONS)
+            *acc = val_boolean(a2.cons.car->tag == VAL_SYMBOL &&
+                               strcmp(a2.cons.car->sym.name, a1.sym.name) == 0);
         else *acc = val_boolean(a1.tag == VAL_NIL && a2.tag == VAL_NIL);
         return 0;
     }
@@ -472,11 +481,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "hd") == 0) {
         Value a = va_pop(stack);
+        if (a.tag == VAL_NIL) { *acc = val_nil(); return 0; }
         if (a.tag != VAL_CONS) { fprintf(stderr, "runtime: hd on non-cons\n"); return -1; }
         *acc = *a.cons.car; return 0;
     }
     if (strcmp(name, "tl") == 0) {
         Value a = va_pop(stack);
+        if (a.tag == VAL_NIL) { *acc = val_nil(); return 0; }
         if (a.tag != VAL_CONS) { fprintf(stderr, "runtime: tl on non-cons\n"); return -1; }
         *acc = *a.cons.cdr; return 0;
     }
@@ -940,6 +951,9 @@ static Value env_pop(Value **env, int *env_len) {
     return (*env)[--(*env_len)];
 }
 
+static int trace_counter = -1;
+static int trace_limit = 0;
+
 static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) {
     ValueArray stack; va_init(&stack);
     CallFrame frame_stack[CALL_STACK_DEPTH]; int frames_sp = 0;
@@ -966,6 +980,15 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             break;
         }
         Instr *in = &cur_code[pc];
+        if (trace_counter >= 0) {
+            if (trace_counter < trace_limit) {
+                fprintf(stderr, "  [%d] pc=%d ", trace_counter, pc);
+                fflush(stderr);
+                print_instr(in, 1, 0);
+                fflush(stdout);
+            }
+            trace_counter++;
+        }
         switch (in->op) {
         case OP_NUMBER: case OP_STRING: case OP_SYMBOL: case OP_BOOLEAN:
             acc = in->operand; pc++; break;
@@ -975,6 +998,10 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             const char *pn = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
             va_push(&stack, acc);
             if (exec_primitive(pn, &acc, &stack) < 0) goto done;
+            if (trace_counter >= 0 && trace_counter < trace_limit + 5) {
+                fprintf(stderr, "    -> acc after prim %s: ", pn);
+                print_value(acc); fprintf(stderr, " (tag=%d)\n", acc.tag);
+            }
             pc++;
             break;
         }
@@ -1046,7 +1073,12 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         case OP_LET: env_push(&env, &env_len, &env_cap, acc); pc++; break;
         case OP_ENDLET: if (env_len > 0) env_pop(&env, &env_len); pc++; break;
         case OP_JMP: pc = in->jmp_target; break;
-        case OP_JMPF: if (acc.tag == VAL_BOOLEAN && !acc.boolean) pc = in->jmp_target; else pc++; break;
+        case OP_JMPF:
+            if (trace_counter >= 0 && trace_counter < trace_limit + 5) {
+                fprintf(stderr, "    -> jmpf check: acc.tag=%d, boolean=%d, target=%d\n",
+                        acc.tag, acc.tag == VAL_BOOLEAN ? acc.boolean : -1, in->jmp_target);
+            }
+            if (acc.tag == VAL_BOOLEAN && !acc.boolean) pc = in->jmp_target; else pc++; break;
         case OP_CUR: {
             Value *ec = NULL; int ecl = env_len;
             if (env_len > 0) { ec = malloc(env_len * sizeof(Value)); memcpy(ec, env, env_len * sizeof(Value)); }
@@ -1338,6 +1370,35 @@ int main(int argc, char **argv) {
                 run_test("eval-kl-add",
                          "(mg[5:s]*ev1*ug[11:s]raw.eval-klp)", 0);
 
+                /* Diagnostic: dump bytecode of toplevel-interp and interp */
+                printf("--- Bytecode Dump ---\n");
+                {
+                    Value tli = global_get("toplevel-interp");
+                    if (tli.tag == VAL_LAMBDA) {
+                        printf("toplevel-interp bytecode (%d instrs):\n", tli.lambda.code_len);
+                        print_instr(tli.lambda.code, tli.lambda.code_len < 30 ? tli.lambda.code_len : 30, 0);
+                        if (tli.lambda.code_len > 30) printf("  ... (%d more)\n", tli.lambda.code_len - 30);
+                        printf("env_len=%d\n", tli.lambda.env_len);
+                    }
+                    Value ip = global_get("interp");
+                    if (ip.tag == VAL_LAMBDA) {
+                        printf("\ninterp bytecode (%d instrs):\n", ip.lambda.code_len);
+                        print_instr(ip.lambda.code, ip.lambda.code_len < 50 ? ip.lambda.code_len : 50, 0);
+                        if (ip.lambda.code_len > 50) {
+                            printf("  ... (instructions 50-100):\n");
+                            print_instr(ip.lambda.code + 40, ip.lambda.code_len - 40 < 20 ? ip.lambda.code_len - 40 : 20, 0);
+                            printf("  ... (%d more)\n", ip.lambda.code_len - 100);
+                            /* Print last 50 instructions */
+                            int start = ip.lambda.code_len - 50;
+                            if (start < 50) start = 50;
+                            printf("  --- last 50 instructions (from %d) ---\n", start);
+                            print_instr(ip.lambda.code + start, ip.lambda.code_len - start, 0);
+                        }
+                        printf("env_len=%d\n", ip.lambda.env_len);
+                    }
+                }
+                printf("--- End Bytecode Dump ---\n\n");
+
                 /* Test 5b: call toplevel-interp directly with minimal bytecode */
                 printf("--- Test 5b: toplevel-interp directly ---\n");
                 {
@@ -1374,6 +1435,10 @@ int main(int argc, char **argv) {
                         if (tli.lambda.env_len > 0)
                             memcpy(env2 + 1, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
 
+                        /* Trace Test B */
+                        /* Trace Test B — disabled */
+                        /* trace_counter = 0; trace_limit = 800; */
+
                         if (setjmp(vm_error_jmp) == 0) {
                             Value result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
                                                         env2, tli.lambda.env_len + 1);
@@ -1382,6 +1447,7 @@ int main(int argc, char **argv) {
                         } else {
                             printf("    ERROR: "); print_value(vm_error_val); printf("\n");
                         }
+                        trace_counter = -1;
                         free(env2);
 
                         /* Test C: call interp directly */
@@ -1401,8 +1467,24 @@ int main(int argc, char **argv) {
                             args[3] = cons_tag;        /* acc = [cons] */
                             args[4] = nil_v;           /* code = [] */
 
+                            /* Disable trace for now */
+                            trace_counter = -1; trace_limit = 0;
+
+                            /* Diagnostic: verify env setup */
+                            printf("    env setup verification:\n");
+                            printf("    env[0]=Ret="); print_value(args[0]); printf(" (tag=%d)\n", args[0].tag);
+                            printf("    env[1]=Stack="); print_value(args[1]); printf(" (tag=%d)\n", args[1].tag);
+                            printf("    env[2]=Env="); print_value(args[2]); printf(" (tag=%d)\n", args[2].tag);
+                            printf("    env[3]=Acc="); print_value(args[3]); printf(" (tag=%d)\n", args[3].tag);
+                            printf("    env[4]=Code="); print_value(args[4]); printf(" (tag=%d)\n", args[4].tag);
+                            printf("    cons? nil: ");
+                            Value ctest = val_boolean(args[4].tag == VAL_CONS);
+                            print_value(ctest); printf(" (expected false)\n");
+
                             Value *env_i = malloc((interp_fn.lambda.env_len + 5) * sizeof(Value));
-                            env_i[0] = args[4];  /* code (first grabbed) */
+                            /* lookup_env reverses: access N = env[env_len-1-N]
+                               So env[0]=Code, env[1]=Acc, env[2]=Env, env[3]=Stack, env[4]=Ret */
+                            env_i[0] = args[4];  /* code */
                             env_i[1] = args[3];  /* acc */
                             env_i[2] = args[2];  /* env */
                             env_i[3] = args[1];  /* stack */
