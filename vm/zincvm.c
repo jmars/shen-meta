@@ -1338,6 +1338,95 @@ int main(int argc, char **argv) {
                 run_test("eval-kl-add",
                          "(mg[5:s]*ev1*ug[11:s]raw.eval-klp)", 0);
 
+                /* Test 5b: call toplevel-interp directly with minimal bytecode */
+                printf("--- Test 5b: toplevel-interp directly ---\n");
+                {
+                    Value tli = global_get("toplevel-interp");
+                    if (tli.tag == VAL_LAMBDA) {
+                        /* Test A: empty bytecode → should return [cons] */
+                        Value nil = val_nil();
+                        printf("  Test A ([] -> [cons]):\n");
+
+                        Value *env = malloc((tli.lambda.env_len + 1) * sizeof(Value));
+                        env[0] = nil;  /* empty code */
+                        if (tli.lambda.env_len > 0)
+                            memcpy(env + 1, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
+
+                        if (setjmp(vm_error_jmp) == 0) {
+                            Value result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
+                                                        env, tli.lambda.env_len + 1);
+                            printf("    result: "); print_value(result);
+                            printf(" (tag=%d)\n", result.tag);
+                        } else {
+                            printf("    ERROR: "); print_value(vm_error_val); printf("\n");
+                        }
+                        free(env);
+
+                        /* Test B: [number 42] → should return [number 42] */
+                        printf("  Test B ([number 42] -> [number 42]):\n");
+                        Value num_sym = val_symbol("number");
+                        Value n42 = val_number(42);
+                        Value instr_num42 = val_cons(num_sym, val_cons(n42, nil));
+                        Value bc = val_cons(instr_num42, nil);
+
+                        Value *env2 = malloc((tli.lambda.env_len + 1) * sizeof(Value));
+                        env2[0] = bc;
+                        if (tli.lambda.env_len > 0)
+                            memcpy(env2 + 1, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
+
+                        if (setjmp(vm_error_jmp) == 0) {
+                            Value result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
+                                                        env2, tli.lambda.env_len + 1);
+                            printf("    result: "); print_value(result);
+                            printf(" (tag=%d)\n", result.tag);
+                        } else {
+                            printf("    ERROR: "); print_value(vm_error_val); printf("\n");
+                        }
+                        free(env2);
+
+                        /* Test C: call interp directly */
+                        printf("  Test C (interp [] [cons] [] [] []):\n");
+                        Value interp_fn = global_get("interp");
+                        if (interp_fn.tag == VAL_LAMBDA) {
+                            /* (interp [] [cons] [] [] []) 
+                               args in reverse order: [], [], [], [cons], [] */
+                            Value nil_v = val_nil();
+                            Value cons_tag = val_cons(val_symbol("cons"), nil_v);
+                            
+                            /* Build args as a stack: push rightmost first */
+                            Value args[5];
+                            args[0] = nil_v;           /* ret stack */
+                            args[1] = nil_v;           /* data stack */
+                            args[2] = nil_v;           /* env */
+                            args[3] = cons_tag;        /* acc = [cons] */
+                            args[4] = nil_v;           /* code = [] */
+
+                            Value *env_i = malloc((interp_fn.lambda.env_len + 5) * sizeof(Value));
+                            env_i[0] = args[4];  /* code (first grabbed) */
+                            env_i[1] = args[3];  /* acc */
+                            env_i[2] = args[2];  /* env */
+                            env_i[3] = args[1];  /* stack */
+                            env_i[4] = args[0];  /* ret */
+                            if (interp_fn.lambda.env_len > 0)
+                                memcpy(env_i + 5, interp_fn.lambda.env, interp_fn.lambda.env_len * sizeof(Value));
+
+                            if (setjmp(vm_error_jmp) == 0) {
+                                Value result = vm_exec_env(interp_fn.lambda.code, interp_fn.lambda.code_len,
+                                                            env_i, interp_fn.lambda.env_len + 5);
+                                printf("    result: "); print_value(result);
+                                printf(" (tag=%d)\n", result.tag);
+                            } else {
+                                printf("    ERROR: "); print_value(vm_error_val); printf("\n");
+                            }
+                            free(env_i);
+                        } else {
+                            printf("    interp not found (tag=%d)\n", interp_fn.tag);
+                        }
+                    } else {
+                        printf("  toplevel-interp not found\n");
+                    }
+                }
+
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
                 printf("Raw primitive I/O works via raw.X namespace (bypasses safe wrappers).\n");
