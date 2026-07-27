@@ -456,6 +456,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_CONS)
             *acc = val_boolean(a2.cons.car->tag == VAL_SYMBOL &&
                                strcmp(a2.cons.car->sym.name, a1.sym.name) == 0);
+        /* fail is registered as VAL_PRIM so it can be both applied (error)
+           and compared in where clauses.  Compare symbol name with prim name. */
+        else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_PRIM)
+            *acc = val_boolean(strcmp(a1.sym.name, a2.prim.name) == 0);
+        else if (a1.tag == VAL_PRIM && a2.tag == VAL_SYMBOL)
+            *acc = val_boolean(strcmp(a1.prim.name, a2.sym.name) == 0);
         else *acc = val_boolean(a1.tag == VAL_NIL && a2.tag == VAL_NIL);
         return 0;
     }
@@ -597,8 +603,10 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         vm_error_val = val_error(msg); vm_error_pending = 1;
         longjmp(vm_error_jmp, 1);
     }
-    if (strcmp(name, "shen.fail!") == 0) {
-        /* (defun fail () shen.fail!) — called as (fail) */
+    if (strcmp(name, "shen.fail!") == 0 || strcmp(name, "fail") == 0) {
+        /* (defun fail () shen.fail!) — called as (fail)
+           Also used as pattern-match sentinel: registered as VAL_PRIM
+           so it can be both applied (error) and compared (= X fail). */
         vm_error_val = val_error("fail"); vm_error_pending = 1;
         longjmp(vm_error_jmp, 1);
     }
@@ -1211,7 +1219,7 @@ static void init_globals(void) {
         "intern","value","open","close","read-byte","write-byte",
         "set","get-time","read-file-as-string","vm.read-file",
         "@p","fst","snd","gensym","variable?","newvar",
-        "shen.fail!", NULL
+        "shen.fail!","fail", NULL
     };
     for (int i = 0; prims[i]; i++) global_set(prims[i], val_prim(prims[i]));
 
@@ -1348,6 +1356,9 @@ int main(int argc, char **argv) {
             };
             for (int i = 0; keywords[i]; i++)
                 global_set(keywords[i], val_symbol(keywords[i]));
+            /* fail must be VAL_PRIM (not symbol) — it's both a pattern-match
+               sentinel in where clauses and a callable function. */
+            global_set("fail", val_prim("fail"));
             free(buf);
             /* If second arg, run it as bytecode; otherwise run a test */
             if (argc > 2) {
