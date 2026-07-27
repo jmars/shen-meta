@@ -1579,6 +1579,21 @@ int main(int argc, char **argv) {
                 run_test("load-via-apply",
                          "(mS[17:S]test_fixture.shenug[4:s]loadp)", 0);
 
+                /* Test 8: load a real Shen file — shen/util.shen */
+                printf("--- Test 8: bundled load shen/util.shen ---\n");
+                run_test("load-util",
+                         "(mS[15:S]shen/util.shenug[4:s]loadp)", 0);
+
+                /* Test 9: call (id 42) from loaded util.shen — verifies functions work */
+                printf("--- Test 9: call (id 42) from loaded util.shen ---\n");
+                run_test("id-from-util",
+                         "(mn[2:n]42ug[2:s]idp)", 0);
+
+                /* Test 10: call (newvar) from loaded util.shen — verifies gensym works */
+                printf("--- Test 10: call (newvar) from loaded util.shen ---\n");
+                run_test("newvar-from-util",
+                         "(ug[6:s]newvarp)", 0);
+
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
                 printf("Raw primitive I/O works via raw.X namespace (bypasses safe wrappers).\n");
