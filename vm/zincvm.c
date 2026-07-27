@@ -1060,7 +1060,12 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         }
         case OP_APPLY: {
             if (acc.tag == VAL_LAMBDA) {
-                if (stack.len <= 0) { fprintf(stderr, "runtime: apply empty stack\n"); goto done; }
+                /* Skip marks accumulated on top from failed pattern matches.
+                   The intentional mark for this apply is below the args
+                   (ZINC convention: pushmark arg push ... apply). */
+                while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
+                    va_pop(&stack);
+                if (stack.len <= 0) { /* zero-arg call with stale marks — skip silently */ goto done; }
                 Value arg = va_pop(&stack);
                 if (frames_sp >= CALL_STACK_DEPTH) { goto done; }
                 CallFrame *cf = &frame_stack[frames_sp++];
