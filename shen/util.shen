@@ -49,3 +49,10 @@
                     absvector? cons? cons hd tl write-byte read-byte open function?
                     close = eval-kl get-time symbol? boolean? error? stream?
                     @p fst snd gensym variable? newvar]))
+
+\* Zinc instruction keywords used as list constructors in zinc-c/zinc-t RHS.
+   These must NOT be wrapped with [function ...] by debruijn. *\
+(define instruction-keyword? { symbol --> boolean }
+  X -> (element? X [access global grab let jmpf jmp label
+                    symbol prim push appterm number string boolean
+                    cur return endlet pushmark apply]))

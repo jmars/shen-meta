@@ -127,6 +127,13 @@
      zinc-c compiles to [global function] instead of [global X]. *\
   Scope [function X] -> [function X] where (symbol? X)
 
+  \* Zinc instruction keywords used as list constructors in zinc-c/zinc-t
+     RHS must NOT be wrapped with [function ...].  Without these rules,
+     [prim F] becomes [[function prim] F] → [global prim] → crash. *\
+  Scope [K]         -> [K] where (instruction-keyword? K)
+  Scope [K X]       -> [K (debruijn Scope X)] where (instruction-keyword? K)
+  Scope [K | X]     -> [K | (map-debruijn Scope X)] where (instruction-keyword? K)
+
   Scope [X Y]        <- (if (not (element? X Scope)) [[function X] (debruijn Scope Y)] (fail)) where (symbol? X)
   Scope [X | Y]      <- (if (not (element? X Scope)) [[function X] | (map-debruijn Scope Y)] (fail)) where (symbol? X)
   Scope [X Y]        -> [(debruijn Scope X) (debruijn Scope Y)]

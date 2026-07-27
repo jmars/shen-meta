@@ -222,6 +222,7 @@
 (set-toplevel intersperse intersperse)
 (set-toplevel fold-append fold-append)
 (set-toplevel primitive? primitive?)
+(set-toplevel instruction-keyword? instruction-keyword?)
 
 \* Bundle the meta-circular interpreter and its helpers.
    Without interp in global-table, toplevel-interp's bytecode
