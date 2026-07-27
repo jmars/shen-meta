@@ -625,8 +625,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             Value err = val_error(vm_error_val.error.message);
             Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
             Value *henv = malloc((handler.lambda.env_len + 1) * sizeof(Value));
-            henv[0] = err;
-            memcpy(henv + 1, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
+            memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
+            henv[handler.lambda.env_len] = err;
             handler.lambda.env = henv; handler.lambda.env_len++;
             *acc = vm_exec(hc, hl);
         } else {
@@ -755,9 +755,9 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             goto done;
         }
         Value *env1 = malloc((extkl.lambda.env_len + 1) * sizeof(Value));
-        env1[0] = tagged;
         if (extkl.lambda.env_len > 0)
-            memcpy(env1 + 1, extkl.lambda.env, extkl.lambda.env_len * sizeof(Value));
+            memcpy(env1, extkl.lambda.env, extkl.lambda.env_len * sizeof(Value));
+        env1[extkl.lambda.env_len] = tagged;
         Value klambda = vm_exec_env(extkl.lambda.code, extkl.lambda.code_len,
                                      env1, extkl.lambda.env_len + 1);
         free(env1);
@@ -769,9 +769,9 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             goto done;
         }
         Value *env2 = malloc((klzinc.lambda.env_len + 1) * sizeof(Value));
-        env2[0] = klambda;
         if (klzinc.lambda.env_len > 0)
-            memcpy(env2 + 1, klzinc.lambda.env, klzinc.lambda.env_len * sizeof(Value));
+            memcpy(env2, klzinc.lambda.env, klzinc.lambda.env_len * sizeof(Value));
+        env2[klzinc.lambda.env_len] = klambda;
         Value zinc_code = vm_exec_env(klzinc.lambda.code, klzinc.lambda.code_len,
                                        env2, klzinc.lambda.env_len + 1);
         free(env2);
@@ -800,9 +800,9 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             goto done;
         }
         Value *env3 = malloc((tli.lambda.env_len + 1) * sizeof(Value));
-        env3[0] = zinc_code;
         if (tli.lambda.env_len > 0)
-            memcpy(env3 + 1, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
+            memcpy(env3, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
+        env3[tli.lambda.env_len] = zinc_code;
         Value tagged_result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
                                            env3, tli.lambda.env_len + 1);
         free(env3);
@@ -1070,8 +1070,8 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 env = NULL; env_len = 0; env_cap = 0;
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *ne = malloc((acc.lambda.env_len + 1) * sizeof(Value));
-                ne[0] = arg;
-                memcpy(ne + 1, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
+                memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
+                ne[acc.lambda.env_len] = arg;
                 env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
                 pc = 0;
             } else if (acc.tag == VAL_PRIM) {
@@ -1102,7 +1102,8 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 if (acc.tag != VAL_LAMBDA) { fprintf(stderr, "runtime: return non-lambda\n"); goto done; }
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *ne = malloc((acc.lambda.env_len + 1) * sizeof(Value));
-                ne[0] = v; memcpy(ne + 1, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
+                memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
+                ne[acc.lambda.env_len] = v;
                 free(env); env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
                 pc = 0;
             } else if (frames_sp > 0) {
@@ -1139,7 +1140,8 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 Value v = va_pop(&stack);
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *ne = malloc((acc.lambda.env_len + 1) * sizeof(Value));
-                ne[0] = v; memcpy(ne + 1, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
+                memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
+                ne[acc.lambda.env_len] = v;
                 free(env); env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
                 pc = 0; break;
             } else if (acc.tag == VAL_PRIM) {
@@ -1462,9 +1464,9 @@ int main(int argc, char **argv) {
                         printf("  Test A ([] -> [cons]):\n");
 
                         Value *env = malloc((tli.lambda.env_len + 1) * sizeof(Value));
-                        env[0] = nil;  /* empty code */
                         if (tli.lambda.env_len > 0)
-                            memcpy(env + 1, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
+                            memcpy(env, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
+                        env[tli.lambda.env_len] = nil;  /* empty code */
 
                         if (setjmp(vm_error_jmp) == 0) {
                             Value result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
@@ -1486,9 +1488,9 @@ int main(int argc, char **argv) {
                         Value bc = val_cons(num_sym, val_cons(n42, nil));
 
                         Value *env2 = malloc((tli.lambda.env_len + 1) * sizeof(Value));
-                        env2[0] = bc;
                         if (tli.lambda.env_len > 0)
-                            memcpy(env2 + 1, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
+                            memcpy(env2, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
+                        env2[tli.lambda.env_len] = bc;
 
                         /* Trace Test B */
                         /* Trace Test B — disabled */
@@ -1537,13 +1539,16 @@ int main(int argc, char **argv) {
                             print_value(ctest); printf(" (expected false)\n");
 
                             Value *env_i = malloc((interp_fn.lambda.env_len + 5) * sizeof(Value));
-                            /* lookup_env reverses: access N = env[env_len-1-N]
-                               So env[0]=Code, env[1]=Acc, env[2]=Env, env[3]=Stack, env[4]=Ret */
-                            env_i[0] = args[4];  /* code */
-                            env_i[1] = args[3];  /* acc */
-                            env_i[2] = args[2];  /* env */
-                            env_i[3] = args[1];  /* stack */
-                            env_i[4] = args[0];  /* ret */
+                            /* After the append fix, APPLY appends first arg (code),
+                               then 4 GRABs append acc, senv, stk, ret.
+                               Result: env = [captured..., code, acc, senv, stk, ret]
+                               access 4 = code, access 3 = acc, access 2 = senv,
+                               access 1 = stk, access 0 = ret. */
+                            env_i[0] = args[4];  /* code   → access 4 */
+                            env_i[1] = args[3];  /* acc    → access 3 */
+                            env_i[2] = args[2];  /* env    → access 2 */
+                            env_i[3] = args[1];  /* stack  → access 1 */
+                            env_i[4] = args[0];  /* ret    → access 0 */
                             if (interp_fn.lambda.env_len > 0)
                                 memcpy(env_i + 5, interp_fn.lambda.env, interp_fn.lambda.env_len * sizeof(Value));
 
