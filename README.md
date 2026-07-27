@@ -22,7 +22,7 @@ Shen source → kmacros → normalize → debruijn → zinc-c → csexp → C VM
 | **KLambda loader** | `shen/load.shen` | Raw s-expression parser + `interp-load` for `.kl` files |
 | **Utilities** | `shen/util.shen` | `defun->lambda`, `primitive?`, `dedupe-globals` |
 | **Native compiler** | `shen/compile.shen` | ZINC → canonical s-expression bytecode |
-| **C VM** | `vm/zincvm.c` | Native parser + VM (~1000 lines, all primitives, closures, tail calls) |
+| **C VM** | `vm/zincvm.c` | Native parser + VM (~1590 lines, all primitives, closures, tail calls) |
 | **Serializer** | `shen/serialize.shen` | Compiles safe wrappers to csexp bundle for native VM |
 
 ## Build & Run
@@ -53,14 +53,18 @@ Example: `(+ 1 2)` → `(mn[1:n]2un[1:n]1ug[1:s]+p)`
 
 ## Self-hosting proof
 
-The C VM (`zincvm`) loads `globals.csexp` — a 1.3MB bundle of **~1200 closures** compiled by the metacircular interpreter from all 24 Shen OS KLambda files. Four self-hosting tests run automatically:
+The C VM (`zincvm`) loads `globals.csexp` — a ~1.4MB bundle of **~1200 closures** compiled by the metacircular interpreter from all 24 Shen OS KLambda files. Four self-hosting tests run automatically:
 
-| Test | What it proves |
-|---|---|
-| `(+ 1 2)` | Bundled closures execute correctly (via `%%` primitives) |
-| `(reverse [1 2 3])` | Bundled data-structure functions work |
-| `(factorial 5)` | Bundled recursive functions work |
-| `raw.open` / `raw.close` | Raw primitives bypass safe wrapper shadowing |
+| Test | What it proves | Status |
+|---|---|---|
+| 1 | `(+ 1 2)` via bundled safe.+ | Pass |
+| 2 | `(reverse [1 2 3])` via bundled reverse | Pass |
+| 3 | `(factorial 5)` via bundled factorial | Pass |
+| 4 | `(raw.open/close)` — raw I/O primitives | Pass |
+| A | `toplevel-interp([])` → `[cons]` | Pass |
+| B | `toplevel-interp([number 42])` → `[number 42]` | Pass |
+| C | `interp [] [cons] [] [] []` → `[cons]` | Pass |
+| 5 | `eval-kl [+ 1 2]` via marshal chain | **Fails** — CPS closure capture bugs in self-compiled normalize-term/debruijn/zinc-c |
 
 ## Key design decisions
 
@@ -82,6 +86,9 @@ The C VM (`zincvm`) loads `globals.csexp` — a 1.3MB bundle of **~1200 closures
 - [x] Missing KLambda primitives: `gensym`, `@p`, `fst`, `snd`, `variable?`
 - [ ] Full read-compile-eval round-trip (bundled `load` runs but crashes — being investigated)
 - [ ] Bartlet GC integration (`~/github/bartlet-gc`, ~350 lines, conservative mostly-copying)
+- [x] marshal_to_tagged / demarshal_from_tagged layer
+- [x] Flat ZINC bytecode convention for interp family
+- [ ] Fix self-compiled normalize-term/debruijn/zinc-c CPS bugs
 
 ## Credits
 

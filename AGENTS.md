@@ -7,6 +7,7 @@ make          # build C VM
 make test     # run 28 built-in tests
 make pipeline # compile (+ 1 2) through full pipeline
 make bundle   # serialize all safe wrappers → globals.csexp
+make run-bundle  # run C VM with globals.csexp (self-hosting tests)
 ```
 
 ## Architecture
@@ -15,13 +16,23 @@ make bundle   # serialize all safe wrappers → globals.csexp
 Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-zinc → nat->csexp → C VM
 ```
 
-Key files (under `shen/` unless noted):
+## Self-hosting tests
+
+| Test | Description | Status |
+|---|---|---|
+| 1-4 | +, reverse, factorial, raw.open/close via bundled wrappers | Pass |
+| A | toplevel-interp on `[]` → `[cons]` | Pass |
+| B | toplevel-interp on `[number 42]` → `[number 42]` | Pass |
+| C | interp `[] [cons] [] [] []` → `[cons]` | Pass |
+| 5 | eval-kl `[+ 1 2]` via marshal chain | **Fails** — CPS closure capture bugs in self-compiled normalize-term/debruijn/zinc-c |
+
+## Key files (under `shen/` unless noted):
 - `shen/interp.shen` — meta-circular ZINC VM (loads everything)
 - `shen/normalize.shen` — KLambda normalization + debruijn indices
 - `shen/zinc.shen` — KLambda → ZINC bytecode compiler
 - `shen/compile.shen` — ZINC → canonical s-expression (csexp)
 - `shen/primitives.shen` — 37 type-checked safe wrappers
-- `vm/zincvm.c` — native C parser + VM (~970 lines)
+- `vm/zincvm.c` — native C parser + VM (~1590 lines)
 - `shen/serialize.shen` — compile all closures from global-table to csexp bundle
 - `shen/toplevel.shen` — `interp-eval` — compiles defun forms through interpreter
 - `shen/load.shen` — `interp-load` / `interp-load-raw` — file loading
@@ -47,6 +58,8 @@ Key files (under `shen/` unless noted):
 - Primitives dispatch via `exec_primitive()` — apply-mode pops mark + args from stack
 - Inline `OP_PRIM` (`P`) executes primitive with args from stack + accumulator (ZINC semantics)
 - `trap-error`/`simple-error` use `setjmp`/`longjmp`
+- `eval_kl_depth` recursion guard: setjmp guard ensures depth always decremented even on
+  longjmp from simple-error. Without this, a failed eval-kl blocks all subsequent calls.
 
 ## Pipeline gotchas
 
@@ -61,6 +74,13 @@ Key files (under `shen/` unless noted):
   is a single instruction whose operand is the closure's code array
 - `ps` returns KLambda; unary primitives like `number?` lack `%%` wrapping in
   Shen 41.2 — normalize/debruijn need to handle bare primitives for inline `prim`
+- `marshal_to_tagged` must NOT recursively tag VAL_CONS car/cdr. extract-kl handles its
+  own recursion on `[cons X Y]`. Recursive marshalling creates impossibly deep nesting.
+- ZINC bytecode for the interp family is FLAT: opcodes and operands are separate list elements.
+  `[number 42]` = cons('number, cons(42, nil)). NOT cons(cons('number, cons(42, nil)), nil).
+- `global` keyword registration: ZINC pattern keywords (number, symbol, cons, lambda, etc.)
+  must be forced into the global table as symbols after parse_bundle, or self-compiled
+  pattern-matching code resolves them as closures instead of tag symbols.
 
 ## Eval/load & serialization
 
@@ -73,7 +93,7 @@ Key files (under `shen/` unless noted):
 - Output goes to file via `open`/`pr`/`close` — `print` wraps long lines
   and `grep '^"'` truncates multi-line bundles
 - `pr` writes raw string to a stream; `(stoutput)` is stdout
-- ~1220 closures in bundle (1.3MB), 1189 loaded by C VM (parse_bundle returns on first error)
+- ~1216 closures in bundle (~1.4MB)
 - All 24 KLambda files loaded: core through shen-scheme-extensions + stlib + init
 - `read-file-raw` in `load.shen` parses `.kl` files without macro expansion
   using `read-file-as-string` + recursive descent with cached `strlen`
