@@ -908,7 +908,6 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
 
     /* --- Stream accessors for REPL --- */
     if (strcmp(name, "stinput") == 0) {
-        va_pop(stack); /* ignore arg count marker */
         Value v; memset(&v, 0, sizeof(v));
         v.tag = VAL_STREAM;
         v.stream.file = stdin;
@@ -916,7 +915,6 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         *acc = v; return 0;
     }
     if (strcmp(name, "stoutput") == 0) {
-        va_pop(stack); /* ignore arg count marker */
         Value v; memset(&v, 0, sizeof(v));
         v.tag = VAL_STREAM;
         v.stream.file = stdout;
@@ -1196,8 +1194,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) va_pop(&stack);
                 const char *pn = acc.prim.name;
                 if (exec_primitive(pn, &acc, &stack) < 0) goto done;
-                /* ZINC convention: push result to stack so it survives
-                   a subsequent OP_GLOBAL that overwrites acc. */
                 if (pc + 1 < cur_len && cur_code[pc + 1].op == OP_GLOBAL)
                     va_push(&stack, acc);
                 pc++;
@@ -1240,8 +1236,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         }
         case OP_ACCESS:
             acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len, pc, cur_code, cur_len);
-            /* ZINC convention: push to stack so the value survives a
-               subsequent OP_GLOBAL that overwrites acc. */
             if (pc + 1 < cur_len && cur_code[pc + 1].op == OP_GLOBAL)
                 va_push(&stack, acc);
             pc++; break;
@@ -1807,9 +1801,11 @@ int main(int argc, char **argv) {
                 /* REPL smoke test — run AFTER GC stress to verify GC survives collections */
                 printf("\n--- REPL smoke test ---\n");
                 fflush(stdout);
+                /* Run shen.initialise separately — its error must not abort shen.repl */
+                run_test("repl-init", "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
+                /* Now run shen.repl with (cons success []) as arg */
                 run_test("repl-smoke",
-                         "(mn[1:n]0ug[15:s]shen.initialisep"
-                         "mn[1:n]0P[9:s]emptylistus[7:s]successP[4:s]consug[9:s]shen.replp)", 0);
+                         "(mn[1:n]0P[9:s]emptylistus[7:s]successP[4:s]consug[9:s]shen.replp)", 0);
                 printf("--- REPL smoke test done ---\n");
             }
         } else {
