@@ -172,7 +172,7 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 ## GC (Bartlett copying collector)
 
 - Submodule: `vendor/bartlett-gc` at `github.com/jmars/bartlett-gc.git` (`c32a5a1`)
-- Heap: 16MB, initialized in `main()` via `gcinit(16*1024*1024, &gc_stack_root, NULL)`
+- Heap: 64MB, initialized in `main()` via `gcinit(64*1024*1024, &gc_stack_root, NULL)`
 - Allocation: `GC_VALUE()` = `gcalloc(sizeof(Value), 4)` — 4 pointer slots for tracing
 - `GC_STR(len)` = `gcalloc(len+1, 0)` — 0 pointer slots (opaque)
 - **`gc_set_extra_roots(global_table, sizeof(global_table))`** called after gcinit —
@@ -202,8 +202,9 @@ patterns. Hand-written test bytecode (28 built-in + self-hosting) uses explicit
 `u` and is NOT affected.
 
 **Remaining gap:** deeper patterns in `shen.read-loop`, `shen.evaluate-lineread`,
-and the property-vector system still fail. The REPL invokes without crash but
-produces no I/O. Full ZINC convention alignment would require making
+and the property-vector system still fail. The REPL invokes and produces runtime
+errors (value on non-symbol, write-byte on non-output) instead of silent failure.
+Full ZINC convention alignment would require making
 OP_GLOBAL/ACCESS/NUMBER push to stack and removing redundant `u` from all
 hand-written tests.
 
@@ -215,8 +216,16 @@ hand-written tests.
 - `shen.initialise` (15-char name) must be called before `shen.repl`. Wraps
   `shen.initialise-environment` → `shen.initialise-lambda-forms` →
   `shen.initialise-signedfuncs`.
-- REPL bytecode (no crash, blocked on ZINC convention):
+- REPL bytecode (produces runtime errors, blocked on ZINC convention):
   `(mn[1:n]0ug[15:s]shen.initialisepmn[1:n]0ug[9:s]shen.replp)`
+- **Recent fixes:** `*stinput*`/`*stoutput*`/`*sterror*` initialized as VAL_STREAM globals after
+  parse_bundle (bundled stinput/stoutput closures use `(value *stinput*)`).
+  `write-byte` arg order fixed in exec_primitive (ZINC RTL: byte pushed first,
+  stream pushed last; first pop is stream, second is byte).
+  CALL_STACK_DEPTH bumped from 8192 to 65536 (shen.initialise was exhausting
+  the call stack and causing goto done, aborting the VM before reaching
+  credits/repl).
+  GC heap increased from 16MB to 64MB (deeper call stacks need more headroom).
 - Name confusion: `shen.initialise_environment` (underscore, 27 chars) is a
   DIFFERENT function — only resets shen.*call*/shen.*infs* counters. Called by
   shen.loop each iteration. Not the setup function.
