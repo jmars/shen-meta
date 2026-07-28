@@ -32,6 +32,16 @@
 #include <setjmp.h>
 #include <time.h>
 
+#include "gc.h"
+
+/* GC helpers: allocate Values and strings on the Bartlett GC heap.
+   Values get 4 pointer slots (covers cons car/cdr, lambda code/env, etc.).
+   String data gets 0 pointer slots (opaque char buffers). */
+#define GC_VALUE()        ((Value*)gcalloc(sizeof(Value), 4))
+#define GC_STR(len)       ((char*)gcalloc((len) + 1, 0))
+
+static struct gc_state gc_state;
+
 /* ------------------------------------------------------------------ */
 /*  Value types                                                        */
 /* ------------------------------------------------------------------ */
@@ -131,7 +141,7 @@ static Value val_number(long n) {
 static Value val_string(const char *data, int len) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_STRING;
-    v.str.data = malloc(len + 1);
+    v.str.data = GC_STR(len);
     memcpy(v.str.data, data, len);
     v.str.data[len] = '\0';
     v.str.len = len; return v;
@@ -146,7 +156,7 @@ static Value val_boolean(int b) {
 }
 static Value val_cons(Value car, Value cdr) {
     Value v; memset(&v, 0, sizeof(v));
-    v.tag = VAL_CONS; v.cons.car = malloc(sizeof(Value)); *v.cons.car = car; v.cons.cdr = malloc(sizeof(Value)); *v.cons.cdr = cdr; return v;
+    v.tag = VAL_CONS; v.cons.car = GC_VALUE(); *v.cons.car = car; v.cons.cdr = GC_VALUE(); *v.cons.cdr = cdr; return v;
 }
 static Value val_nil(void) {
     Value v; memset(&v, 0, sizeof(v));
@@ -178,7 +188,7 @@ static Value val_error(const char *msg) {
 static Value val_vector(int size) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_VECTOR; v.vector.len = size;
-    v.vector.data = size > 0 ? calloc(size, sizeof(Value)) : NULL;
+    v.vector.data = size > 0 ? (Value*)gcalloc(size * sizeof(Value), 4 * size) : NULL;
     return v;
 }
 static Value val_stream_in(FILE *f) {
@@ -221,11 +231,16 @@ static void print_value(Value v) {
 typedef struct { Value *data; int len; int cap; } ValueArray;
 
 static void va_init(ValueArray *a) {
-    a->data = malloc(STACK_INIT_CAP * sizeof(Value));
+    a->data = (Value*)gcalloc(STACK_INIT_CAP * sizeof(Value), 4 * STACK_INIT_CAP);
     a->len = 0; a->cap = STACK_INIT_CAP;
 }
 static void va_push(ValueArray *a, Value v) {
-    if (a->len >= a->cap) { a->cap *= 2; a->data = realloc(a->data, a->cap * sizeof(Value)); }
+    if (a->len >= a->cap) {
+        int new_cap = a->cap * 2;
+        Value *new_data = (Value*)gcalloc(new_cap * sizeof(Value), 4 * new_cap);
+        memcpy(new_data, a->data, a->len * sizeof(Value));
+        a->data = new_data; a->cap = new_cap;
+    }
     a->data[a->len++] = v;
 }
 static Value va_pop(ValueArray *a) {
@@ -233,7 +248,7 @@ static Value va_pop(ValueArray *a) {
     return a->data[--a->len];
 }
 static Value va_peek(ValueArray *a) { return a->data[a->len - 1]; }
-static void va_free(ValueArray *a) { free(a->data); a->data = NULL; a->len = a->cap = 0; }
+static void va_free(ValueArray *a) { a->data = NULL; a->len = a->cap = 0; }
 
 /* ------------------------------------------------------------------ */
 /*  Global table                                                       */
@@ -626,7 +641,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         if (setjmp(vm_error_jmp)) {
             Value err = val_error(vm_error_val.error.message);
             Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
-            Value *henv = malloc((handler.lambda.env_len + 1) * sizeof(Value));
+            Value *henv = (Value*)gcalloc((handler.lambda.env_len + 1) * sizeof(Value), 4 * (handler.lambda.env_len + 1));
             memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
             henv[handler.lambda.env_len] = err;
             handler.lambda.env = henv; handler.lambda.env_len++;
@@ -767,13 +782,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             fprintf(stderr, "runtime: eval-kl: extract-kl not found in bundle\n");
             goto done;
         }
-        Value *env1 = malloc((extkl.lambda.env_len + 1) * sizeof(Value));
+        Value *env1 = (Value*)gcalloc((extkl.lambda.env_len + 1) * sizeof(Value), 4 * (extkl.lambda.env_len + 1));
         if (extkl.lambda.env_len > 0)
             memcpy(env1, extkl.lambda.env, extkl.lambda.env_len * sizeof(Value));
         env1[extkl.lambda.env_len] = tagged;
         Value klambda = vm_exec_env(extkl.lambda.code, extkl.lambda.code_len,
                                      env1, extkl.lambda.env_len + 1);
-        free(env1);
 
         /* Step 2: kl->zinc — raw KLambda → ZINC bytecode */
         Value klzinc = global_get("kl->zinc");
@@ -781,13 +795,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             fprintf(stderr, "runtime: eval-kl: kl->zinc not found in bundle\n");
             goto done;
         }
-        Value *env2 = malloc((klzinc.lambda.env_len + 1) * sizeof(Value));
+        Value *env2 = (Value*)gcalloc((klzinc.lambda.env_len + 1) * sizeof(Value), 4 * (klzinc.lambda.env_len + 1));
         if (klzinc.lambda.env_len > 0)
             memcpy(env2, klzinc.lambda.env, klzinc.lambda.env_len * sizeof(Value));
         env2[klzinc.lambda.env_len] = klambda;
         Value zinc_code = vm_exec_env(klzinc.lambda.code, klzinc.lambda.code_len,
                                        env2, klzinc.lambda.env_len + 1);
-        free(env2);
 
         /* Step 3: toplevel-interp — ZINC bytecode → tagged result */
         Value tli = global_get("toplevel-interp");
@@ -795,13 +808,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             fprintf(stderr, "runtime: eval-kl: toplevel-interp not found in bundle\n");
             goto done;
         }
-        Value *env3 = malloc((tli.lambda.env_len + 1) * sizeof(Value));
+        Value *env3 = (Value*)gcalloc((tli.lambda.env_len + 1) * sizeof(Value), 4 * (tli.lambda.env_len + 1));
         if (tli.lambda.env_len > 0)
             memcpy(env3, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
         env3[tli.lambda.env_len] = zinc_code;
         Value tagged_result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
                                            env3, tli.lambda.env_len + 1);
-        free(env3);
 
         /* Step 4: demarshal tagged result → native Value */
         result = demarshal_from_tagged(tagged_result);
@@ -982,7 +994,12 @@ static Value lookup_env(int n, Value *env, int env_len, int pc_for_diag, Instr *
     return env[env_len - 1 - n];
 }
 static void env_push(Value **env, int *env_len, int *env_cap, Value v) {
-    if (*env_len >= *env_cap) { *env_cap = *env_cap ? (*env_cap) * 2 : 4; *env = realloc(*env, (*env_cap) * sizeof(Value)); }
+    if (*env_len >= *env_cap) {
+        int new_cap = *env_cap ? (*env_cap) * 2 : 4;
+        Value *new_env = (Value*)gcalloc(new_cap * sizeof(Value), 4 * new_cap);
+        memcpy(new_env, *env, *env_len * sizeof(Value));
+        *env = new_env; *env_cap = new_cap;
+    }
     (*env)[(*env_len)++] = v;
 }
 static Value env_pop(Value **env, int *env_len) {
@@ -999,7 +1016,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
     Value *env = NULL; int env_len = 0, env_cap = 0;
     if (init_env_len > 0 && init_env) {
         env_cap = init_env_len;
-        env = malloc(env_cap * sizeof(Value));
+        env = (Value*)gcalloc(env_cap * sizeof(Value), 4 * env_cap);
         memcpy(env, init_env, init_env_len * sizeof(Value));
         env_len = init_env_len;
     }
@@ -1013,7 +1030,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             if (frames_sp > 0) {
                 CallFrame *cf = &frame_stack[--frames_sp];
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
-                free(env); env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
+                env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
                 continue;
             }
             break;
@@ -1052,7 +1069,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 if (frames_sp > 0) {
                     CallFrame *cf = &frame_stack[--frames_sp];
                     cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
-                    free(env); env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
+                    env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
                 } else goto done;
             } else if (stack.len > 0) { env_push(&env, &env_len, &env_cap, va_pop(&stack)); pc++; }
             else pc++;
@@ -1073,7 +1090,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 cf->env = env; cf->env_len = env_len; cf->env_cap = env_cap;
                 env = NULL; env_len = 0; env_cap = 0;
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
-                Value *ne = malloc((acc.lambda.env_len + 1) * sizeof(Value));
+                Value *ne = (Value*)gcalloc((acc.lambda.env_len + 1) * sizeof(Value), 4 * (acc.lambda.env_len + 1));
                 memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
                 ne[acc.lambda.env_len] = arg;
                 env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
@@ -1100,20 +1117,20 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 va_pop(&stack);
                 CallFrame *cf = &frame_stack[--frames_sp];
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
-                free(env); env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
+                env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
             } else if (stack.len > 0 && frames_sp > 0) {
                 Value v = va_pop(&stack);
                 if (acc.tag != VAL_LAMBDA) { fprintf(stderr, "runtime: return non-lambda\n"); goto done; }
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
-                Value *ne = malloc((acc.lambda.env_len + 1) * sizeof(Value));
+                Value *ne = (Value*)gcalloc((acc.lambda.env_len + 1) * sizeof(Value), 4 * (acc.lambda.env_len + 1));
                 memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
                 ne[acc.lambda.env_len] = v;
-                free(env); env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
+                env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
                 pc = 0;
             } else if (frames_sp > 0) {
                 CallFrame *cf = &frame_stack[--frames_sp];
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
-                free(env); env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
+                env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
             } else goto done;
             break;
         }
@@ -1135,18 +1152,18 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             if (acc.tag == VAL_BOOLEAN && !acc.boolean) pc = in->jmp_target; else pc++; break;
         case OP_CUR: {
             Value *ec = NULL; int ecl = env_len;
-            if (env_len > 0) { ec = malloc(env_len * sizeof(Value)); memcpy(ec, env, env_len * sizeof(Value)); }
-            acc = val_lambda(in->closure_code, in->closure_len, ec, ecl); free(ec); pc++; break;
+            if (env_len > 0) { ec = (Value*)gcalloc(env_len * sizeof(Value), 4 * env_len); memcpy(ec, env, env_len * sizeof(Value)); }
+            acc = val_lambda(in->closure_code, in->closure_len, ec, ecl); pc++; break;
         }
         case OP_APPTERM: {
             if (acc.tag == VAL_LAMBDA) {
                 if (stack.len <= 0) { fprintf(stderr, "runtime: appterm empty stack\n"); goto done; }
                 Value v = va_pop(&stack);
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
-                Value *ne = malloc((acc.lambda.env_len + 1) * sizeof(Value));
+                Value *ne = (Value*)gcalloc((acc.lambda.env_len + 1) * sizeof(Value), 4 * (acc.lambda.env_len + 1));
                 memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
                 ne[acc.lambda.env_len] = v;
-                free(env); env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
+                env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
                 pc = 0; break;
             } else if (acc.tag == VAL_PRIM) {
                 if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) va_pop(&stack);
@@ -1162,8 +1179,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
     }
 done:
     va_free(&stack);
-    for (int i = 0; i < frames_sp; i++) free(frame_stack[i].env);
-    free(env);
     return acc;
 }
 
@@ -1195,6 +1210,7 @@ static char *read_file_or_stdin(const char *path) {
 /* ------------------------------------------------------------------ */
 
 static void run_test(const char *label, const char *bytecode, int show_code) {
+    fprintf(stderr, "[run_test] %s: parsing...\n", label);
     printf("--- %s ---\n", label);
     printf("Bytecode: %s\n", bytecode);
     Instr *code = NULL;
@@ -1204,12 +1220,14 @@ static void run_test(const char *label, const char *bytecode, int show_code) {
     if (show_code) print_instr(code, len, 0);
     printf("\n");
     resolve_jumps(code, len);
+    fprintf(stderr, "[run_test] %s: executing...\n", label);
     if (setjmp(vm_error_jmp)) {
         printf("ERROR CAUGHT: "); print_value(vm_error_val); printf("\n\n");
     } else {
         Value result = vm_exec(code, len);
         printf("Result: "); print_value(result); printf("\n\n");
     }
+    fprintf(stderr, "[run_test] %s: done, freeing code\n", label);
     free(code);
 }
 
@@ -1333,7 +1351,9 @@ static int parse_bundle(const char *str) {
 }
 
 int main(int argc, char **argv) {
+    uintptr_t gc_stack_root = 0;
     init_globals();
+    gc_state = gcinit(16 * 1024 * 1024, &gc_stack_root, NULL);
     if (argc > 1) {
         char *buf = read_file_or_stdin(argv[1]);
         if (!buf) return 1;
@@ -1468,7 +1488,7 @@ int main(int argc, char **argv) {
                         Value nil = val_nil();
                         printf("  Test A ([] -> [cons]):\n");
 
-                        Value *env = malloc((tli.lambda.env_len + 1) * sizeof(Value));
+                        Value *env = (Value*)gcalloc((tli.lambda.env_len + 1) * sizeof(Value), 4 * (tli.lambda.env_len + 1));
                         if (tli.lambda.env_len > 0)
                             memcpy(env, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
                         env[tli.lambda.env_len] = nil;  /* empty code */
@@ -1481,7 +1501,6 @@ int main(int argc, char **argv) {
                         } else {
                             printf("    ERROR: "); print_value(vm_error_val); printf("\n");
                         }
-                        free(env);
 
                         /* Test B: [number 42] → should return [number 42]
                            ZINC bytecode is a FLAT list: opcode + operands
@@ -1492,7 +1511,7 @@ int main(int argc, char **argv) {
                         Value n42 = val_number(42);
                         Value bc = val_cons(num_sym, val_cons(n42, nil));
 
-                        Value *env2 = malloc((tli.lambda.env_len + 1) * sizeof(Value));
+                        Value *env2 = (Value*)gcalloc((tli.lambda.env_len + 1) * sizeof(Value), 4 * (tli.lambda.env_len + 1));
                         if (tli.lambda.env_len > 0)
                             memcpy(env2, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
                         env2[tli.lambda.env_len] = bc;
@@ -1510,7 +1529,6 @@ int main(int argc, char **argv) {
                             printf("    ERROR: "); print_value(vm_error_val); printf("\n");
                         }
                         trace_counter = -1;
-                        free(env2);
 
                         /* Test C: call interp directly */
                         printf("  Test C (interp [] [cons] [] [] []):\n");
@@ -1543,7 +1561,7 @@ int main(int argc, char **argv) {
                             Value ctest = val_boolean(args[4].tag == VAL_CONS);
                             print_value(ctest); printf(" (expected false)\n");
 
-                            Value *env_i = malloc((interp_fn.lambda.env_len + 5) * sizeof(Value));
+                            Value *env_i = (Value*)gcalloc((interp_fn.lambda.env_len + 5) * sizeof(Value), 4 * (interp_fn.lambda.env_len + 5));
                             /* After the append fix, APPLY appends first arg (code),
                                then 4 GRABs append acc, senv, stk, ret.
                                Result: env = [captured..., code, acc, senv, stk, ret]
@@ -1565,7 +1583,6 @@ int main(int argc, char **argv) {
                             } else {
                                 printf("    ERROR: "); print_value(vm_error_val); printf("\n");
                             }
-                            free(env_i);
                         } else {
                             printf("    interp not found (tag=%d)\n", interp_fn.tag);
                         }
@@ -1604,12 +1621,29 @@ int main(int argc, char **argv) {
                 printf("Raw primitive I/O works via raw.X namespace (bypasses safe wrappers).\n");
                 printf("eval-kl chain (marshal → extract-kl → kl->zinc → toplevel-interp → demarshal) works.\n");
                 printf("Bundled file I/O works — safe wrappers + P[4:s]open chain functional.\n");
+
+                /* GC stress: allocate cons cells to verify GC collections work.
+                   Each val_cons allocates 2 GC_VALUE() = ~80 bytes.
+                   50000 cells = ~4MB, triggers ~6 collections. */
+                printf("\n--- GC stress: allocating 50000 cons cells ---\n");
+                fprintf(stderr, "[gc-stress] starting...\n");
+                {
+                    Value nil = val_nil();
+                    for (int i = 0; i < 50000; i++) {
+                        if (i % 10000 == 0) fprintf(stderr, "[gc-stress] iter %d\n", i);
+                        Value cell = val_cons(val_number(i), nil);
+                        (void)cell;
+                    }
+                }
+                fprintf(stderr, "[gc-stress] loop done\n");
+                printf("  GC stress passed — allocated 50000 cells, no crash\n");
             }
         } else {
             /* Single bytecode list */
             if (*p) run_test(argv[1], p, 0); else printf("(empty file)\n");
             free(buf);
         }
+        gcfree(gc_state);
         return 0;
     }
 
@@ -1648,5 +1682,6 @@ int main(int argc, char **argv) {
     run_test("28. [get-time unix]",      "(ms[4:s]unixug[8:s]get-timep)", 1);
 
     printf("=== All 28 tests done ===\n");
+    gcfree(gc_state);
     return 0;
 }

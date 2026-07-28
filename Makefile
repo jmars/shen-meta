@@ -1,12 +1,16 @@
 .PHONY: all vm test bundle pipeline interp clean
 
 SHEN   = ../shen-scheme/_build/bin/shen-scheme
-CFLAGS = -Wall -Wextra -O2
+CFLAGS = -Wall -Wextra -O2 -Ivendor/bartlett-gc
+GC_LIB = vendor/bartlett-gc/libbgc.a
 
 all: zincvm
 
-zincvm: vm/zincvm.c
-	$(CC) $(CFLAGS) -o $@ vm/zincvm.c
+$(GC_LIB):
+	$(MAKE) -C vendor/bartlett-gc libbgc.a
+
+zincvm: vm/zincvm.c $(GC_LIB)
+	$(CC) $(CFLAGS) -o $@ vm/zincvm.c $(GC_LIB)
 
 test: zincvm
 	./zincvm
