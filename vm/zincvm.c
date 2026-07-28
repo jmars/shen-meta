@@ -163,6 +163,17 @@ static Value val_nil(void) {
     v.tag = VAL_NIL; return v;
 }
 static Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
+    /* NOTE: env arrays are malloc'd (C heap), NOT GC-allocated.  This means
+       GC-allocated Value pointers stored inside the env (e.g. cons cells
+       in captured variables) are invisible to the GC while the closure is
+       dormant in global_table.  They are safe only while the closure is
+       executing and env is loaded onto the stack/registers.
+
+       Currently this is latent: parse_bundle creates closures with env_len=0,
+       and bundled closures don't capture GC-allocated state.  If runtime code
+       stores closures with non-empty envs in global_table (via the 'set'
+       primitive), the env-referenced GC objects may be prematurely collected.
+       Fix: allocate env on GC heap, or register env arrays as extra roots. */
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_LAMBDA;
     v.lambda.code = code; v.lambda.code_len = code_len;
@@ -256,6 +267,16 @@ static void va_free(ValueArray *a) { a->data = NULL; a->len = a->cap = 0; }
 
 #define GLOBAL_TABLE_MAX 2048
 typedef struct { char *name; Value closure; } GlobalEntry;
+
+/* GC scans global_table as raw uintptr_t words (conservative scan).
+   These assertions ensure pointer fields are at aligned offsets and
+   the struct size is a word multiple — breaking either would cause
+   the GC to silently miss pointers. */
+_Static_assert(sizeof(GlobalEntry) % sizeof(uintptr_t) == 0,
+               "GlobalEntry must be word-multiple for GC scan");
+_Static_assert(_Alignof(GlobalEntry) >= sizeof(uintptr_t),
+               "GlobalEntry must be word-aligned for GC scan");
+
 static GlobalEntry global_table[GLOBAL_TABLE_MAX];
 static int global_table_len = 0;
 
@@ -1638,6 +1659,35 @@ int main(int argc, char **argv) {
                 }
                 fprintf(stderr, "[gc-stress] loop done\n");
                 printf("  GC stress passed — allocated 50000 cells, no crash\n");
+
+                /* GC retention test: store a GC-allocated cons list in
+                   global_table, allocate enough to trigger a collection
+                   (piggybacking on the stress test which already filled
+                   most of a semispace), then verify the list survived.
+                   This exercises the extra_roots scan. */
+                {
+                    Value nil = val_nil();
+                    Value lst = val_cons(val_number(3),
+                                val_cons(val_number(2),
+                                val_cons(val_number(1), nil)));
+                    global_set("*gc-test-list*", lst);
+
+                    /* Top-up: the stress test already allocated ~16K pages;
+                       another 5K cons cells should trigger a collection. */
+                    for (int i = 0; i < 5000; i++) {
+                        Value cell = val_cons(val_number(i), nil);
+                        (void)cell;
+                    }
+
+                    Value retrieved = global_get("*gc-test-list*");
+                    if (retrieved.tag != VAL_CONS
+                        || retrieved.cons.car->tag != VAL_NUMBER
+                        || retrieved.cons.car->number != 3) {
+                        printf("  GC retention test FAILED\n");
+                    } else {
+                        printf("  GC retention test passed — global_table entry survived GC\n");
+                    }
+                }
             }
         } else {
             /* Single bytecode list */
