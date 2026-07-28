@@ -1033,7 +1033,7 @@ static void resolve_jumps(Instr *code, int len) {
 /*  VM execution                                                       */
 /* ------------------------------------------------------------------ */
 
-#define CALL_STACK_DEPTH 8192
+#define CALL_STACK_DEPTH 65536  /* bumped from 8192 — shen.initialise needs ~12K frames */
 typedef struct { Instr *code; int code_len, pc; Value *env; int env_len, env_cap; } CallFrame;
 
 static Value lookup_env(int n, Value *env, int env_len, int pc_for_diag, Instr *cur_code, int cur_len) {
@@ -1407,7 +1407,7 @@ static int parse_bundle(const char *str) {
 int main(int argc, char **argv) {
     uintptr_t gc_stack_root = 0;
     init_globals();
-    gc_state = gcinit(16 * 1024 * 1024, &gc_stack_root, NULL);
+    gc_state = gcinit(64 * 1024 * 1024, &gc_stack_root, NULL);
     gc_set_extra_roots(global_table, sizeof(global_table));
     if (argc > 1) {
         char *buf = read_file_or_stdin(argv[1]);
