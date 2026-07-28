@@ -1121,6 +1121,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
     }
     Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
+    uint8_t last_op = 0;  /* used by OP_PRIM to detect duplicate arg pushes */
 
     if (vm_error_pending) { vm_error_pending = 0; setjmp(vm_error_jmp); }
 
@@ -1140,9 +1141,12 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             acc = in->operand; pc++; break;
         case OP_PRIM: {
             /* ZINC [prim X] executes primitive X with args from stack + acc.
-               Push acc so binary primitives find both args on the stack. */
+               Push acc so binary primitives find both args on the stack.
+               BUT: if the last instruction was a PUSH, acc is already on the
+               stack (duplicate), which breaks N-ary primitives like trap-error
+               that pop multiple args. Skip the push in that case. */
             const char *pn = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
-            va_push(&stack, acc);
+            if (last_op != OP_PUSH) va_push(&stack, acc);
             if (exec_primitive(pn, &acc, &stack) < 0) goto done;
             if (trace_counter >= 0 && trace_counter < trace_limit + 5) {
                 fprintf(stderr, "    -> acc after prim %s: ", pn);
@@ -1275,6 +1279,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         }
         default: fprintf(stderr, "runtime: unknown op '%c' at pc=%d\n", in->op, pc); goto done;
         }
+        last_op = in->op;
     }
 done:
     va_free(&stack);
