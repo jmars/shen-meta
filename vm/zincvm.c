@@ -1080,7 +1080,7 @@ static void resolve_jumps(Instr *code, int len) {
 /* ------------------------------------------------------------------ */
 
 #define CALL_STACK_DEPTH 65536  /* bumped from 8192 — shen.initialise needs ~12K frames */
-typedef struct { Instr *code; int code_len, pc; Value *env; int env_len, env_cap; } CallFrame;
+typedef struct { Instr *code; int code_len, pc; Value *env; int env_len, env_cap; ValueArray stack; } CallFrame;
 
 static Value lookup_env(int n, Value *env, int env_len, int pc_for_diag, Instr *cur_code, int cur_len) {
     if (n < 0 || n >= env_len) {
@@ -1131,6 +1131,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 CallFrame *cf = &frame_stack[--frames_sp];
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                 env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
+                va_free(&stack); stack = cf->stack;
                 continue;
             }
             break;
@@ -1164,6 +1165,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                     CallFrame *cf = &frame_stack[--frames_sp];
                     cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                     env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
+                    va_free(&stack); stack = cf->stack;
                 } else goto done;
             } else if (stack.len > 0) { env_push(&env, &env_len, &env_cap, va_pop(&stack)); pc++; }
             else pc++;
@@ -1182,6 +1184,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 CallFrame *cf = &frame_stack[frames_sp++];
                 cf->code = cur_code; cf->code_len = cur_len; cf->pc = pc + 1;
                 cf->env = env; cf->env_len = env_len; cf->env_cap = env_cap;
+                cf->stack = stack; va_init(&stack);
                 env = NULL; env_len = 0; env_cap = 0;
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *ne = (Value*)gcalloc((acc.lambda.env_len + 1) * sizeof(Value), 4 * (acc.lambda.env_len + 1));
@@ -1216,6 +1219,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 CallFrame *cf = &frame_stack[--frames_sp];
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                 env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
+                va_free(&stack); stack = cf->stack;
             } else if (stack.len > 0 && frames_sp > 0 && acc.tag == VAL_LAMBDA) {
                 /* Tail-call: stack has the arg, acc has the function.
                    Replace current frame instead of pushing a new one. */
@@ -1230,6 +1234,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 CallFrame *cf = &frame_stack[--frames_sp];
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                 env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
+                va_free(&stack); stack = cf->stack;
             } else goto done;
             break;
         }
