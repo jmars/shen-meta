@@ -1199,7 +1199,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                     CallFrame *cf = &frame_stack[--frames_sp];
                     cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                     env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
-                    va_free(&stack); stack = cf->stack;
+                    stack = cf->stack;
                 } else goto done;
             } else if (stack.len > 0) { env_push(&env, &env_len, &env_cap, va_pop(&stack)); pc++; }
             else pc++;
@@ -1207,31 +1207,54 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         }
         case OP_APPLY: {
             if (acc.tag == VAL_LAMBDA) {
-                /* Skip marks accumulated on top from failed pattern matches.
-                   The intentional mark for this apply is below the args
-                   (ZINC convention: pushmark arg push ... apply). */
+                /* Standard ZINC: pop all args from stack (up to the
+                   intentional pushmark), push them into the callee's
+                   environment.  The callee shares the caller's stack
+                   so OP_GRAB can pop remaining args from it.
+
+                   Stack layout: [... intentional-mark, argN, ..., arg1]
+                   (ZINC RTL: rightmost arg pushed first, leftmost last.)
+                   After failed pattern matches there may be stale marks
+                   on top; skip those first. */
                 while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
                     va_pop(&stack);
-                if (stack.len <= 0) { /* zero-arg call with stale marks — skip silently */ goto done; }
-                Value arg = va_pop(&stack);
+
+                /* Collect all non-mark args (stop at the mark) */
+                int nargs = 0;
+                Value argbuf[64];
+                while (stack.len > 0 && va_peek(&stack).tag != VAL_MARK) {
+                    if (nargs < 64) argbuf[nargs++] = va_pop(&stack);
+                    else { va_pop(&stack); nargs++; }  /* overflow guard */
+                }
+                /* Pop the intentional mark */
+                if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
+                    va_pop(&stack);
+
+                if (nargs == 0 && stack.len == 0) { goto done; }
+
                 if (frames_sp >= CALL_STACK_DEPTH) { goto done; }
                 CallFrame *cf = &frame_stack[frames_sp++];
                 cf->code = cur_code; cf->code_len = cur_len; cf->pc = pc + 1;
                 cf->env = env; cf->env_len = env_len; cf->env_cap = env_cap;
+                /* Give callee a fresh stack — OP_GRAB will find nothing
+                   (all args are in env).  This prevents stack junk from
+                   leaking across nested calls. */
                 cf->stack = stack; va_init(&stack);
                 env = NULL; env_len = 0; env_cap = 0;
+
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
-                Value *ne = (Value*)gcalloc((acc.lambda.env_len + 1) * sizeof(Value), 4 * (acc.lambda.env_len + 1));
+                int new_env_len = acc.lambda.env_len + nargs;
+                Value *ne = (Value*)gcalloc(new_env_len * sizeof(Value), 4 * new_env_len);
                 memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
-                ne[acc.lambda.env_len] = arg;
-                env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
+                /* Args were popped RTL — reverse into env */
+                for (int i = 0; i < nargs; i++)
+                    ne[acc.lambda.env_len + i] = argbuf[nargs - 1 - i];
+                env = ne; env_len = new_env_len; env_cap = new_env_len;
                 pc = 0;
             } else if (acc.tag == VAL_PRIM) {
                 if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) va_pop(&stack);
                 const char *pn = acc.prim.name;
                 if (exec_primitive(pn, &acc, &stack) < 0) goto done;
-                if (pc + 1 < cur_len && cur_code[pc + 1].op == OP_GLOBAL)
-                    va_push(&stack, acc);
                 pc++;
             } else {
                 fprintf(stderr, "runtime: apply non-callable tag=%d", acc.tag);
@@ -1276,8 +1299,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         }
         case OP_ACCESS:
             acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len, pc, cur_code, cur_len);
-            if (pc + 1 < cur_len && cur_code[pc + 1].op == OP_GLOBAL)
-                va_push(&stack, acc);
             pc++; break;
         case OP_GLOBAL: {
             const char *nm = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
@@ -1300,15 +1321,26 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         case OP_APPTERM: {
             if (acc.tag == VAL_LAMBDA) {
                 if (stack.len <= 0) { fprintf(stderr, "runtime: appterm empty stack\n"); goto done; }
-                /* Pop accumulated marks before the arg */
-                while (stack.len > 1 && va_peek(&stack).tag == VAL_MARK)
+                /* Pop accumulated marks before args, then pop all args */
+                while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
                     va_pop(&stack);
-                Value v = va_pop(&stack);
+                int nargs = 0;
+                Value argbuf[64];
+                while (stack.len > 0 && va_peek(&stack).tag != VAL_MARK) {
+                    if (nargs < 64) argbuf[nargs++] = va_pop(&stack);
+                    else { va_pop(&stack); nargs++; }
+                }
+                if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
+                    va_pop(&stack);
+                if (nargs == 0) { fprintf(stderr, "runtime: appterm zero args\n"); goto done; }
+
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
-                Value *ne = (Value*)gcalloc((acc.lambda.env_len + 1) * sizeof(Value), 4 * (acc.lambda.env_len + 1));
+                int new_env_len = acc.lambda.env_len + nargs;
+                Value *ne = (Value*)gcalloc(new_env_len * sizeof(Value), 4 * new_env_len);
                 memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
-                ne[acc.lambda.env_len] = v;
-                env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
+                for (int i = 0; i < nargs; i++)
+                    ne[acc.lambda.env_len + i] = argbuf[nargs - 1 - i];
+                env = ne; env_len = new_env_len; env_cap = new_env_len;
                 pc = 0; break;
             } else if (acc.tag == VAL_PRIM) {
                 if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) va_pop(&stack);
