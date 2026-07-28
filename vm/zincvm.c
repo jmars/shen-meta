@@ -31,6 +31,7 @@
 #include <ctype.h>
 #include <setjmp.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "gc.h"
 
@@ -1145,10 +1146,20 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
     Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
     uint8_t last_op = 0;  /* used by OP_PRIM to detect duplicate arg pushes */
+    int instr_count = 0;
+    #define INSTR_HARD_LIMIT 500000000
 
     if (vm_error_pending) { vm_error_pending = 0; setjmp(vm_error_jmp); }
 
     while (1) {
+        if (++instr_count >= INSTR_HARD_LIMIT) {
+            fprintf(stderr, "[HARD LIMIT] %d instructions, aborting at pc=%d frames=%d\n",
+                    instr_count, pc, frames_sp);
+            goto done;
+        }
+        if (trace_counter >= 0) {
+            if (++trace_counter >= trace_limit) trace_counter = -1;
+        }
         if (pc < 0 || pc >= cur_len) {
             if (frames_sp > 0) {
                 CallFrame *cf = &frame_stack[--frames_sp];
@@ -1346,21 +1357,21 @@ static char *read_file_or_stdin(const char *path) {
 
 static void run_test(const char *label, const char *bytecode, int show_code) {
     fprintf(stderr, "[run_test] %s: parsing...\n", label);
-    printf("--- %s ---\n", label);
-    printf("Bytecode: %s\n", bytecode);
+    printf("--- %s ---\n", label); fflush(stdout);
+    printf("Bytecode: %s\n", bytecode); fflush(stdout);
     Instr *code = NULL;
     int len = parse_bytecode(bytecode, &code);
-    if (len <= 0 || code == NULL) { printf("PARSE FAILED\n\n"); return; }
-    printf("Parsed %d instructions:\n", len);
+    if (len <= 0 || code == NULL) { printf("PARSE FAILED\n\n"); fflush(stdout); return; }
+    printf("Parsed %d instructions:\n", len); fflush(stdout);
     if (show_code) print_instr(code, len, 0);
-    printf("\n");
+    printf("\n"); fflush(stdout);
     resolve_jumps(code, len);
     fprintf(stderr, "[run_test] %s: executing...\n", label);
     if (setjmp(vm_error_jmp)) {
-        printf("ERROR CAUGHT: "); print_value(vm_error_val); printf("\n\n");
+        printf("ERROR CAUGHT: "); print_value(vm_error_val); printf("\n\n"); fflush(stdout);
     } else {
         Value result = vm_exec(code, len);
-        printf("Result: "); print_value(result); printf("\n\n");
+        printf("Result: "); print_value(result); printf("\n\n"); fflush(stdout);
     }
     fprintf(stderr, "[run_test] %s: done, freeing code\n", label);
     free(code);
@@ -1489,7 +1500,7 @@ static int parse_bundle(const char *str) {
 int main(int argc, char **argv) {
     uintptr_t gc_stack_root = 0;
     init_globals();
-    gc_state = gcinit(64 * 1024 * 1024, &gc_stack_root, NULL);
+    gc_state = gcinit(256 * 1024 * 1024, &gc_stack_root, NULL);
     gc_set_extra_roots(global_table, sizeof(global_table));
     if (argc > 1) {
         char *buf = read_file_or_stdin(argv[1]);
