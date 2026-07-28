@@ -748,7 +748,9 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         return 0;
     }
     if (strcmp(name, "write-byte") == 0) {
-        Value byte = va_pop(stack), s = va_pop(stack);
+        /* ZINC RTL: (write-byte byte stream) — byte pushed first (rightmost),
+           stream pushed last (leftmost, on top).  First pop = stream, second = byte. */
+        Value s = va_pop(stack), byte = va_pop(stack);
         if (s.tag != VAL_STREAM || s.stream.is_input) { fprintf(stderr, "runtime: write-byte on non-output\n"); return -1; }
         if (byte.tag != VAL_NUMBER) { fprintf(stderr, "runtime: write-byte requires number\n"); return -1; }
         fputc((int)byte.number, s.stream.file);
@@ -1439,6 +1441,25 @@ int main(int argc, char **argv) {
                bundled zinc-c to trigger longjmp on where-clause failures.
                The closure calls shen.fail! which triggers the error correctly. */
             /* global_set("fail", val_prim("fail")); */
+
+            /* Initialize standard I/O stream variables expected by the Shen OS.
+               The bundled stinput/stoutput closures use (value *stinput*),
+               (value *stoutput*) — these resolve to global_get("*stinput*") etc.
+               shen.initialise-environment does NOT set them; the host port must. */
+            {
+                Value stin;  memset(&stin, 0, sizeof(stin));
+                stin.tag = VAL_STREAM; stin.stream.file = stdin;  stin.stream.is_input = 1;
+                global_set("*stinput*", stin);
+
+                Value stout; memset(&stout, 0, sizeof(stout));
+                stout.tag = VAL_STREAM; stout.stream.file = stdout; stout.stream.is_input = 0;
+                global_set("*stoutput*", stout);
+
+                Value sterr; memset(&sterr, 0, sizeof(sterr));
+                sterr.tag = VAL_STREAM; sterr.stream.file = stderr; sterr.stream.is_input = 0;
+                global_set("*sterror*", sterr);
+            }
+
             free(buf);
             /* If second arg, run it as bytecode; otherwise run a test */
             if (argc > 2) {
