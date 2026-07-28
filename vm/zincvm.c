@@ -199,7 +199,18 @@ static Value val_error(const char *msg) {
 static Value val_vector(int size) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_VECTOR; v.vector.len = size;
-    v.vector.data = size > 0 ? (Value*)gcalloc(size * sizeof(Value), 4 * size) : NULL;
+    if (size > 0) {
+        int bytes = size * (int)sizeof(Value);
+        int words = (bytes + WORDBYTES - 1) / WORDBYTES + 1;
+        int ptrs = 4 * size;
+        if (words > 0xFFFFFF || ptrs > 0xFFFFF) {
+            /* Too large for GC header — use calloc and register as extra roots */
+            v.vector.data = (Value*)calloc(size, sizeof(Value));
+            gc_set_extra_roots(v.vector.data, size * sizeof(Value));
+        } else {
+            v.vector.data = (Value*)gcalloc(bytes, ptrs);
+        }
+    }
     return v;
 }
 static Value val_stream_in(FILE *f) {
@@ -1076,15 +1087,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             break;
         }
         Instr *in = &cur_code[pc];
-        if (trace_counter >= 0) {
-            if (trace_counter < trace_limit) {
-                fprintf(stderr, "  [%d] pc=%d ", trace_counter, pc);
-                fflush(stderr);
-                print_instr(in, 1, 0);
-                fflush(stdout);
-            }
-            trace_counter++;
-        }
         switch (in->op) {
         case OP_NUMBER: case OP_STRING: case OP_SYMBOL: case OP_BOOLEAN:
             acc = in->operand; pc++; break;
@@ -1673,6 +1675,13 @@ int main(int argc, char **argv) {
                 printf("eval-kl chain (marshal → extract-kl → kl->zinc → toplevel-interp → demarshal) works.\n");
                 printf("Bundled file I/O works — safe wrappers + P[4:s]open chain functional.\n");
 
+                /* Verify shen.initialise works (quick smoke test before GC stress) */
+                printf("\n--- shen.initialise smoke test ---\n");
+                fflush(stdout);
+                run_test("init-only",
+                         "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
+                printf("-- init done --\n"); fflush(stdout);
+
                 /* GC stress: allocate cons cells to verify GC collections work.
                    Each val_cons allocates 2 GC_VALUE() = ~80 bytes.
                    50000 cells = ~4MB, triggers ~6 collections. */
@@ -1718,8 +1727,9 @@ int main(int argc, char **argv) {
                     }
                 }
 
-                /* REPL smoke test */
+                /* REPL smoke test — run AFTER GC stress to verify GC survives collections */
                 printf("\n--- REPL smoke test ---\n");
+                fflush(stdout);
                 run_test("repl-smoke",
                          "(mn[1:n]0ug[15:s]shen.initialisep"
                          "mn[1:n]0P[9:s]emptylistus[7:s]successP[4:s]consug[9:s]shen.replp)", 0);
