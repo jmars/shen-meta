@@ -317,6 +317,7 @@ static Value global_get(const char *name) {
 static jmp_buf vm_error_jmp;
 static Value vm_error_val;
 static int vm_error_pending = 0;
+static int vm_in_trap_error = 0;  /* set while inside trap-error body/handler */
 
 /* ------------------------------------------------------------------ */
 /*  Forward declarations                                               */
@@ -600,7 +601,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "pos") == 0) {
         Value a1 = va_pop(stack), a2 = va_pop(stack);
-        if (a1.tag != VAL_STRING || a2.tag != VAL_NUMBER) { fprintf(stderr, "runtime: pos on bad types\n"); return -1; }
+        if (a1.tag != VAL_STRING || a2.tag != VAL_NUMBER) {
+            if (vm_in_trap_error) {
+                vm_error_pending = 1; vm_error_val = val_error("pos on bad types");
+                longjmp(vm_error_jmp, 1);
+            }
+            fprintf(stderr, "runtime: pos on bad types\n"); return -1;
+        }
         int pl = (int)a2.number;
         if (pl < 0 || pl > a1.str.len) pl = a1.str.len;
         *acc = val_string(a1.str.data, pl); return 0;
@@ -616,7 +623,15 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "value") == 0) {
         Value a = va_pop(stack);
-        if (a.tag != VAL_SYMBOL) { fprintf(stderr, "runtime: value on non-symbol\n"); return -1; }
+        if (a.tag != VAL_SYMBOL) {
+            if (vm_in_trap_error) {
+                vm_error_pending = 1;
+                vm_error_val = val_error("value on non-symbol");
+                longjmp(vm_error_jmp, 1);
+            }
+            fprintf(stderr, "runtime: value on non-symbol\n");
+            return -1;
+        }
         *acc = global_get(a.sym.name); return 0;
     }
 
@@ -628,7 +643,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "<-address") == 0) {
         Value vec = va_pop(stack), idx = va_pop(stack);
-        if (vec.tag != VAL_VECTOR || idx.tag != VAL_NUMBER) { fprintf(stderr, "runtime: <-address bad types\n"); return -1; }
+        if (vec.tag != VAL_VECTOR || idx.tag != VAL_NUMBER) {
+            if (vm_in_trap_error) {
+                vm_error_pending = 1; vm_error_val = val_error("<-address bad types");
+                longjmp(vm_error_jmp, 1);
+            }
+            fprintf(stderr, "runtime: <-address bad types\n"); return -1;
+        }
         int i = (int)idx.number;
         if (i < 0 || i >= vec.vector.len) { fprintf(stderr, "runtime: <-address OOB\n"); return -1; }
         *acc = vec.vector.data[i]; return 0;
@@ -677,10 +698,14 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
             henv[handler.lambda.env_len] = err;
             handler.lambda.env = henv; handler.lambda.env_len++;
+            vm_in_trap_error = 1;
             *acc = vm_exec(hc, hl);
+            vm_in_trap_error = 0;
         } else {
+            vm_in_trap_error = 1;
             if (body.tag == VAL_LAMBDA) *acc = vm_exec(body.lambda.code, body.lambda.code_len);
             else *acc = body;
+            vm_in_trap_error = 0;
         }
         return 0;
     }
@@ -751,7 +776,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         /* ZINC RTL: (write-byte byte stream) — byte pushed first (rightmost),
            stream pushed last (leftmost, on top).  First pop = stream, second = byte. */
         Value s = va_pop(stack), byte = va_pop(stack);
-        if (s.tag != VAL_STREAM || s.stream.is_input) { fprintf(stderr, "runtime: write-byte on non-output\n"); return -1; }
+        if (s.tag != VAL_STREAM || s.stream.is_input) {
+            if (vm_in_trap_error) {
+                vm_error_pending = 1; vm_error_val = val_error("write-byte on non-output");
+                longjmp(vm_error_jmp, 1);
+            }
+            fprintf(stderr, "runtime: write-byte on non-output\n"); return -1;
+        }
         if (byte.tag != VAL_NUMBER) { fprintf(stderr, "runtime: write-byte requires number\n"); return -1; }
         fputc((int)byte.number, s.stream.file);
         if (s.stream.file == stdout) fflush(stdout);
