@@ -1,5 +1,7 @@
 # shen-meta
 
+[![CI](https://github.com/jmars/shen-meta/actions/workflows/ci.yml/badge.svg)](https://github.com/jmars/shen-meta/actions/workflows/ci.yml)
+
 A meta-circular Shen ZINC abstract machine — Shen evaluating Shen, compiling itself to native bytecode, running on a native C VM.
 
 This is a self-hosted Shen runtime: Shen compiles itself to native bytecode, running on a compact C VM. The meta-circular evaluator is the core — the ZINC abstract machine implemented in Shen, then serialized and loaded by the native VM.

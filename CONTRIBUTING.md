@@ -35,6 +35,7 @@ Open an issue with what you're interested in and your experience level. No bad i
 
 ## Guidelines
 
+- CI runs on every PR. `make test` is the gate. If you see a green badge on the README, your PR passes.
 - Keep it small. Prefer a focused PR over a sprawling one.
 - Tests pass before you open the PR. `make test` is the gate.
 - Match the existing style. The C code is flat with clear labels; the Shen code uses the project naming conventions.
