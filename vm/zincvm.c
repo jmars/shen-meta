@@ -1020,7 +1020,7 @@ static void resolve_jumps(Instr *code, int len) {
 /*  VM execution                                                       */
 /* ------------------------------------------------------------------ */
 
-#define CALL_STACK_DEPTH 1024
+#define CALL_STACK_DEPTH 8192
 typedef struct { Instr *code; int code_len, pc; Value *env; int env_len, env_cap; } CallFrame;
 
 static Value lookup_env(int n, Value *env, int env_len, int pc_for_diag, Instr *cur_code, int cur_len) {
@@ -1162,9 +1162,10 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 CallFrame *cf = &frame_stack[--frames_sp];
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                 env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
-            } else if (stack.len > 0 && frames_sp > 0) {
+            } else if (stack.len > 0 && frames_sp > 0 && acc.tag == VAL_LAMBDA) {
+                /* Tail-call: stack has the arg, acc has the function.
+                   Replace current frame instead of pushing a new one. */
                 Value v = va_pop(&stack);
-                if (acc.tag != VAL_LAMBDA) { fprintf(stderr, "runtime: return non-lambda\n"); goto done; }
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *ne = (Value*)gcalloc((acc.lambda.env_len + 1) * sizeof(Value), 4 * (acc.lambda.env_len + 1));
                 memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
@@ -1716,6 +1717,13 @@ int main(int argc, char **argv) {
                         printf("  GC retention test passed — global_table entry survived GC\n");
                     }
                 }
+
+                /* REPL smoke test */
+                printf("\n--- REPL smoke test ---\n");
+                run_test("repl-smoke",
+                         "(mn[1:n]0ug[15:s]shen.initialisep"
+                         "mn[1:n]0P[9:s]emptylistus[7:s]successP[4:s]consug[9:s]shen.replp)", 0);
+                printf("--- REPL smoke test done ---\n");
             }
         } else {
             /* Single bytecode list */
