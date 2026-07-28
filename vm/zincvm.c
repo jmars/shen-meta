@@ -1218,7 +1218,11 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 va_free(&stack); stack = cf->stack;
             } else if (stack.len > 0 && frames_sp > 0 && acc.tag == VAL_LAMBDA) {
                 /* Tail-call: stack has the arg, acc has the function.
-                   Replace current frame instead of pushing a new one. */
+                   Replace current frame instead of pushing a new one.
+                   Pop any accumulated marks before the arg — they're from
+                   pushmarks in the current frame, not needed by the callee. */
+                while (stack.len > 1 && va_peek(&stack).tag == VAL_MARK)
+                    va_pop(&stack);
                 Value v = va_pop(&stack);
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *ne = (Value*)gcalloc((acc.lambda.env_len + 1) * sizeof(Value), 4 * (acc.lambda.env_len + 1));
@@ -1260,6 +1264,9 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         case OP_APPTERM: {
             if (acc.tag == VAL_LAMBDA) {
                 if (stack.len <= 0) { fprintf(stderr, "runtime: appterm empty stack\n"); goto done; }
+                /* Pop accumulated marks before the arg */
+                while (stack.len > 1 && va_peek(&stack).tag == VAL_MARK)
+                    va_pop(&stack);
                 Value v = va_pop(&stack);
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *ne = (Value*)gcalloc((acc.lambda.env_len + 1) * sizeof(Value), 4 * (acc.lambda.env_len + 1));
