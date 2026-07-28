@@ -1,4 +1,4 @@
-.PHONY: all vm test bundle pipeline interp clean
+.PHONY: all vm test bundle pipeline interp setup clean
 
 SHEN   = ../shen-scheme/_build/bin/shen-scheme
 CFLAGS = -Wall -Wextra -O2 -Ivendor/bartlett-gc
@@ -8,6 +8,14 @@ all: zincvm
 
 $(GC_LIB):
 	$(MAKE) -C vendor/bartlett-gc libbgc.a
+
+setup:
+	@if [ ! -d ../shen-scheme ]; then \
+		echo "Cloning shen-scheme..."; \
+		git clone https://github.com/tizoc/shen-scheme.git ../shen-scheme; \
+	else \
+		echo "shen-scheme already present"; \
+	fi
 
 zincvm: vm/zincvm.c $(GC_LIB)
 	$(CC) $(CFLAGS) -o $@ vm/zincvm.c $(GC_LIB)

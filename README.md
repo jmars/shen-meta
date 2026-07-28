@@ -2,11 +2,11 @@
 
 A meta-circular Shen ZINC abstract machine — Shen evaluating Shen, compiling itself to native bytecode, running on a native C VM.
 
-> **Note for anyone watching this repo** — the thing that works runs on shen-scheme. This project is me building the self-hosted native VM so I can drop the Chez dependency. The meta-circular evaluator was never the hard part.
->
-> The architecture was. Sequent calculus provides the inference kernel — cut elimination as computation, consistency per inference step. A small LLM handles pattern completion over the proof space. Shen ties them together: the LLM proposes, the sequent calculus disposes, and Lisp macros wire the feedback loop. Three old ideas. The trick was realizing they're not competitors — they're layers.
->
-> This repo is just packaging. The actual system doesn't need shen-meta. It just needs Shen.
+This is a self-hosted Shen runtime: Shen compiles itself to native bytecode, running on a compact C VM. The meta-circular evaluator is the core — the ZINC abstract machine implemented in Shen, then serialized and loaded by the native VM.
+
+This project is part of a larger architecture: sequent calculus provides the inference kernel (cut elimination as computation), LLMs handle pattern completion over the proof space, and Shen ties them together. But the VM itself is self-contained — a working Shen runtime that doesn't depend on anything beyond a C compiler.
+
+Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Architecture
 
@@ -34,10 +34,14 @@ Shen source → kmacros → normalize → debruijn → zinc-c → csexp → C VM
 ## Build & Run
 
 ```sh
-make          # build C VM
+git clone --recurse-submodules https://github.com/jmars/shen-meta.git
+cd shen-meta
+make setup    # clone shen-scheme if not already present
+make          # build C VM (requires gcc/clang)
 make test     # run 28 built-in tests
 make pipeline # compile (+ 1 2) through full pipeline
 make bundle   # serialize all safe wrappers → globals.csexp
+make run-bundle  # run C VM with self-hosting bundle
 ```
 
 Requires [shen-scheme](https://github.com/tizoc/shen-scheme) (Shen 41.2 on Chez Scheme) at `../shen-scheme/`.
@@ -96,6 +100,20 @@ The C VM (`zincvm`) loads `globals.csexp` — a ~1.4MB bundle of **~1200 closure
 - [ ] Bartlet GC integration (`~/github/bartlet-gc`, ~350 lines, conservative mostly-copying)
 - [x] marshal_to_tagged / demarshal_from_tagged layer
 - [x] Flat ZINC bytecode convention for interp family
+
+## Roadmap
+
+| Priority | Area | What |
+|---|---|---|
+| P0 | **Bartlett GC** | Wire the vendored GC into the C VM (conservative mostly-copying, ~350 lines) |
+| P0 | **Primitive parity** | Port remaining KLambda primitives (`gensym`, `@p`, `fst`, `snd`, `variable?`) |
+| P1 | **Self-hosted boot** | Drop the shen-scheme dependency — boot from a pre-compiled csexp bundle |
+| P1 | **Error handling** | Improve backtrace and error reporting from the C VM |
+| P2 | **Serialization spec** | Document the csexp bundle format end-to-end |
+| P2 | **Benchmarks** | Execution time and memory usage scaffolding |
+| P3 | **Performance** | Simple VM optimizations (inline caching, opcode dispatch) |
+
+Contributors welcome on any of these. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Credits
 

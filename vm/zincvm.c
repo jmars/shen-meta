@@ -1792,8 +1792,10 @@ int main(int argc, char **argv) {
                 /* Verify shen.initialise works (quick smoke test before GC stress) */
                 printf("\n--- shen.initialise smoke test ---\n");
                 fflush(stdout);
+                trace_counter = 0; trace_limit = 10000;
                 run_test("init-only",
                          "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
+                trace_counter = -1; trace_limit = 0;
                 printf("-- init done --\n"); fflush(stdout);
 
                 /* GC stress: allocate cons cells to verify GC collections work.
