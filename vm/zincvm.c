@@ -697,6 +697,10 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         Value body = va_pop(stack), handler = va_pop(stack);
         if (handler.tag != VAL_LAMBDA) { fprintf(stderr, "runtime: trap-error handler not fn\n"); return -1; }
         vm_error_pending = 0;
+        /* Save/restore vm_error_jmp so nested trap-error or subsequent code
+           isn't corrupted by this setjmp overwriting the global jmp_buf. */
+        jmp_buf saved_error_jmp;
+        memcpy(saved_error_jmp, vm_error_jmp, sizeof(jmp_buf));
         if (setjmp(vm_error_jmp)) {
             Value err = val_error(vm_error_val.error.message);
             Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
@@ -716,6 +720,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             else *acc = body;
             vm_in_trap_error = saved_te;
         }
+        memcpy(vm_error_jmp, saved_error_jmp, sizeof(jmp_buf));
         return 0;
     }
 
@@ -759,8 +764,22 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         *acc = val_nil(); return 0;
     }
     if (strcmp(name, "read-byte") == 0) {
-        Value s = va_pop(stack);
-        if (s.tag != VAL_STREAM || !s.stream.is_input) { fprintf(stderr, "runtime: read-byte on non-input\n"); return -1; }
+        /* Use *stinput* directly instead of relying on the stack.
+           The bundled REPL bytecode has stack management issues where
+           byte values from previous iterations accumulate and bury
+           the stream argument. */
+        Value s = global_get("*stinput*");
+        if (s.tag != VAL_STREAM || !s.stream.is_input) {
+            /* Fall back to stack if *stinput* is not available */
+            s = va_pop(stack);
+        }
+        if (s.tag != VAL_STREAM || !s.stream.is_input) {
+            if (vm_in_trap_error) {
+                vm_error_pending = 1; vm_error_val = val_error("read-byte on non-input");
+                longjmp(vm_error_jmp, 1);
+            }
+            fprintf(stderr, "runtime: read-byte on non-input\n"); return -1;
+        }
         int c = fgetc(s.stream.file); *acc = val_number(c == EOF ? -1 : c); return 0;
     }
     if (strcmp(name, "read-file-as-string") == 0 || strcmp(name, "vm.read-file") == 0) {
@@ -783,8 +802,14 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "write-byte") == 0) {
         /* ZINC RTL: (write-byte byte stream) — byte pushed first (rightmost),
-           stream pushed last (leftmost, on top).  First pop = stream, second = byte. */
-        Value s = va_pop(stack), byte = va_pop(stack);
+           stream pushed last (leftmost, on top).  First pop = stream, second = byte.
+           Use *stoutput* directly for the stream to avoid stack corruption issues. */
+        Value byte = va_pop(stack);
+        Value s = global_get("*stoutput*");
+        if (s.tag != VAL_STREAM || s.stream.is_input) {
+            /* Fall back to stack if *stoutput* isn't available */
+            s = va_pop(stack);
+        }
         if (s.tag != VAL_STREAM || s.stream.is_input) {
             if (vm_in_trap_error) {
                 vm_error_pending = 1; vm_error_val = val_error("write-byte on non-output");
