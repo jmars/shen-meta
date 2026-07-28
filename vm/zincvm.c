@@ -741,6 +741,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         if (s.tag != VAL_STREAM || s.stream.is_input) { fprintf(stderr, "runtime: write-byte on non-output\n"); return -1; }
         if (byte.tag != VAL_NUMBER) { fprintf(stderr, "runtime: write-byte requires number\n"); return -1; }
         fputc((int)byte.number, s.stream.file);
+        if (s.stream.file == stdout) fflush(stdout);
         *acc = val_number(byte.number); return 0;
     }
     if (strcmp(name, "get-time") == 0) {
@@ -844,6 +845,24 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         eval_kl_depth--;
         *acc = result;
         return 0;
+    }
+
+    /* --- Stream accessors for REPL --- */
+    if (strcmp(name, "stinput") == 0) {
+        va_pop(stack); /* ignore arg count marker */
+        Value v; memset(&v, 0, sizeof(v));
+        v.tag = VAL_STREAM;
+        v.stream.file = stdin;
+        v.stream.is_input = 1;
+        *acc = v; return 0;
+    }
+    if (strcmp(name, "stoutput") == 0) {
+        va_pop(stack); /* ignore arg count marker */
+        Value v; memset(&v, 0, sizeof(v));
+        v.tag = VAL_STREAM;
+        v.stream.file = stdout;
+        v.stream.is_input = 0;
+        *acc = v; return 0;
     }
 
     fprintf(stderr, "runtime: unknown primitive '%s'\n", name);
@@ -1120,6 +1139,10 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) va_pop(&stack);
                 const char *pn = acc.prim.name;
                 if (exec_primitive(pn, &acc, &stack) < 0) goto done;
+                /* ZINC convention: push result to stack so it survives
+                   a subsequent OP_GLOBAL that overwrites acc. */
+                if (pc + 1 < cur_len && cur_code[pc + 1].op == OP_GLOBAL)
+                    va_push(&stack, acc);
                 pc++;
             } else {
                 fprintf(stderr, "runtime: apply non-callable tag=%d", acc.tag);
@@ -1157,6 +1180,10 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         }
         case OP_ACCESS:
             acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len, pc, cur_code, cur_len);
+            /* ZINC convention: push to stack so the value survives a
+               subsequent OP_GLOBAL that overwrites acc. */
+            if (pc + 1 < cur_len && cur_code[pc + 1].op == OP_GLOBAL)
+                va_push(&stack, acc);
             pc++; break;
         case OP_GLOBAL: {
             const char *nm = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
@@ -1264,7 +1291,8 @@ static void init_globals(void) {
         "intern","value","open","close","read-byte","write-byte",
         "set","get-time","read-file-as-string","vm.read-file",
         "@p","fst","snd","gensym","variable?","newvar",
-        "shen.fail!","fail", NULL
+        "shen.fail!","fail",
+        "stinput","stoutput", NULL
     };
     for (int i = 0; prims[i]; i++) global_set(prims[i], val_prim(prims[i]));
 
