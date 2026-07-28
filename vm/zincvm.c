@@ -1500,7 +1500,7 @@ static int parse_bundle(const char *str) {
 int main(int argc, char **argv) {
     uintptr_t gc_stack_root = 0;
     init_globals();
-    gc_state = gcinit(256 * 1024 * 1024, &gc_stack_root, NULL);
+    gc_state = gcinit(128 * 1024 * 1024, &gc_stack_root, NULL);
     gc_set_extra_roots(global_table, sizeof(global_table));
     if (argc > 1) {
         char *buf = read_file_or_stdin(argv[1]);

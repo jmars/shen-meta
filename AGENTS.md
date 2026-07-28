@@ -181,18 +181,16 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 ## GC (Bartlett copying collector)
 
 - Submodule: `vendor/bartlett-gc` at `github.com/jmars/bartlett-gc.git` (`c32a5a1`)
-- Heap: 256MB, initialized in `main()` via `gcinit(256*1024*1024, &gc_stack_root, NULL)`
-  (bumped from 64MB — shen.initialise's deep recursion (~65K call frames) exhausts a 64MB heap
-  on non-ASan builds; ASan red zones mask this)
+- Heap: starts at 128MB, auto-grows via mremap (reserves 256MB VAS initially).
+  Shrinks when live set is <25% of heap AND heap >128MB. Min 16MB.
 - Allocation: `GC_VALUE()` = `gcalloc(sizeof(Value), 4)` — 4 pointer slots for tracing
 - `GC_STR(len)` = `gcalloc(len+1, 0)` — 0 pointer slots (opaque)
 - **`gc_set_extra_roots(global_table, sizeof(global_table))`** called after gcinit —
   registers the BSS global_table array so GC traces closures stored there.
   Static assertions enforce `GlobalEntry` word-alignment.
 - Register scan DISABLED — `FIRST_REGISTER`/`LAST_REGISTER` removed from gc.h.
-  C stack scan alone is sufficient. 1M allocations in 7.3ms.
-- `val_lambda` env arrays are GC-allocated via `gcalloc` (not malloc). These are
-  traced by the GC through the lambda Value's pointer slots.
+  C stack scan alone is sufficient.
+- `val_lambda` env arrays are GC-allocated via `gcalloc` (not malloc).
 - `val_symbol` uses strdup (C heap), `val_cons`/`val_string`/`val_vector` use GC.
 - GC tests: stress (50K cons) + retention (global_table entry survives GC) — pass.
 
