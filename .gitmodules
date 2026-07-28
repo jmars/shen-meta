@@ -1,3 +1,3 @@
 [submodule "vendor/bartlett-gc"]
 	path = vendor/bartlett-gc
-	url = /home/arch/github/bartlett-gc
+	url = https://github.com/jmars/bartlett-gc.git
