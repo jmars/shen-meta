@@ -24,7 +24,9 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 | A | toplevel-interp on `[]` → `[cons]` | Pass |
 | B | toplevel-interp on `[number 42]` → `[number 42]` | Pass |
 | C | interp `[] [cons] [] [] []` → `[cons]` | Pass |
-| 5 | eval-kl `[+ 1 2]` via marshal chain | **Fails** — CPS closure capture bugs in self-compiled normalize-term/debruijn/zinc-c |
+| 5 | eval-kl `[+ 1 2]` via marshal chain | Pass |
+| 6-7 | read-file-as-string, load via apply | Pass |
+| 8-10 | load shen/util.shen, id, newvar | Pass |
 
 ## Key files (under `shen/` unless noted):
 - `shen/interp.shen` — meta-circular ZINC VM (loads everything)
@@ -32,7 +34,7 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 - `shen/zinc.shen` — KLambda → ZINC bytecode compiler
 - `shen/compile.shen` — ZINC → canonical s-expression (csexp)
 - `shen/primitives.shen` — 37 type-checked safe wrappers
-- `vm/zincvm.c` — native C parser + VM (~1590 lines)
+- `vm/zincvm.c` — native C parser + VM (~1800 lines, includes GC)
 - `shen/serialize.shen` — compile all closures from global-table to csexp bundle
 - `shen/toplevel.shen` — `interp-eval` — compiles defun forms through interpreter
 - `shen/load.shen` — `interp-load` / `interp-load-raw` — file loading
@@ -166,3 +168,55 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 
 - Conventional commits: `feat:`, `fix:`, `chore:`
 - Don't commit compiled binaries
+
+## GC (Bartlett copying collector)
+
+- Submodule: `vendor/bartlett-gc` at `github.com/jmars/bartlett-gc.git` (`c32a5a1`)
+- Heap: 16MB, initialized in `main()` via `gcinit(16*1024*1024, &gc_stack_root, NULL)`
+- Allocation: `GC_VALUE()` = `gcalloc(sizeof(Value), 4)` — 4 pointer slots for tracing
+- `GC_STR(len)` = `gcalloc(len+1, 0)` — 0 pointer slots (opaque)
+- **`gc_set_extra_roots(global_table, sizeof(global_table))`** called after gcinit —
+  registers the BSS global_table array so GC traces closures stored there.
+  Static assertions enforce `GlobalEntry` word-alignment.
+- Register scan DISABLED — `FIRST_REGISTER`/`LAST_REGISTER` removed from gc.h.
+  C stack scan alone is sufficient. 1M allocations in 7.3ms.
+- `val_lambda` env arrays are malloc'd (C heap), NOT GC-allocated. GC-allocated
+  Values inside dormant closures' envs are GC-invisible. Currently latent
+  (bundled closures have env_len=0).
+- `val_symbol` uses strdup (C heap), `val_cons`/`val_string`/`val_vector` use GC.
+- GC tests: stress (50K cons) + retention (global_table entry survives GC) — pass.
+
+## ZINC calling convention (CRITICAL — acc vs stack mismatch)
+
+Our VM uses an **acc-based** dispatch: opcodes set `acc` and explicit `u` (PUSH)
+moves values to the stack. The Shen compiler's bytecode (bundled closures)
+assumes **standard ZINC** where OP_GLOBAL, OP_ACCESS, OP_NUMBER, and OP_APPLY
+all push results to the stack implicitly.
+
+**Partial fixes applied:**
+- `OP_APPLY` (VAL_PRIM): pushes result when next instruction is OP_GLOBAL
+- `OP_ACCESS`: pushes result when next instruction is OP_GLOBAL
+
+These prevent acc-clobbering in `stinput p g[...] p` and `a[...]0 g[...] p`
+patterns. Hand-written test bytecode (28 built-in + self-hosting) uses explicit
+`u` and is NOT affected.
+
+**Remaining gap:** deeper patterns in `shen.read-loop`, `shen.evaluate-lineread`,
+and the property-vector system still fail. The REPL invokes without crash but
+produces no I/O. Full ZINC convention alignment would require making
+OP_GLOBAL/ACCESS/NUMBER push to stack and removing redundant `u` from all
+hand-written tests.
+
+## REPL
+
+- `stinput`/`stoutput` C primitives added — return stdin/stdout VAL_STREAM.
+  Registered in init_globals so bundled closures find them via `global_get`.
+- `fflush(stdout)` in `write-byte` for piped output.
+- `shen.initialise` (15-char name) must be called before `shen.repl`. Wraps
+  `shen.initialise-environment` → `shen.initialise-lambda-forms` →
+  `shen.initialise-signedfuncs`.
+- REPL bytecode (no crash, blocked on ZINC convention):
+  `(mn[1:n]0ug[15:s]shen.initialisepmn[1:n]0ug[9:s]shen.replp)`
+- Name confusion: `shen.initialise_environment` (underscore, 27 chars) is a
+  DIFFERENT function — only resets shen.*call*/shen.*infs* counters. Called by
+  shen.loop each iteration. Not the setup function.
