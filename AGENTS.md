@@ -169,6 +169,15 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 - Conventional commits: `feat:`, `fix:`, `chore:`
 - Don't commit compiled binaries
 
+## trap-error / primitive error handling
+
+- `vm_in_trap_error` flag set during trap-error body/handler execution
+- Primitives that detect type errors (pos, value, <-address, write-byte) check this flag
+- Inside trap-error: longjmp to vm_error_jmp → trap-error's handler catches the error
+- Outside trap-error (built-in tests): print error to stderr + return -1 (unchanged)
+- This routes OOB access sentinels (tag=0,n=0 from empty-env vm_exec calls) through
+  error handlers, letting `bound?` correctly return false for unbound symbols
+
 ## GC (Bartlett copying collector)
 
 - Submodule: `vendor/bartlett-gc` at `github.com/jmars/bartlett-gc.git` (`c32a5a1`)

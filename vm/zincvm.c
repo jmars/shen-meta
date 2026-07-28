@@ -651,7 +651,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             fprintf(stderr, "runtime: <-address bad types\n"); return -1;
         }
         int i = (int)idx.number;
-        if (i < 0 || i >= vec.vector.len) { fprintf(stderr, "runtime: <-address OOB\n"); return -1; }
+        if (i < 0 || i >= vec.vector.len) {
+            if (vm_in_trap_error) {
+                vm_error_pending = 1; vm_error_val = val_error("<-address OOB");
+                longjmp(vm_error_jmp, 1);
+            }
+            fprintf(stderr, "runtime: <-address OOB\n"); return -1;
+        }
         *acc = vec.vector.data[i]; return 0;
     }
     if (strcmp(name, "address->") == 0) {
@@ -698,14 +704,17 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
             henv[handler.lambda.env_len] = err;
             handler.lambda.env = henv; handler.lambda.env_len++;
+            /* Save/restore in case handler itself errors (nested trap-error). */
+            int saved_te = vm_in_trap_error;
             vm_in_trap_error = 1;
             *acc = vm_exec(hc, hl);
-            vm_in_trap_error = 0;
+            vm_in_trap_error = saved_te;
         } else {
+            int saved_te = vm_in_trap_error;
             vm_in_trap_error = 1;
             if (body.tag == VAL_LAMBDA) *acc = vm_exec(body.lambda.code, body.lambda.code_len);
             else *acc = body;
-            vm_in_trap_error = 0;
+            vm_in_trap_error = saved_te;
         }
         return 0;
     }
@@ -783,7 +792,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             }
             fprintf(stderr, "runtime: write-byte on non-output\n"); return -1;
         }
-        if (byte.tag != VAL_NUMBER) { fprintf(stderr, "runtime: write-byte requires number\n"); return -1; }
+        if (byte.tag != VAL_NUMBER) {
+            if (vm_in_trap_error) {
+                vm_error_pending = 1; vm_error_val = val_error("write-byte requires number");
+                longjmp(vm_error_jmp, 1);
+            }
+            fprintf(stderr, "runtime: write-byte requires number\n"); return -1;
+        }
         fputc((int)byte.number, s.stream.file);
         if (s.stream.file == stdout) fflush(stdout);
         *acc = val_number(byte.number); return 0;
@@ -1830,7 +1845,25 @@ int main(int argc, char **argv) {
         "ug[10:s]trap-errorp)", 1);
     run_test("28. [get-time unix]",      "(ms[4:s]unixug[8:s]get-timep)", 1);
 
-    printf("=== All 28 tests done ===\n");
+    /* Test that primitive type errors inside trap-error are caught by handler */
+    run_test("29. trap-error catches value on non-symbol",
+        "(mc(mn[2:n]42ug[5:s]valuepv)"               /* body: (value 42) → error */
+        "uc(S[6:S]caughtv)"                            /* handler: return "caught" */
+        "ug[10:s]trap-errorp)", 1);
+    run_test("30. trap-error catches pos on bad types",
+        "(mc(mS[3:S]baduS[5:S]helloug[3:s]pospv)"    /* body: (pos "hello" "bad") → error */
+        "uc(S[6:S]caughtv)"
+        "ug[10:s]trap-errorp)", 1);
+    run_test("31. trap-error catches write-byte on non-output",
+        "(mc(mn[2:n]42un[2:n]65ug[10:s]write-bytepv)" /* body: (write-byte 65 42) → error */
+        "uc(S[6:S]caughtv)"
+        "ug[10:s]trap-errorp)", 1);
+    run_test("32. trap-error catches <-address bad types",
+        "(mc(mn[2:n]0un[2:n]0ug[10:s]<-addresspv)"    /* body: (<-address 0 0) → error */
+        "uc(S[6:S]caughtv)"
+        "ug[10:s]trap-errorp)", 1);
+
+    printf("=== All 32 tests done ===\n");
     gcfree(gc_state);
     return 0;
 }
