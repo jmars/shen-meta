@@ -1,6 +1,7 @@
 *.kl
 *.o
 zincvm
+zincdec
 *.csexp
 /tmp/
 core.*
