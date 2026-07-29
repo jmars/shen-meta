@@ -765,15 +765,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         *acc = val_nil(); return 0;
     }
     if (strcmp(name, "read-byte") == 0) {
-        /* Use *stinput* directly instead of relying on the stack.
-           The bundled REPL bytecode has stack management issues where
-           byte values from previous iterations accumulate and bury
-           the stream argument. */
-        Value s = global_get("*stinput*");
-        if (s.tag != VAL_STREAM || !s.stream.is_input) {
-            /* Fall back to stack if *stinput* is not available */
-            s = va_pop(stack);
-        }
+        Value s = va_pop(stack);
         if (s.tag != VAL_STREAM || !s.stream.is_input) {
             if (vm_in_trap_error) {
                 vm_error_pending = 1; vm_error_val = val_error("read-byte on non-input");
@@ -1830,7 +1822,7 @@ int main(int argc, char **argv) {
                     }
                 }
 
-                /* Test 6: bundled read-file-as-string — exercises P[4:s]open safe wrapper */
+                /* Test 6: bundled read-file-as-string — exercises file I/O chain */
                 printf("--- Test 6: bundled read-file-as-string via apply ---\n");
                 run_test("rfas-via-apply",
                          "(mS[8:S]Makefileug[19:s]read-file-as-stringp)", 0);
