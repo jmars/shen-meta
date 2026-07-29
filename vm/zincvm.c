@@ -1135,7 +1135,6 @@ static int trace_limit = 0;
 
 static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) {
     ValueArray stack; va_init(&stack);
-    CallFrame frame_stack[CALL_STACK_DEPTH]; int frames_sp = 0;
     Value *env = NULL; int env_len = 0, env_cap = 0;
     if (init_env_len > 0 && init_env) {
         env_cap = init_env_len;
@@ -1144,6 +1143,11 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         env_len = init_env_len;
     }
     Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
+    /* Heap-allocated to avoid C stack overflow from the 3 MB array
+       during recursive vm_exec_env calls via eval-kl / trap-error. */
+    CallFrame *frame_stack = (CallFrame*)calloc(CALL_STACK_DEPTH, sizeof(CallFrame));
+    if (!frame_stack) { va_free(&stack); return acc; }
+    int frames_sp = 0;
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
     uint8_t last_op = 0;  /* used by OP_PRIM to detect duplicate arg pushes */
     int instr_count = 0;
@@ -1358,6 +1362,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
     }
 done:
     va_free(&stack);
+    free(frame_stack);
     return acc;
 }
 
