@@ -712,12 +712,21 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             /* Save/restore in case handler itself errors (nested trap-error). */
             int saved_te = vm_in_trap_error;
             vm_in_trap_error = 1;
-            *acc = vm_exec(hc, hl);
+            *acc = vm_exec_env(hc, hl, handler.lambda.env, handler.lambda.env_len);
             vm_in_trap_error = saved_te;
         } else {
             int saved_te = vm_in_trap_error;
             vm_in_trap_error = 1;
-            if (body.tag == VAL_LAMBDA) *acc = vm_exec(body.lambda.code, body.lambda.code_len);
+            if (body.tag == VAL_LAMBDA) {
+                /* kmacros wraps the body in (lambda (newvar) B), so the
+                   bytecode expects a dummy parameter at env index 0.
+                   Append a nil to the captured env to match. */
+                int new_len = body.lambda.env_len + 1;
+                Value *new_env = (Value*)gcalloc(new_len * sizeof(Value), 4 * new_len);
+                memcpy(new_env, body.lambda.env, body.lambda.env_len * sizeof(Value));
+                new_env[body.lambda.env_len] = val_nil();
+                *acc = vm_exec_env(body.lambda.code, body.lambda.code_len, new_env, new_len);
+            }
             else *acc = body;
             vm_in_trap_error = saved_te;
         }
@@ -1270,27 +1279,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             break;
         }
         case OP_RETURN: {
-            if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK && frames_sp > 0) {
-                va_pop(&stack);
-                CallFrame *cf = &frame_stack[--frames_sp];
-                cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
-                env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
-                va_free(&stack); stack = cf->stack;
-            } else if (stack.len > 0 && frames_sp > 0 && acc.tag == VAL_LAMBDA) {
-                /* Tail-call: stack has the arg, acc has the function.
-                   Replace current frame instead of pushing a new one.
-                   Pop any accumulated marks before the arg — they're from
-                   pushmarks in the current frame, not needed by the callee. */
-                while (stack.len > 1 && va_peek(&stack).tag == VAL_MARK)
-                    va_pop(&stack);
-                Value v = va_pop(&stack);
-                cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
-                Value *ne = (Value*)gcalloc((acc.lambda.env_len + 1) * sizeof(Value), 4 * (acc.lambda.env_len + 1));
-                memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
-                ne[acc.lambda.env_len] = v;
-                env = ne; env_len = acc.lambda.env_len + 1; env_cap = acc.lambda.env_len + 1;
-                pc = 0;
-            } else if (frames_sp > 0) {
+            if (frames_sp > 0) {
                 CallFrame *cf = &frame_stack[--frames_sp];
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                 env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
@@ -1827,10 +1816,27 @@ int main(int argc, char **argv) {
                 run_test("rfas-via-apply",
                          "(mS[8:S]Makefileug[19:s]read-file-as-stringp)", 0);
 
+                /* shen.initialise MUST run before any test that uses macroexpand
+                   (test 7+).  It sets up *macros*, *property-vector*, etc.
+                   The first call errors "set: first arg must be a symbol"
+                   (non-idempotent, caught by trap-error). */
+                printf("\n--- shen.initialise smoke test ---\n");
+                fflush(stdout);
+                trace_counter = 0; trace_limit = 10000;
+                run_test("init-only",
+                         "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
+                trace_counter = -1; trace_limit = 0;
+                printf("-- init done --\n"); fflush(stdout);
+
                 /* Test 7: bundled load — exercises full read-compile chain */
                 printf("--- Test 7: bundled load via apply ---\n");
                 run_test("load-via-apply",
                          "(mS[17:S]test_fixture.shenug[4:s]loadp)", 0);
+
+                /* Test 7b: read-from-string — does the parser work standalone? */
+                printf("--- Test 7b: read-from-string (+ 1 2) ---\n");
+                run_test("rfs-test",
+                         "(mS[7:S](+ 1 2)ug[16:s]read-from-stringp)", 0);
 
                 /* Test 8: load a real Shen file — shen/util.shen */
                 printf("--- Test 8: bundled load shen/util.shen ---\n");
@@ -1852,15 +1858,6 @@ int main(int argc, char **argv) {
                 printf("Raw primitive I/O works via raw.X namespace (bypasses safe wrappers).\n");
                 printf("eval-kl chain (marshal → extract-kl → kl->zinc → toplevel-interp → demarshal) works.\n");
                 printf("Bundled file I/O works — safe wrappers + P[4:s]open chain functional.\n");
-
-                /* Verify shen.initialise works (quick smoke test before GC stress) */
-                printf("\n--- shen.initialise smoke test ---\n");
-                fflush(stdout);
-                trace_counter = 0; trace_limit = 10000;
-                run_test("init-only",
-                         "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
-                trace_counter = -1; trace_limit = 0;
-                printf("-- init done --\n"); fflush(stdout);
 
                 /* GC stress: allocate cons cells to verify GC collections work.
                    Each val_cons allocates 2 GC_VALUE() = ~80 bytes.
