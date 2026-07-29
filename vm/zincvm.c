@@ -1224,7 +1224,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 Value argbuf[64];
                 while (stack.len > 0 && va_peek(&stack).tag != VAL_MARK) {
                     if (nargs < 64) argbuf[nargs++] = va_pop(&stack);
-                    else { fprintf(stderr, "runtime: too many args (>64)\n"); goto done; }
+                    else { vm_error_val = val_error("runtime: too many args (>64)"); vm_error_pending = 1; longjmp(vm_error_jmp, 1); }
                 }
                 /* Pop the intentional mark */
                 if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
@@ -1329,7 +1329,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 Value argbuf[64];
                 while (stack.len > 0 && va_peek(&stack).tag != VAL_MARK) {
                     if (nargs < 64) argbuf[nargs++] = va_pop(&stack);
-                    else { fprintf(stderr, "runtime: appterm too many args (>64)\n"); goto done; }
+                    else { vm_error_val = val_error("runtime: appterm too many args (>64)"); vm_error_pending = 1; longjmp(vm_error_jmp, 1); }
                 }
                 if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
                     va_pop(&stack);
