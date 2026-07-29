@@ -1973,10 +1973,8 @@ int main(int argc, char **argv) {
                    (non-idempotent, caught by trap-error). */
                 printf("\n--- shen.initialise smoke test ---\n");
                 fflush(stdout);
-                trace_counter = 0; trace_limit = 10000;
                 run_test("init-only",
                          "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
-                trace_counter = -1; trace_limit = 0;
                 printf("-- init done --\n"); fflush(stdout);
 
                 /* Test 7tc: disable type checker to isolate GC issue */
