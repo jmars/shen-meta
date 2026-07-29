@@ -662,12 +662,70 @@ static void decompile_shen(Instr *code, int len) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Decompile: csexp format (raw wire format the parser reads)         */
+/* ------------------------------------------------------------------ */
+
+/* Emit a csexp operand: [len:type]value */
+static void emit_csexp_operand(Value v) {
+    switch (v.tag) {
+    case VAL_NUMBER: {
+        char buf[32]; int n = snprintf(buf, sizeof(buf), "%ld", v.number);
+        printf("[%d:n]%s", n, buf); break;
+    }
+    case VAL_STRING:
+        printf("[%d:S]%.*s", v.str.len, v.str.len, v.str.data); break;
+    case VAL_SYMBOL:
+        printf("[%d:s]%s", (int)strlen(v.sym.name), v.sym.name); break;
+    case VAL_BOOLEAN: {
+        const char *s = v.boolean ? "true" : "false";
+        printf("[%d:b]%s", (int)strlen(s), s); break;
+    }
+    default: printf("[0:n]0"); break;
+    }
+}
+
+static void decompile_csexp_instr(Instr *in) {
+    switch (in->op) {
+    case OP_PUSHMARK: printf("m"); break;
+    case OP_APPLY:    printf("p"); break;
+    case OP_PUSH:     printf("u"); break;
+    case OP_GRAB:     printf("r"); break;
+    case OP_RETURN:   printf("v"); break;
+    case OP_LET:      printf("e"); break;
+    case OP_ENDLET:   printf("d"); break;
+    case OP_APPTERM:  printf("t"); break;
+    case OP_ACCESS:   printf("a"); emit_csexp_operand(in->operand); break;
+    case OP_GLOBAL:   printf("g"); emit_csexp_operand(in->operand); break;
+    case OP_JMPF:     printf("f"); emit_csexp_operand(in->operand); break;
+    case OP_JMP:      printf("j"); emit_csexp_operand(in->operand); break;
+    case OP_NUMBER:   printf("n"); emit_csexp_operand(in->operand); break;
+    case OP_STRING:   printf("S"); emit_csexp_operand(in->operand); break;
+    case OP_SYMBOL:   printf("s"); emit_csexp_operand(in->operand); break;
+    case OP_BOOLEAN:  printf("b"); emit_csexp_operand(in->operand); break;
+    case OP_PRIM:     printf("P"); emit_csexp_operand(in->operand); break;
+    case OP_CUR:
+        printf("c(");
+        for (int k = 0; k < in->closure_len; k++)
+            decompile_csexp_instr(&in->closure_code[k]);
+        printf(")"); break;
+    default: printf("?"); break;
+    }
+}
+
+static void decompile_csexp(Instr *code, int len) {
+    printf("(");
+    for (int i = 0; i < len; i++)
+        decompile_csexp_instr(&code[i]);
+    printf(")\n");
+}
+
+/* ------------------------------------------------------------------ */
 /*  main                                                               */
 /* ------------------------------------------------------------------ */
 
 static void usage(const char *prog) {
     fprintf(stderr,
-        "Usage: %s <bundle> <function-name> [--raw|--asm|--shen]\n"
+        "Usage: %s <bundle> <function-name> [--raw|--asm|--shen|--csexp]\n"
         "\n"
         "Decompile a bundled closure's ZINC bytecode.\n"
         "\n"
@@ -675,12 +733,14 @@ static void usage(const char *prog) {
         "  --raw   (default) Human-readable opcode names with operands\n"
         "  --asm             Disassembly listing with hex addresses\n"
         "  --shen            Shen list syntax for interp.shen's interp\n"
+        "  --csexp           Raw csexp wire format (feedable to parse_bytecode)\n"
         "\n"
         "Examples:\n"
         "  %s globals.csexp +\n"
         "  %s globals.csexp read-from-string --asm\n"
-        "  %s globals.csexp shen.repl --shen\n",
-        prog, prog, prog, prog);
+        "  %s globals.csexp shen.repl --shen\n"
+        "  %s globals.csexp reverse --csexp\n",
+        prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char **argv) {
@@ -697,7 +757,8 @@ int main(int argc, char **argv) {
 
     if (argc > 3) {
         format = argv[3];
-        if (strcmp(format, "--raw") && strcmp(format, "--asm") && strcmp(format, "--shen")) {
+        if (strcmp(format, "--raw") && strcmp(format, "--asm") &&
+            strcmp(format, "--shen") && strcmp(format, "--csexp")) {
             fprintf(stderr, "error: unknown format '%s'\n", format);
             usage(argv[0]); return 1;
         }
@@ -725,13 +786,15 @@ int main(int argc, char **argv) {
 
     Value g = global_get(func_name);
     if (g.tag == VAL_LAMBDA) {
-        int fmt_shen = !strcmp(format, "--shen");
-        int fmt_asm  = !strcmp(format, "--asm");
-        if (!fmt_shen) printf("=== %s ===\n  code_len=%d  env_len=%d\n\n",
+        int fmt_shen  = !strcmp(format, "--shen");
+        int fmt_asm   = !strcmp(format, "--asm");
+        int fmt_csexp = !strcmp(format, "--csexp");
+        if (!fmt_shen && !fmt_csexp) printf("=== %s ===\n  code_len=%d  env_len=%d\n\n",
                           func_name, g.lambda.code_len, g.lambda.env_len);
-        if (fmt_asm)       decompile_asm(g.lambda.code, g.lambda.code_len, 0, 0);
-        else if (fmt_shen) decompile_shen(g.lambda.code, g.lambda.code_len);
-        else               decompile_raw(g.lambda.code, g.lambda.code_len, 0);
+        if (fmt_asm)         decompile_asm(g.lambda.code, g.lambda.code_len, 0, 0);
+        else if (fmt_shen)   decompile_shen(g.lambda.code, g.lambda.code_len);
+        else if (fmt_csexp)  decompile_csexp(g.lambda.code, g.lambda.code_len);
+        else                 decompile_raw(g.lambda.code, g.lambda.code_len, 0);
     } else if (g.tag == VAL_PRIM) {
         printf("%s is a C primitive\n", func_name);
     } else {
