@@ -1177,7 +1177,15 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         Instr *in = &cur_code[pc];
         switch (in->op) {
         case OP_NUMBER: case OP_STRING: case OP_SYMBOL: case OP_BOOLEAN:
-            acc = in->operand; pc++; break;
+            acc = in->operand;
+            if (pc + 1 < cur_len) {
+                uint8_t no = cur_code[pc + 1].op;
+                if (no == OP_ACCESS || no == OP_GLOBAL ||
+                    no == OP_NUMBER || no == OP_STRING ||
+                    no == OP_SYMBOL || no == OP_BOOLEAN ||
+                    no == OP_CUR) va_push(&stack, acc);
+            }
+            pc++; break;
         case OP_PRIM: {
             /* ZINC [prim X] executes primitive X with args from stack + acc.
                Push acc so binary primitives find both args on the stack.
@@ -1248,10 +1256,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 int new_env_len = acc.lambda.env_len + nargs;
                 Value *ne = (Value*)gcalloc(new_env_len * sizeof(Value), 4 * new_env_len);
                 memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
-                /* Args were popped from top of stack; the stack was built
-                   RTL (rightmost pushed first, leftmost last on top),
-                   so popping from top yields LTR order (leftmost first)
-                   which is the correct env order for Shen closures. */
                 for (int i = 0; i < nargs; i++)
                     ne[acc.lambda.env_len + i] = argbuf[i];
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
@@ -1304,10 +1308,32 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         }
         case OP_ACCESS:
             acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len, pc, cur_code, cur_len);
+            /* Standard ZINC pushes access results to stack.  Our VM is
+               acc-based, but bundled bytecode (compiled by the Shen ZINC
+               compiler) assumes stack-push semantics.  Push to stack when
+               the next instruction will clobber acc — i.e. another
+               value-producing opcode.  OP_PRIM is excluded because it
+               handles its own push via the last_op != OP_PUSH guard. */
+            if (pc + 1 < cur_len) {
+                uint8_t no = cur_code[pc + 1].op;
+                if (no == OP_ACCESS || no == OP_GLOBAL ||
+                    no == OP_NUMBER || no == OP_STRING ||
+                    no == OP_SYMBOL || no == OP_BOOLEAN ||
+                    no == OP_CUR) va_push(&stack, acc);
+            }
             pc++; break;
         case OP_GLOBAL: {
             const char *nm = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
-            acc = global_get(nm); pc++; break;
+            acc = global_get(nm);
+            /* Same push-before-clobber logic as OP_ACCESS above */
+            if (pc + 1 < cur_len) {
+                uint8_t no = cur_code[pc + 1].op;
+                if (no == OP_ACCESS || no == OP_GLOBAL ||
+                    no == OP_NUMBER || no == OP_STRING ||
+                    no == OP_SYMBOL || no == OP_BOOLEAN ||
+                    no == OP_CUR) va_push(&stack, acc);
+            }
+            pc++; break;
         }
         case OP_LET: env_push(&env, &env_len, &env_cap, acc); pc++; break;
         case OP_ENDLET: if (env_len > 0) env_pop(&env, &env_len); pc++; break;
@@ -1321,7 +1347,15 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         case OP_CUR: {
             Value *ec = NULL; int ecl = env_len;
             if (env_len > 0) { ec = (Value*)gcalloc(env_len * sizeof(Value), 4 * env_len); memcpy(ec, env, env_len * sizeof(Value)); }
-            acc = val_lambda(in->closure_code, in->closure_len, ec, ecl); pc++; break;
+            acc = val_lambda(in->closure_code, in->closure_len, ec, ecl);
+            if (pc + 1 < cur_len) {
+                uint8_t no = cur_code[pc + 1].op;
+                if (no == OP_ACCESS || no == OP_GLOBAL ||
+                    no == OP_NUMBER || no == OP_STRING ||
+                    no == OP_SYMBOL || no == OP_BOOLEAN ||
+                    no == OP_CUR) va_push(&stack, acc);
+            }
+            pc++; break;
         }
         case OP_APPTERM: {
             if (acc.tag == VAL_LAMBDA) {
