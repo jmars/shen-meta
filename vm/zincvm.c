@@ -1246,9 +1246,12 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 int new_env_len = acc.lambda.env_len + nargs;
                 Value *ne = (Value*)gcalloc(new_env_len * sizeof(Value), 4 * new_env_len);
                 memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
-                /* Args were popped RTL — reverse into env */
+                /* Args were popped from top of stack; the stack was built
+                   RTL (rightmost pushed first, leftmost last on top),
+                   so popping from top yields LTR order (leftmost first)
+                   which is the correct env order for Shen closures. */
                 for (int i = 0; i < nargs; i++)
-                    ne[acc.lambda.env_len + i] = argbuf[nargs - 1 - i];
+                    ne[acc.lambda.env_len + i] = argbuf[i];
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
                 pc = 0;
             } else if (acc.tag == VAL_PRIM) {
@@ -1339,7 +1342,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 Value *ne = (Value*)gcalloc(new_env_len * sizeof(Value), 4 * new_env_len);
                 memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
                 for (int i = 0; i < nargs; i++)
-                    ne[acc.lambda.env_len + i] = argbuf[nargs - 1 - i];
+                    ne[acc.lambda.env_len + i] = argbuf[i];
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
                 pc = 0; break;
             } else if (acc.tag == VAL_PRIM) {
@@ -1875,12 +1878,10 @@ int main(int argc, char **argv) {
                     }
                 }
 
-                /* REPL smoke test — run AFTER GC stress to verify GC survives collections */
+                /* REPL smoke test — shen.initialise already ran above.
+                   shen.repl with (cons success []) as arg */
                 printf("\n--- REPL smoke test ---\n");
                 fflush(stdout);
-                /* Run shen.initialise separately — its error must not abort shen.repl */
-                run_test("repl-init", "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
-                /* Now run shen.repl with (cons success []) as arg */
                 run_test("repl-smoke",
                          "(mn[1:n]0P[9:s]emptylistus[7:s]successP[4:s]consug[9:s]shen.replp)", 0);
                 printf("--- REPL smoke test done ---\n");
