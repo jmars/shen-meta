@@ -26,6 +26,7 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 | C | interp `[] [cons] [] [] []` → `[cons]` | Pass |
 | 5 | eval-kl `[+ 1 2]` via marshal chain | Pass |
 | 6-7 | read-file-as-string, load via apply | Pass |
+| 7b | read-from-string | Skip (needs string stream support in open) |
 | 8-10 | load shen/util.shen, id, newvar | Pass |
 
 ## Key files (under `shen/` unless noted):
@@ -62,6 +63,14 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 - `trap-error`/`simple-error` use `setjmp`/`longjmp`
 - `eval_kl_depth` recursion guard: setjmp guard ensures depth always decremented even on
   longjmp from simple-error. Without this, a failed eval-kl blocks all subsequent calls.
+
+## Primitive semantics (critical — must match Shen)
+
+- `n->string N`: number → single-character string via ASCII code. `(n->string 40)` → `"("`
+- `string->n S`: first character → ASCII code. `(string->n "(")` → `40`
+- `pos S N`: single character at index N (0-based). OOB → `""`. `(pos "hello" 1)` → `"e"`
+- `str V`: value→printed string. Numbers use decimal. Symbols use name. Strings pass through.
+- `open Path Dir`: file I/O only (no string stream support). `read-from-string` won't work.
 
 ## Pipeline gotchas
 
@@ -181,8 +190,8 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 ## GC (Bartlett copying collector)
 
 - Submodule: `vendor/bartlett-gc` at `github.com/jmars/bartlett-gc.git` (`c32a5a1`)
-- Heap: starts at 128MB, auto-grows via mremap (reserves 256MB VAS initially).
-  Shrinks when live set is <25% of heap AND heap >128MB. Min 16MB.
+- Heap: starts at 256MB, auto-grows via managed-page growth (reserves 2GB VAS initially).
+  Shrinks when live set is <25% of heap AND heap >256MB. Min 16MB.
 - Allocation: `GC_VALUE()` = `gcalloc(sizeof(Value), 4)` — 4 pointer slots for tracing
 - `GC_STR(len)` = `gcalloc(len+1, 0)` — 0 pointer slots (opaque)
 - **`gc_set_extra_roots(global_table, sizeof(global_table))`** called after gcinit —

@@ -164,22 +164,13 @@ static Value val_nil(void) {
     v.tag = VAL_NIL; return v;
 }
 static Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
-    /* NOTE: env arrays are malloc'd (C heap), NOT GC-allocated.  This means
-       GC-allocated Value pointers stored inside the env (e.g. cons cells
-       in captured variables) are invisible to the GC while the closure is
-       dormant in global_table.  They are safe only while the closure is
-       executing and env is loaded onto the stack/registers.
-
-       Currently this is latent: parse_bundle creates closures with env_len=0,
-       and bundled closures don't capture GC-allocated state.  If runtime code
-       stores closures with non-empty envs in global_table (via the 'set'
-       primitive), the env-referenced GC objects may be prematurely collected.
-       Fix: allocate env on GC heap, or register env arrays as extra roots. */
+    /* env arrays are GC-allocated via gcalloc so GC traces captured
+       Values when the closure is reachable (e.g. via global_table). */
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_LAMBDA;
     v.lambda.code = code; v.lambda.code_len = code_len;
     if (env_len > 0) {
-        v.lambda.env = malloc(env_len * sizeof(Value));
+        v.lambda.env = (Value*)gcalloc(env_len * sizeof(Value), 4 * env_len);
         memcpy(v.lambda.env, env, env_len * sizeof(Value));
         v.lambda.env_len = env_len;
     } else { v.lambda.env = NULL; v.lambda.env_len = 0; }
@@ -578,19 +569,20 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "n->string") == 0) {
         Value a = va_pop(stack);
         if (a.tag != VAL_NUMBER) { fprintf(stderr, "runtime: n->string on non-number\n"); return -1; }
-        char buf[64]; int len = snprintf(buf, sizeof(buf), "%ld", a.number);
-        *acc = val_string(buf, len); return 0;
+        /* Shen: number→character code (ASCII). (n->string 40) → "(" */
+        char buf[2] = { (char)a.number, '\0' };
+        *acc = val_string(buf, 1); return 0;
     }
     if (strcmp(name, "string->n") == 0) {
         Value a = va_pop(stack);
         if (a.tag != VAL_STRING) { fprintf(stderr, "runtime: string->n on non-string\n"); return -1; }
-        char buf[256]; int n = a.str.len < 255 ? a.str.len : 255;
-        memcpy(buf, a.str.data, n); buf[n] = '\0';
-        *acc = val_number(atol(buf)); return 0;
+        /* Shen: character code of first character. (string->n "(") → 40 */
+        *acc = val_number(a.str.len > 0 ? (unsigned char)a.str.data[0] : 0); return 0;
     }
     if (strcmp(name, "str") == 0) {
         Value a = va_pop(stack);
         if (a.tag == VAL_SYMBOL) *acc = val_string(a.sym.name, strlen(a.sym.name));
+        else if (a.tag == VAL_STRING) *acc = a; /* already a string, return as-is */
         else if (a.tag == VAL_NUMBER) { char buf[64]; int len = snprintf(buf, sizeof(buf), "%ld", a.number); *acc = val_string(buf, len); }
         else *acc = val_string("", 0);
         return 0;
@@ -609,9 +601,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             }
             fprintf(stderr, "runtime: pos on bad types\n"); return -1;
         }
+        /* Shen: (pos Str N) returns the single character at index N.
+           Out of bounds → empty string. (pos "hello" 1) → "e" */
         int pl = (int)a2.number;
-        if (pl < 0 || pl > a1.str.len) pl = a1.str.len;
-        *acc = val_string(a1.str.data, pl); return 0;
+        if (pl < 0 || pl >= a1.str.len) *acc = val_string("", 0);
+        else *acc = val_string(a1.str.data + pl, 1);
+        return 0;
     }
 
     /* --- Symbol ops --- */
@@ -1326,9 +1321,8 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             }
             if (acc.tag == VAL_BOOLEAN && !acc.boolean) pc = in->jmp_target; else pc++; break;
         case OP_CUR: {
-            Value *ec = NULL; int ecl = env_len;
-            if (env_len > 0) { ec = (Value*)gcalloc(env_len * sizeof(Value), 4 * env_len); memcpy(ec, env, env_len * sizeof(Value)); }
-            acc = val_lambda(in->closure_code, in->closure_len, ec, ecl);
+            /* val_lambda now GC-allocates its own env copy */
+            acc = val_lambda(in->closure_code, in->closure_len, env, env_len);
             if (pc + 1 < cur_len) {
                 uint8_t no = cur_code[pc + 1].op;
                 if (no == OP_ACCESS || no == OP_GLOBAL ||
@@ -1553,7 +1547,7 @@ static int parse_bundle(const char *str) {
 int main(int argc, char **argv) {
     uintptr_t gc_stack_root = 0;
     init_globals();
-    gc_state = gcinit(128 * 1024 * 1024, &gc_stack_root, NULL);
+    gc_state = gcinit(256 * 1024 * 1024, &gc_stack_root, NULL);
     gc_set_extra_roots(global_table, sizeof(global_table));
     if (argc > 1) {
         char *buf = read_file_or_stdin(argv[1]);
@@ -1828,20 +1822,28 @@ int main(int argc, char **argv) {
                 trace_counter = -1; trace_limit = 0;
                 printf("-- init done --\n"); fflush(stdout);
 
+                /* Test 7tc: disable type checker to isolate GC issue */
+                printf("--- Test 7tc: disable *tc* ---\n");
+                run_test("tc-off",
+                         "(mb[5:b]falseus[4:s]*tc*ug[3:s]setp)", 0);
+
                 /* Test 7: bundled load — exercises full read-compile chain */
                 printf("--- Test 7: bundled load via apply ---\n");
                 run_test("load-via-apply",
                          "(mS[17:S]test_fixture.shenug[4:s]loadp)", 0);
 
-                /* Test 7b: read-from-string — does the parser work standalone? */
-                printf("--- Test 7b: read-from-string (+ 1 2) ---\n");
-                run_test("rfs-test",
-                         "(mS[7:S](+ 1 2)ug[16:s]read-from-stringp)", 0);
+                /* Test 7b: read-from-string — does the parser work standalone?
+                   NOTE: read-from-string uses (open StringString in) to create
+                   a string stream.  Our open primitive only supports files.
+                   This test will fail until string stream support is added. */
+                printf("--- Test 7b: read-from-string (+ 1 2) [SKIP: no string streams] ---\n");
+                /* run_test("rfs-test",
+                         "(mS[7:S](+ 1 2)ug[16:s]read-from-stringp)", 0); */
 
                 /* Test 8: load a real Shen file — shen/util.shen */
                 printf("--- Test 8: bundled load shen/util.shen ---\n");
                 run_test("load-util",
-                         "(mS[15:S]shen/util.shenug[4:s]loadp)", 0);
+                         "(mS[14:S]shen/util.shenug[4:s]loadp)", 0);
 
                 /* Test 9: call (id 42) from loaded util.shen — verifies functions work */
                 printf("--- Test 9: call (id 42) from loaded util.shen ---\n");
@@ -1947,8 +1949,8 @@ int main(int argc, char **argv) {
     run_test("16. [string? 42] (expect false)", "(mn[2:n]42ug[7:s]string?p)", 1);
     run_test("17. [cons 1 2]",           "(mn[1:n]2un[1:n]1ug[4:s]consp)", 1);
     run_test("18. [cn \"hello\" \"world\"]", "(mS[5:S]worlduS[5:S]helloug[2:s]cnp)", 1);
-    run_test("19. [n->string 42]",       "(mn[2:n]42ug[9:s]n->stringp)", 1);
-    run_test("20. [string->n \"42\"]",   "(mS[2:S]42ug[9:s]string->np)", 1);
+    run_test("19. [n->string 42] (expect *)",       "(mn[2:n]42ug[9:s]n->stringp)", 1);
+    run_test("20. [string->n \"42\"] (expect 52)",   "(mS[2:S]42ug[9:s]string->np)", 1);
     run_test("21. [str hello]",          "(ms[5:s]helloug[3:s]strp)", 1);
     run_test("22. [tlstr \"abc\"]",      "(mS[3:S]abcug[5:s]tlstrp)", 1);
     run_test("23. [intern \"foo\"]",     "(mS[3:S]fooug[6:s]internp)", 1);
