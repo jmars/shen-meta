@@ -1448,10 +1448,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         case OP_ENDLET: if (env_len > 0) env_pop(&env, &env_len); pc++; break;
         case OP_JMP: pc = in->jmp_target; break;
         case OP_JMPF:
-            if (trace_counter >= 0 && trace_counter < trace_limit + 5) {
-                fprintf(stderr, "    -> jmpf check: acc.tag=%d, boolean=%d, target=%d\n",
-                        acc.tag, acc.tag == VAL_BOOLEAN ? acc.boolean : -1, in->jmp_target);
-            }
             if (acc.tag == VAL_BOOLEAN && !acc.boolean) pc = in->jmp_target; else pc++; break;
         case OP_CUR: {
             /* val_lambda now GC-allocates its own env copy */
@@ -1997,9 +1993,9 @@ int main(int argc, char **argv) {
 
                 /* Test 7b: read-from-string — the bundled closure uses
                    shen.str->bytes → compile → <s-exprs> YACC chain
-                   which enters an infinite loop in our VM.  Skipped. */
-                printf("--- Test 7b: read-from-string [SKIPPED - YACC infinite loop] ---\n");
-                /* run_test skipped — would hang */
+                   which produces [error ""] in our VM.  Skipped. */
+                printf("--- Test 7b: read-from-string [SKIPPED - returns empty error] ---\n");
+                /* run_test skipped — returns [error ""] */
 
                 /* Test 7c: read via string stream — (read (open Str in)) */
 
