@@ -26,7 +26,8 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 | C | interp `[] [cons] [] [] []` → `[cons]` | Pass |
 | 5 | eval-kl `[+ 1 2]` via marshal chain | Pass |
 | 6-7 | read-file-as-string, load via apply | Pass |
-| 7b | read-from-string | Skip (needs string stream support in open) |
+| 7b | read-from-string | Fail (parser expects YACC state, not byte list) |
+| 7c | read via string stream | Pass |
 | 8-10 | load shen/util.shen, id, newvar | Pass |
 
 ## Key files (under `shen/` unless noted):
@@ -70,7 +71,8 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 - `string->n S`: first character → ASCII code. `(string->n "(")` → `40`
 - `pos S N`: single character at index N (0-based). OOB → `""`. `(pos "hello" 1)` → `"e"`
 - `str V`: value→printed string. Numbers use decimal. Symbols use name. Strings pass through.
-- `open Path Dir`: file I/O only (no string stream support). `read-from-string` won't work.
+- `open Path Dir`: file I/O + string streams. ENOENT on `in` → creates string stream from Path.
+  String stream data stored externally (not in Value union) to keep sizeof(Value) small.
 
 ## Pipeline gotchas
 

@@ -32,6 +32,7 @@
 #include <setjmp.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "gc.h"
 
@@ -83,8 +84,9 @@ typedef struct Value {
             int len;
         } vector;
         struct {
-            FILE *file;
+            FILE *file;         /* NULL for string streams */
             int is_input;
+            int is_string;      /* 1 = string-backed, 0 = FILE-backed */
         } stream;
     };
 } Value;
@@ -212,6 +214,31 @@ static Value val_stream_in(FILE *f) {
 static Value val_stream_out(FILE *f) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_STREAM; v.stream.file = f; v.stream.is_input = 0; return v;
+}
+
+/* String stream storage — avoids bloating sizeof(Value).
+   Index stored in stream.file cast to (FILE*)(intptr_t)idx. */
+#define MAX_STRING_STREAMS 8
+static struct { char *data; int len; int pos; } string_streams[MAX_STRING_STREAMS];
+static int n_string_streams = 0;
+
+static Value val_string_stream_in(const char *src, int srclen) {
+    if (n_string_streams >= MAX_STRING_STREAMS) {
+        fprintf(stderr, "runtime: too many string streams\n");
+        return val_error("too many string streams");
+    }
+    int idx = n_string_streams++;
+    string_streams[idx].data = malloc(srclen + 1);
+    memcpy(string_streams[idx].data, src, srclen);
+    string_streams[idx].data[srclen] = '\0';
+    string_streams[idx].len = srclen;
+    string_streams[idx].pos = 0;
+    Value v; memset(&v, 0, sizeof(v));
+    v.tag = VAL_STREAM;
+    v.stream.file = (FILE*)(intptr_t)(idx + 1);  /* +1 so 0 = no string stream */
+    v.stream.is_input = 1;
+    v.stream.is_string = 1;
+    return v;
 }
 
 static void print_value(Value v) {
@@ -592,6 +619,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         if (a.tag != VAL_STRING || a.str.len < 1) { fprintf(stderr, "runtime: tlstr on empty/non-string\n"); return -1; }
         *acc = val_string(a.str.data + 1, a.str.len - 1); return 0;
     }
+    if (strcmp(name, "hdstr") == 0) {
+        Value a = va_pop(stack);
+        if (a.tag != VAL_STRING || a.str.len < 1) { fprintf(stderr, "runtime: hdstr on empty/non-string\n"); return -1; }
+        *acc = val_string(a.str.data, 1); return 0;
+    }
     if (strcmp(name, "pos") == 0) {
         Value a1 = va_pop(stack), a2 = va_pop(stack);
         if (a1.tag != VAL_STRING || a2.tag != VAL_NUMBER) {
@@ -753,11 +785,17 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         memcpy(pb, path.str.data, n); pb[n] = '\0';
         if (strcmp(dir.sym.name, "in") == 0) {
             FILE *f = fopen(pb, "r");
-            if (!f) { fprintf(stderr, "runtime: cannot open '%s' for reading\n", pb); return -1; }
-            *acc = val_stream_in(f); return 0;
+            if (f) { *acc = val_stream_in(f); return 0; }
+            /* File not found — treat as string stream */
+            if (errno == ENOENT) {
+                *acc = val_string_stream_in(path.str.data, path.str.len);
+                return 0;
+            }
+            fprintf(stderr, "runtime: cannot open '%s' for reading: %s\n", pb, strerror(errno));
+            return -1;
         } else if (strcmp(dir.sym.name, "out") == 0) {
             FILE *f = fopen(pb, "w");
-            if (!f) { fprintf(stderr, "runtime: cannot open '%s' for writing\n", pb); return -1; }
+            if (!f) { fprintf(stderr, "runtime: cannot open '%s' for writing: %s\n", pb, strerror(errno)); return -1; }
             *acc = val_stream_out(f); return 0;
         }
         fprintf(stderr, "runtime: open direction must be in or out\n"); return -1;
@@ -765,6 +803,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "close") == 0) {
         Value s = va_pop(stack);
         if (s.tag != VAL_STREAM) { fprintf(stderr, "runtime: close on non-stream\n"); return -1; }
+        if (s.stream.is_string) {
+            int idx = (int)(intptr_t)s.stream.file - 1;
+            if (idx < 0 || idx >= n_string_streams) { fprintf(stderr, "runtime: bad string stream idx\n"); return -1; }
+            free(string_streams[idx].data);
+            string_streams[idx].data = NULL;
+            *acc = val_nil(); return 0;
+        }
         if (s.stream.file) fclose(s.stream.file);
         *acc = val_nil(); return 0;
     }
@@ -776,6 +821,16 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
                 longjmp(vm_error_jmp, 1);
             }
             fprintf(stderr, "runtime: read-byte on non-input\n"); return -1;
+        }
+        if (s.stream.is_string) {
+            int idx = (int)(intptr_t)s.stream.file - 1;
+            if (idx < 0 || idx >= n_string_streams) { return -1; }
+            if (string_streams[idx].pos >= string_streams[idx].len) {
+                *acc = val_number(-1);  /* EOF */
+            } else {
+                *acc = val_number((unsigned char)string_streams[idx].data[string_streams[idx].pos++]);
+            }
+            return 0;
         }
         int c = fgetc(s.stream.file); *acc = val_number(c == EOF ? -1 : c); return 0;
     }
@@ -1432,7 +1487,7 @@ static void init_globals(void) {
         "error?","function?","stream?",
         "simple-error","trap-error","error-to-string",
         "eval-kl","absvector","<-address","address->",
-        "n->string","string->n","str","tlstr","pos",
+        "n->string","string->n","str","tlstr","hdstr","pos",
         "intern","value","open","close","read-byte","write-byte",
         "set","get-time","read-file-as-string","vm.read-file",
         "@p","fst","snd","gensym","variable?","newvar",
@@ -1451,7 +1506,7 @@ static void init_globals(void) {
         "raw.symbol?","raw.boolean?","raw.number?","raw.string?","raw.cons?",
         "raw.simple-error","raw.trap-error","raw.error-to-string",
         "raw.eval-kl","raw.absvector","raw.<-address","raw.address->",
-        "raw.n->string","raw.string->n","raw.str","raw.tlstr","raw.pos",
+        "raw.n->string","raw.string->n","raw.str","raw.tlstr","raw.hdstr","raw.pos",
         "raw.intern","raw.value","raw.open","raw.close","raw.read-byte","raw.write-byte",
         "raw.set","raw.get-time", NULL
     };
@@ -1850,12 +1905,16 @@ int main(int argc, char **argv) {
                 run_test("load-via-apply",
                          "(mS[17:S]test_fixture.shenug[4:s]loadp)", 0);
 
-                /* Test 7b: read-from-string — uses shen.str->bytes, not open.
-                   This exercises the Shen parser on string input.
-                   NOTE: currently fails with [error ""] — parser issue TBD. */
+                /* Test 7b: read-from-string — uses shen.str->bytes internally.
+                   NOTE: currently fails — parser expects YACC parse-state format. */
                 printf("--- Test 7b: read-from-string (+ 1 2) ---\n");
                 run_test("rfs-test",
                          "(mS[7:S](+ 1 2)ug[16:s]read-from-stringp)", 0);
+
+                /* Test 7c: read via string stream — (read (open Str in)) */
+                printf("--- Test 7c: read via string stream ---\n");
+                run_test("rfs-stream",
+                         "(ms[2:s]inuS[7:S](+ 1 2)ug[4:s]openpug[4:s]readp)", 0);
 
                 /* Test 8: load a real Shen file — shen/util.shen */
                 printf("--- Test 8: bundled load shen/util.shen ---\n");
