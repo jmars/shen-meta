@@ -292,6 +292,23 @@ static Value va_peek(ValueArray *a) { return a->data[a->len - 1]; }
 static void va_free(ValueArray *a) { a->data = NULL; a->len = a->cap = 0; }
 
 /* ------------------------------------------------------------------ */
+/*  Closure tracing (--trace <name>)                                   */
+/* ------------------------------------------------------------------ */
+
+#define MAX_TRACED 32
+static Instr  *traced_code[MAX_TRACED];
+static const char *traced_name[MAX_TRACED];
+static int   num_traced = 0;
+
+/* Add a function name to the trace list.  The code pointer is resolved
+   after parse_bundle (when closures are in the global table). */
+static void trace_add(const char *name) {
+    if (num_traced < MAX_TRACED) {
+        traced_name[num_traced++] = name;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Global table                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -1132,6 +1149,50 @@ static void print_instr(Instr *code, int len, int indent) {
     }
 }
 
+/* Resolve trace names to code pointers.  Call after parse_bundle. */
+static void trace_resolve(void) {
+    for (int i = 0; i < num_traced; i++) {
+        Value g = global_get(traced_name[i]);
+        if (g.tag == VAL_LAMBDA) {
+            traced_code[i] = g.lambda.code;
+            fprintf(stderr, "[trace] watching '%s' (%d instrs)\n",
+                    traced_name[i], g.lambda.code_len);
+        } else {
+            fprintf(stderr, "[trace] '%s' not a lambda (tag=%d), skipping\n",
+                    traced_name[i], g.tag);
+            traced_code[i] = NULL;
+        }
+    }
+}
+
+/* Print one instruction in raw format (same style as zincdec --raw) */
+static void print_instr_one(Instr *in, int pc) {
+    printf("  %04d  ", pc);
+    switch (in->op) {
+    case OP_PUSHMARK: printf("pushmark\n"); break;
+    case OP_APPLY:    printf("apply\n"); break;
+    case OP_PUSH:     printf("push\n"); break;
+    case OP_GRAB:     printf("grab\n"); break;
+    case OP_RETURN:   printf("return\n"); break;
+    case OP_LET:      printf("let\n"); break;
+    case OP_ENDLET:   printf("endlet\n"); break;
+    case OP_APPTERM:  printf("appterm\n"); break;
+    case OP_ACCESS:   printf("access "); print_value(in->operand); printf("\n"); break;
+    case OP_GLOBAL:   printf("global "); print_value(in->operand); printf("\n"); break;
+    case OP_JMPF:     printf("jmpf "); print_value(in->operand);
+                      printf(" (tgt=%d)\n", in->jmp_target); break;
+    case OP_JMP:      printf("jmp ");  print_value(in->operand);
+                      printf(" (tgt=%d)\n", in->jmp_target); break;
+    case OP_NUMBER:   printf("number "); print_value(in->operand); printf("\n"); break;
+    case OP_STRING:   printf("string "); print_value(in->operand); printf("\n"); break;
+    case OP_SYMBOL:   printf("symbol "); print_value(in->operand); printf("\n"); break;
+    case OP_BOOLEAN:  printf("boolean "); print_value(in->operand); printf("\n"); break;
+    case OP_PRIM:     printf("prim "); print_value(in->operand); printf("\n"); break;
+    case OP_CUR:      printf("cur (code=%d)\n", in->closure_len); break;
+    default:          printf("??? (%c)\n", in->op);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Resolve jumps                                                      */
 /* ------------------------------------------------------------------ */
@@ -1226,6 +1287,16 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             break;
         }
         Instr *in = &cur_code[pc];
+        /* Trace: print instruction if current code is being watched */
+        if (num_traced > 0) {
+            for (int t = 0; t < num_traced; t++) {
+                if (cur_code == traced_code[t]) {
+                    printf("[%s] ", traced_name[t]);
+                    print_instr_one(in, pc);
+                    break;
+                }
+            }
+        }
         switch (in->op) {
         case OP_NUMBER: case OP_STRING: case OP_SYMBOL: case OP_BOOLEAN:
             acc = in->operand;
@@ -1604,6 +1675,14 @@ int main(int argc, char **argv) {
     init_globals();
     gc_state = gcinit(256 * 1024 * 1024, &gc_stack_root, NULL);
     gc_set_extra_roots(global_table, sizeof(global_table));
+
+    /* Scan for --trace <name> flags (before bundle load) */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
+            trace_add(argv[++i]);
+        }
+    }
+
     if (argc > 1) {
         char *buf = read_file_or_stdin(argv[1]);
         if (!buf) return 1;
@@ -1632,10 +1711,11 @@ int main(int argc, char **argv) {
             };
             for (int i = 0; keywords[i]; i++)
                 global_set(keywords[i], val_symbol(keywords[i]));
-            /* fail kept as bundled closure — VAL_PRIM override was causing
-               bundled zinc-c to trigger longjmp on where-clause failures.
-               The closure calls shen.fail! which triggers the error correctly. */
+            /* fail kept as bundled closure */
             /* global_set("fail", val_prim("fail")); */
+
+            /* Resolve --trace function names to code pointers */
+            if (num_traced > 0) trace_resolve();
 
             /* Initialize standard I/O stream variables expected by the Shen OS.
                The bundled stinput/stoutput closures use (value *stinput*),
@@ -1656,30 +1736,34 @@ int main(int argc, char **argv) {
             }
 
             free(buf);
+            /* Find first non-flag arg after bundle (skip --trace pairs) */
+            int ai = 2;
+            while (ai < argc && strcmp(argv[ai], "--trace") == 0) ai += 2;
+
             /* -d <name>: decompile a bundled closure's bytecode */
-            if (argc > 2 && strcmp(argv[2], "-d") == 0) {
-                if (argc > 3) {
-                    Value g = global_get(argv[3]);
+            if (ai < argc && strcmp(argv[ai], "-d") == 0) {
+                if (ai + 1 < argc) {
+                    Value g = global_get(argv[ai + 1]);
                     if (g.tag == VAL_LAMBDA) {
-                        printf("=== Decompile: %s ===\n", argv[3]);
+                        printf("=== Decompile: %s ===\n", argv[ai + 1]);
                         printf("  code_len=%d  env_len=%d\n\n", g.lambda.code_len, g.lambda.env_len);
                         print_instr(g.lambda.code, g.lambda.code_len, 0);
                     } else if (g.tag == VAL_PRIM) {
-                        printf("%s is a C primitive\n", argv[3]);
+                        printf("%s is a C primitive\n", argv[ai + 1]);
                     } else {
-                        printf("%s: not found (tag=%d)\n", argv[3], g.tag);
+                        printf("%s: not found (tag=%d)\n", argv[ai + 1], g.tag);
                     }
                 } else {
                     printf("Usage: %s <bundle> -d <function-name>\n", argv[0]);
                 }
                 return 0;
             }
-            /* If second arg, run it as bytecode; otherwise run a test */
-            if (argc > 2) {
-                char *b2 = read_file_or_stdin(argv[2]);
+            /* If another arg, run it as bytecode; otherwise run tests */
+            if (ai < argc) {
+                char *b2 = read_file_or_stdin(argv[ai]);
                 if (b2) {
                     char *q = b2; while (*q && isspace((unsigned char)*q)) q++;
-                    if (*q) run_test(argv[2], q, 0);
+                    if (*q) run_test(argv[ai], q, 0);
                     free(b2);
                 }
             } else {

@@ -8,6 +8,9 @@ make test     # run 28 built-in tests
 make pipeline # compile (+ 1 2) through full pipeline
 make bundle   # serialize all safe wrappers → globals.csexp
 make run-bundle  # run C VM with globals.csexp (self-hosting tests)
+
+# Trace execution of specific closures:
+./zincvm globals.csexp --trace + --trace reverse
 ```
 
 ## Architecture
@@ -64,6 +67,10 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 - `trap-error`/`simple-error` use `setjmp`/`longjmp`
 - `eval_kl_depth` recursion guard: setjmp guard ensures depth always decremented even on
   longjmp from simple-error. Without this, a failed eval-kl blocks all subsequent calls.
+- `--trace <name>`: trace every instruction of a specific closure as it executes.
+  Repeatable. Output in raw format with PC numbers. E.g. `./zincvm globals.csexp --trace +`
+  shows `[+]   0000  grab`, `[+]   0003  jmpf 7 (tgt=7)`, etc.
+  Traces only the named function — not functions it calls (unless also --traced).
 
 ## Primitive semantics (critical — must match Shen)
 
@@ -111,10 +118,10 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 
 ## Bytecode decompiler (`zincdec`)
 
-Standalone binary for decompiling bundled closures. Three output formats:
+Standalone binary for decompiling bundled closures. Four output formats:
 
 ```sh
-./zincdec globals.csexp <function-name> [--raw|--asm|--shen]
+./zincdec globals.csexp <function-name> [--raw|--asm|--shen|--csexp]
 ```
 
 | Flag | Format | Example |
@@ -122,8 +129,9 @@ Standalone binary for decompiling bundled closures. Three output formats:
 | `--raw` (default) | Human-readable opcodes | `access 0`, `global +`, `apply` |
 | `--asm` | Disassembly w/ addresses | `0000: access 0`, `0003: jmpf 7  ; -> 0007` |
 | `--shen` | Shen list for `interp.shen` | `[access 0]`, `[global +]`, `apply` |
+| `--csexp` | Raw wire format (round-trippable) | `(ra[1:n]1P[7:s]number?f[1:n]7...)` |
 
-Examples: `./zincdec globals.csexp +`, `-d read-from-string --asm`, `-d shen.repl --shen`
+Examples: `./zincdec globals.csexp +`, `./zincdec globals.csexp reverse --csexp`, `./zincdec globals.csexp shen.repl --shen`
 
 The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection.
 - `read-file-raw` in `load.shen` parses `.kl` files without macro expansion
