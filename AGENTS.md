@@ -106,6 +106,15 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 - `pr` writes raw string to a stream; `(stoutput)` is stdout
 - ~1216 closures in bundle (~1.4MB)
 - All 24 KLambda files loaded: core through shen-scheme-extensions + stlib + init
+
+## Bytecode decompiler
+
+```sh
+./zincvm globals.csexp -d <function-name>
+```
+
+Decompiles a bundled closure's ZINC bytecode into readable opcodes.
+Examples: `./zincvm globals.csexp -d +`, `-d read-from-string`, `-d shen.process-sexprs`
 - `read-file-raw` in `load.shen` parses `.kl` files without macro expansion
   using `read-file-as-string` + recursive descent with cached `strlen`
 - `interp-load-raw` wraps `read-file-raw` for files with reader macro issues

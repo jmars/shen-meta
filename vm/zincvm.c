@@ -1601,6 +1601,24 @@ int main(int argc, char **argv) {
             }
 
             free(buf);
+            /* -d <name>: decompile a bundled closure's bytecode */
+            if (argc > 2 && strcmp(argv[2], "-d") == 0) {
+                if (argc > 3) {
+                    Value g = global_get(argv[3]);
+                    if (g.tag == VAL_LAMBDA) {
+                        printf("=== Decompile: %s ===\n", argv[3]);
+                        printf("  code_len=%d  env_len=%d\n\n", g.lambda.code_len, g.lambda.env_len);
+                        print_instr(g.lambda.code, g.lambda.code_len, 0);
+                    } else if (g.tag == VAL_PRIM) {
+                        printf("%s is a C primitive\n", argv[3]);
+                    } else {
+                        printf("%s: not found (tag=%d)\n", argv[3], g.tag);
+                    }
+                } else {
+                    printf("Usage: %s <bundle> -d <function-name>\n", argv[0]);
+                }
+                return 0;
+            }
             /* If second arg, run it as bytecode; otherwise run a test */
             if (argc > 2) {
                 char *b2 = read_file_or_stdin(argv[2]);
@@ -1832,13 +1850,12 @@ int main(int argc, char **argv) {
                 run_test("load-via-apply",
                          "(mS[17:S]test_fixture.shenug[4:s]loadp)", 0);
 
-                /* Test 7b: read-from-string — does the parser work standalone?
-                   NOTE: read-from-string uses (open StringString in) to create
-                   a string stream.  Our open primitive only supports files.
-                   This test will fail until string stream support is added. */
-                printf("--- Test 7b: read-from-string (+ 1 2) [SKIP: no string streams] ---\n");
-                /* run_test("rfs-test",
-                         "(mS[7:S](+ 1 2)ug[16:s]read-from-stringp)", 0); */
+                /* Test 7b: read-from-string — uses shen.str->bytes, not open.
+                   This exercises the Shen parser on string input.
+                   NOTE: currently fails with [error ""] — parser issue TBD. */
+                printf("--- Test 7b: read-from-string (+ 1 2) ---\n");
+                run_test("rfs-test",
+                         "(mS[7:S](+ 1 2)ug[16:s]read-from-stringp)", 0);
 
                 /* Test 8: load a real Shen file — shen/util.shen */
                 printf("--- Test 8: bundled load shen/util.shen ---\n");
