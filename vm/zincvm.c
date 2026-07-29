@@ -468,7 +468,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         Value a = va_pop(stack); *acc = val_boolean(a.tag == VAL_NUMBER); return 0;
     }
     if (strcmp(name, "cons?") == 0) {
-        Value a = va_pop(stack); *acc = val_boolean(a.tag == VAL_CONS || a.tag == VAL_NIL); return 0;
+        Value a = va_pop(stack); *acc = val_boolean(a.tag == VAL_CONS); return 0;
     }
     if (strcmp(name, "error?") == 0) {
         Value a = va_pop(stack); *acc = val_boolean(a.tag == VAL_ERROR); return 0;
@@ -1971,6 +1971,11 @@ int main(int argc, char **argv) {
                 run_test("rfas-via-apply",
                          "(mS[8:S]Makefileug[19:s]read-file-as-stringp)", 0);
 
+                /* Test 7b: read-from-string — SKIPPED.  cons? NIL=false matches
+                   Scheme pair? semantics.  The YACC parser has a separate
+                   element? "non-list" error to fix. */
+                printf("--- Test 7b: read-from-string [SKIPPED — YACC element? error] ---\n");
+
                 /* shen.initialise MUST run before any test that uses macroexpand
                    (test 7+).  It sets up *macros*, *property-vector*, etc.
                    The first call errors "set: first arg must be a symbol"
@@ -1991,18 +1996,13 @@ int main(int argc, char **argv) {
                 run_test("load-via-apply",
                          "(mS[17:S]test_fixture.shenug[4:s]loadp)", 0);
 
-                /* Test 7b: read-from-string — the bundled closure uses
-                   shen.str->bytes → compile → <s-exprs> YACC chain
-                   which produces [error ""] in our VM.  Skipped. */
-                printf("--- Test 7b: read-from-string [SKIPPED - returns empty error] ---\n");
-                /* run_test skipped — returns [error ""] */
-
                 /* Test 7c: read via string stream — (read (open Str in)) */
 
                 /* Test 8: load a real Shen file — shen/util.shen */
                 printf("--- Test 8: bundled load shen/util.shen ---\n");
                 run_test("load-util",
                          "(mS[14:S]shen/util.shenug[4:s]loadp)", 0);
+
 
                 /* Test 9: call (id 42) from loaded util.shen — verifies functions work */
                 printf("--- Test 9: call (id 42) from loaded util.shen ---\n");
