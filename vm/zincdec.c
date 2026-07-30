@@ -19,12 +19,11 @@
 #include <unistd.h>
 #include <errno.h>
 
-#include "gc.h"
+#include <gc.h>
+#include <stdint.h>
 
-#define GC_VALUE()        ((Value*)gcalloc(sizeof(Value), 4))
-#define GC_STR(len)       ((char*)gcalloc((len) + 1, 0))
-
-static struct gc_state gc_state;
+#define GC_VALUE()        ((Value*)GC_MALLOC(sizeof(Value)))
+#define GC_STR(len)       ((char*)GC_MALLOC_ATOMIC((len) + 1))
 
 /* ------------------------------------------------------------------ */
 /*  Value types                                                        */
@@ -151,7 +150,8 @@ static Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
     v.tag = VAL_LAMBDA;
     v.lambda.code = code; v.lambda.code_len = code_len;
     if (env_len > 0) {
-        v.lambda.env = (Value*)gcalloc(env_len * sizeof(Value), 4 * env_len);
+        v.lambda.env = (Value*)GC_MALLOC(env_len * sizeof(Value));
+        memset(v.lambda.env, 0, env_len * sizeof(Value));
         memcpy(v.lambda.env, env, env_len * sizeof(Value));
         v.lambda.env_len = env_len;
     } else { v.lambda.env = NULL; v.lambda.env_len = 0; }
@@ -173,16 +173,7 @@ static Value val_vector(int size) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_VECTOR; v.vector.len = size;
     if (size > 0) {
-        int bytes = size * (int)sizeof(Value);
-        int words = (bytes + WORDBYTES - 1) / WORDBYTES + 1;
-        int ptrs = 4 * size;
-        if (words > 0xFFFFFF || ptrs > 0xFFFFF) {
-            /* Too large for GC header — use calloc and register as extra roots */
-            v.vector.data = (Value*)calloc(size, sizeof(Value));
-            gc_set_extra_roots(v.vector.data, size * sizeof(Value));
-        } else {
-            v.vector.data = (Value*)gcalloc(bytes, ptrs);
-        }
+        v.vector.data = (Value*)GC_MALLOC(size * sizeof(Value));
     }
     return v;
 }
@@ -744,10 +735,8 @@ static void usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    uintptr_t gc_stack_root = 0;
+    GC_INIT();
     init_globals();
-    gc_state = gcinit(256 * 1024 * 1024, &gc_stack_root, NULL);
-    gc_set_extra_roots(global_table, sizeof(global_table));
 
     if (argc < 3) { usage(argv[0]); return 1; }
 

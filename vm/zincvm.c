@@ -1360,8 +1360,9 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         env_len = init_env_len;
     }
     Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
-    CallFrame *frame_stack = (CallFrame*)calloc(CALL_STACK_DEPTH, sizeof(CallFrame));
+    CallFrame *frame_stack = (CallFrame*)GC_MALLOC(CALL_STACK_DEPTH * sizeof(CallFrame));
     if (!frame_stack) { va_free(&stack); return acc; }
+    memset(frame_stack, 0, CALL_STACK_DEPTH * sizeof(CallFrame));
     int frames_sp = 0;
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
     int instr_count = 0;
@@ -1581,7 +1582,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
     }
 done:
     va_free(&stack);
-    free(frame_stack);
+    /* frame_stack is GC_MALLOC'd — no free needed */
     return acc;
 }
 
