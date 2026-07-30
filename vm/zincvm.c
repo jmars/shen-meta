@@ -467,7 +467,14 @@ static Value global_get(const char *name) {
     for (int i = 0; i < global_table_len; i++)
         if (strcmp(global_table[i].name, name) == 0)
             return global_table[i].closure;
-    return val_prim(name);
+    /* Only return VAL_PRIM for known C primitives. Unknown names
+       (e.g., *macros*, *stinput*) must be VAL_SYMBOL so that
+       cons?, element?, and other list-traversal code can match them.
+       The = primitive already handles SYMBOL-vs-PRIM comparison in
+       both directions, so this doesn't break fail comparisons. */
+    if (exec_primitive_valid(name))
+        return val_prim(name);
+    return val_symbol(name);
 }
 
 /* ------------------------------------------------------------------ */
