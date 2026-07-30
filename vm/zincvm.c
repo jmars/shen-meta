@@ -798,9 +798,16 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         longjmp(vm_error_jmp, 1);
     }
     if (strcmp(name, "shen.fail!") == 0 || strcmp(name, "fail") == 0) {
-        /* (defun fail () shen.fail!) — called as (fail)
-           Also used as pattern-match sentinel: registered as VAL_PRIM
-           so it can be both applied (error) and compared (= X fail). */
+        /* (defun fail () shen.fail!) — called as (fail) triggers error.
+           When called WITH arguments (e.g., YACC's (fail 0)), return a
+           sentinel cons [fail arg] instead.  This matches standard Shen
+           behavior where (fail N) creates a parse-failure sentinel for
+           parse-failure? to match via =. */
+        if (stack->len > 0) {
+            Value arg = va_pop(stack);
+            *acc = val_cons(val_symbol("fail"), val_cons(arg, val_nil()));
+            return 0;
+        }
         vm_error_val = val_error("fail"); vm_error_pending = 1;
         longjmp(vm_error_jmp, 1);
     }
