@@ -1067,12 +1067,14 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "gensym") == 0) {
         static long gensym_counter = 0;
         char buf[64];
+        if (stack->len > 0) va_pop(stack);  /* consume prefix arg (Shen compiler passes it) */
         snprintf(buf, sizeof(buf), "shen.gensym_%ld", gensym_counter++);
         *acc = val_symbol(buf); return 0;
     }
     if (strcmp(name, "newvar") == 0) {
         static int newvar_counter = 0;
         char buf[64];
+        if (stack->len > 0) va_pop(stack);  /* consume prefix arg */
         snprintf(buf, sizeof(buf), "shen.V%d", newvar_counter++);
         *acc = val_symbol(buf); return 0;
     }
