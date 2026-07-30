@@ -446,9 +446,9 @@ static Value demarshal_from_tagged(Value tagged) {
 /*  Primitive dispatch                                                 */
 /* ------------------------------------------------------------------ */
 
-/* Deep structural equality for cons cells.  Used by the = primitive
-   to compare lists and trees.  Handles circular structures via
-   conservative cycle detection (depth limit). */
+/* Deep structural equality for cons cells and vectors.  Used by the =
+   primitive to compare lists, trees, and vectors.  Handles circular
+   structures via conservative cycle detection (depth limit). */
 static int deep_equal(Value a, Value b) {
     /* Depth limit to avoid infinite recursion on cyclic structures */
     #define DEEP_EQUAL_MAX_DEPTH 1000
@@ -469,6 +469,17 @@ static int deep_equal(Value a, Value b) {
                       deep_equal(*a.cons.cdr, *b.cons.cdr);
               depth--;
               return r; }
+        case VAL_VECTOR:
+            if (a.vector.len != b.vector.len) return 0;
+            depth++;
+            for (int i = 0; i < a.vector.len; i++) {
+                if (!deep_equal(a.vector.data[i], b.vector.data[i])) {
+                    depth--;
+                    return 0;
+                }
+            }
+            depth--;
+            return 1;
         default:          return 0;
     }
     #undef DEEP_EQUAL_MAX_DEPTH
@@ -607,6 +618,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            Without this, cons==cons always returns false (falls through
            to the NIL==NIL catch-all), causing infinite recursion. */
         else if (a1.tag == VAL_CONS && a2.tag == VAL_CONS)
+            *acc = val_boolean(deep_equal(a1, a2));
+        else if (a1.tag == VAL_VECTOR && a2.tag == VAL_VECTOR)
             *acc = val_boolean(deep_equal(a1, a2));
         else *acc = val_boolean(a1.tag == VAL_NIL && a2.tag == VAL_NIL);
         return 0;
