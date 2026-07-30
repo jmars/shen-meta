@@ -11,18 +11,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: shen-meta
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libgc-dev
 
       - name: Build
-        working-directory: shen-meta
         run: make
 
       - name: Test (built-in)
-        working-directory: shen-meta
         run: make test
 
   self-hosting:
@@ -30,29 +26,26 @@ jobs:
     needs: build-and-test
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: shen-meta
-
-      - uses: actions/checkout@v4
-        with:
-          repository: Shen-Language/shen-scheme
-          path: shen-scheme
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libgc-dev
 
       - name: Build C VM
-        working-directory: shen-meta
         run: make
 
+      - name: Clone shen-scheme
+        run: |
+          git clone --depth 1 \
+            https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Shen-Language/shen-scheme.git \
+            /tmp/shen-scheme
+          ln -s /tmp/shen-scheme ../shen-scheme
+
       - name: Build shen-scheme
-        run: make -C shen-scheme
+        run: make -C ../shen-scheme
 
       - name: Bundle
-        working-directory: shen-meta
-        run: make bundle SHEN=../shen-scheme/_build/bin/shen-scheme
+        run: make bundle
 
       - name: Test (self-hosting)
-        working-directory: shen-meta
         run: timeout 120 make run-bundle
         continue-on-error: true
