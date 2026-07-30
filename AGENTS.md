@@ -77,6 +77,9 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 
 ## Primitive semantics (critical — must match Shen)
 
+- **`=`** now supports deep structural equality for cons cells via `deep_equal()`.
+  Without this, `(= [+ 1 2] [+ 1 2])` returns false, breaking `macroexpand-h`'s
+  fixed-point check.  Depth-limited to 1000 for cycle safety.
 - `n->string N`: number → single-character string via ASCII code. `(n->string 40)` → `"("`
 - `string->n S`: first character → ASCII code. `(string->n "(")` → `40`
 - `pos S N`: single character at index N (0-based). OOB → `""`. `(pos "hello" 1)` → `"e"`
@@ -240,22 +243,6 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
 - Outside trap-error (built-in tests): print error to stderr + return -1 (unchanged)
 - This routes OOB access sentinels (tag=0,n=0 from empty-env vm_exec calls) through
   error handlers, letting `bound?` correctly return false for unbound symbols
-
-## GC (Bartlett copying collector)
-
-- Submodule: `vendor/bartlett-gc` at `github.com/jmars/bartlett-gc.git` (`c32a5a1`)
-- Heap: starts at 256MB, auto-grows via managed-page growth (reserves 2GB VAS initially).
-  Shrinks when live set is <25% of heap AND heap >256MB. Min 16MB.
-- Allocation: `GC_VALUE()` = `gcalloc(sizeof(Value), 4)` — 4 pointer slots for tracing
-- `GC_STR(len)` = `gcalloc(len+1, 0)` — 0 pointer slots (opaque)
-- **`gc_set_extra_roots(global_table, sizeof(global_table))`** called after gcinit —
-  registers the BSS global_table array so GC traces closures stored there.
-  Static assertions enforce `GlobalEntry` word-alignment.
-- Register scan DISABLED — `FIRST_REGISTER`/`LAST_REGISTER` removed from gc.h.
-  C stack scan alone is sufficient.
-- `val_lambda` env arrays are GC-allocated via `gcalloc` (not malloc).
-- `val_symbol` uses strdup (C heap), `val_cons`/`val_string`/`val_vector` use GC.
-- GC tests: stress (50K cons) + retention (global_table entry survives GC) — pass.
 
 ## ZINC calling convention (CRITICAL — acc vs stack mismatch)
 

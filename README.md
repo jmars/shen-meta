@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/jmars/shen-meta/actions/workflows/ci.yml/badge.svg)](https://github.com/jmars/shen-meta/actions/workflows/ci.yml)
 
-A meta-circular Shen ZINC abstract machine — Shen evaluating Shen, compiling itself to native bytecode, running on a native C VM with a Bartlett copying collector.
+A meta-circular Shen ZINC abstract machine — Shen evaluating Shen, compiling itself to native bytecode, running on a native C VM with Boehm GC.
 
 This is a self-hosted Shen runtime: Shen compiles itself to native bytecode, running on a compact C VM. The meta-circular evaluator is the core — the ZINC abstract machine implemented in Shen, then serialized and loaded by the native VM.
 
@@ -118,6 +118,7 @@ The C VM loads `globals.csexp` — a ~1.4MB bundle of **~1200 closures** compile
 | 5 | `eval-kl [+ 1 2]` via marshal chain | Pass |
 | 6 | `read-file-as-string` via bundled apply | Pass |
 | 7 | `load` via bundled chain | Pass |
+| 7b | `read-from-string "(+ 1 2)"` — macroexpand works, pipeline WIP | Fail (returns `[]`) |
 | 7c | `read` via string stream | Pass |
 | 8 | `load shen/util.shen` | Pass |
 | 9 | `id` closure (identity) | Pass |
@@ -125,9 +126,9 @@ The C VM loads `globals.csexp` — a ~1.4MB bundle of **~1200 closures** compile
 
 ## Key design decisions
 
-### Bartlett GC
+### Boehm GC
 
-Vendored at `vendor/bartlett-gc`. Conservative mostly-copying collector. Heap starts at 256MB with 2GB VAS reserve, auto-grows and shrinks. Closure environments are GC-allocated so they're traced. Global table registered as GC roots via `gc_set_extra_roots`.
+Non-moving conservative collector (libgc). Objects never move — stack-local Value pointers are always safe across allocations. `GC_MALLOC`/`GC_MALLOC_ATOMIC` via macros `GC_VALUE()`, `GC_STR()`, `GC_VALUE_ARRAY()`. No extra roots needed. The old Bartlett copying GC is archived at `vendor/bartlett-gc` branch `bartlett-mostly-copying`.
 
 ### raw.X primitive namespace
 
@@ -142,6 +143,8 @@ Vendored at `vendor/bartlett-gc`. Conservative mostly-copying collector. Heap st
 - [x] 32 built-in VM tests (arithmetic, types, closures, error handling, I/O, trap-error routing)
 - [x] ~1200 bundled closures loaded and executing (full Shen OS)
 - [x] Bartlett copying GC with auto-grow/shrink and global-table roots
+- [x] Switched to Boehm GC (non-moving, no pointer staleness)
+- [x] `deep_equal` for cons==cons structural comparison (fixes macroexpand)
 - [x] `raw.X` namespace — bytecode calls C primitives directly
 - [x] Recursive `eval-kl` delegating to bundled closure
 - [x] Raw I/O from C VM
