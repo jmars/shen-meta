@@ -1433,10 +1433,10 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         env_len = init_env_len;
     }
     Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
-    /* Heap-allocated to avoid C stack overflow from the 3 MB array
-       during recursive vm_exec_env calls via eval-kl / trap-error. */
     CallFrame *frame_stack = (CallFrame*)calloc(CALL_STACK_DEPTH, sizeof(CallFrame));
     if (!frame_stack) { va_free(&stack); return acc; }
+    /* TODO: register as GC extra root — needs dynamic sizing or
+       linked-list approach to avoid 3MB-per-collection scan cost */
     int frames_sp = 0;
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
     int instr_count = 0;
@@ -2148,6 +2148,23 @@ int main(int argc, char **argv) {
                 run_test("init-only",
                          "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
                 printf("-- init done --\n"); fflush(stdout);
+
+                /* Dump *macros* to diagnose macroexpand */
+                { Value mv = global_get("*macros*");
+                  printf("*macros* tag=%d", mv.tag);
+                  if (mv.tag == VAL_CONS) {
+                    Value car = *mv.cons.car;
+                    printf(" car tag=%d", car.tag);
+                    if (car.tag == VAL_CONS) {
+                      printf(" car.car tag=%d", car.cons.car->tag);
+                      if (car.cons.car->tag == VAL_SYMBOL)
+                        printf("='%s'", car.cons.car->sym.name);
+                      printf(" car.cdr tag=%d", car.cons.cdr->tag);
+                      if (car.cons.cdr->tag == VAL_LAMBDA)
+                        printf(" (closure)");
+                    }
+                  }
+                  printf("\n"); fflush(stdout); }
 
                 /* Diagnostic: test macroexpand directly with *ev1* = [+ 1 2] */
                 printf("\n--- Diagnostic: macroexpand on [+ 1 2] ---\n");
