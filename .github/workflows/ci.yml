@@ -11,8 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgc-dev
 
       - name: Build
         run: make
@@ -25,21 +26,19 @@ jobs:
     needs: build-and-test
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgc-dev
 
       - name: Build C VM
         run: make
 
-      - name: Clone shen-scheme
+      - name: Setup shen-scheme
         run: make setup
-
-      - name: Build shen-scheme
-        run: cd ../shen-scheme && make
 
       - name: Bundle
         run: make bundle
 
       - name: Test (self-hosting)
-        run: make run-bundle
+        run: timeout 120 make run-bundle
         continue-on-error: true

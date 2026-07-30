@@ -41,5 +41,13 @@ pipeline: zincvm
 interp:
 	$(SHEN) script shen/interp.shen
 
+setup:
+	@if [ ! -d ../shen-scheme ]; then \
+		git clone https://github.com/Shen-Language/shen-scheme ../shen-scheme; \
+	else \
+		echo "shen-scheme already present"; \
+	fi
+	@$(MAKE) -C ../shen-scheme
+
 clean:
 	rm -f zincvm zincdec *.csexp globals.csexp
