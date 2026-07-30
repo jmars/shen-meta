@@ -20,11 +20,20 @@ setup:
 zincvm: vm/zincvm.c $(GC_LIB)
 	$(CC) $(CFLAGS) -o $@ vm/zincvm.c $(GC_LIB)
 
+zincvm-asan: vm/zincvm.c $(GC_LIB)
+	$(CC) $(CFLAGS) -O0 -g -fsanitize=address -o $@ vm/zincvm.c $(GC_LIB)
+
 zincdec: vm/zincdec.c $(GC_LIB)
 	$(CC) $(CFLAGS) -o $@ vm/zincdec.c $(GC_LIB)
 
 test: zincvm
 	./zincvm
+
+test-asan: zincvm-asan
+	ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 ./zincvm-asan
+
+asan: zincvm-asan
+	ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 ./zincvm-asan globals.csexp
 
 bundle: shen/serialize.shen
 	$(SHEN) script shen/serialize.shen 2>/dev/null
