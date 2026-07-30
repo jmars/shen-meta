@@ -446,6 +446,34 @@ static Value demarshal_from_tagged(Value tagged) {
 /*  Primitive dispatch                                                 */
 /* ------------------------------------------------------------------ */
 
+/* Deep structural equality for cons cells.  Used by the = primitive
+   to compare lists and trees.  Handles circular structures via
+   conservative cycle detection (depth limit). */
+static int deep_equal(Value a, Value b) {
+    /* Depth limit to avoid infinite recursion on cyclic structures */
+    #define DEEP_EQUAL_MAX_DEPTH 1000
+    static int depth = 0;
+    if (depth > DEEP_EQUAL_MAX_DEPTH) return 0;
+    
+    if (a.tag != b.tag) return 0;
+    switch (a.tag) {
+        case VAL_NUMBER:  return a.number == b.number;
+        case VAL_STRING:  return a.str.len == b.str.len &&
+                                 memcmp(a.str.data, b.str.data, a.str.len) == 0;
+        case VAL_SYMBOL:  return strcmp(a.sym.name, b.sym.name) == 0;
+        case VAL_BOOLEAN: return a.boolean == b.boolean;
+        case VAL_NIL:     return 1;
+        case VAL_CONS:
+            depth++;
+            { int r = deep_equal(*a.cons.car, *b.cons.car) &&
+                      deep_equal(*a.cons.cdr, *b.cons.cdr);
+              depth--;
+              return r; }
+        default:          return 0;
+    }
+    #undef DEEP_EQUAL_MAX_DEPTH
+}
+
 /* Returns true if `name` (possibly with "raw." prefix) is a known C primitive. */
 static int exec_primitive_valid(const char *name) {
     if (strncmp(name, "raw.", 4) == 0) name += 4;
@@ -574,6 +602,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             *acc = val_boolean(strcmp(a1.sym.name, a2.prim.name) == 0);
         else if (a1.tag == VAL_PRIM && a2.tag == VAL_SYMBOL)
             *acc = val_boolean(strcmp(a1.prim.name, a2.sym.name) == 0);
+        /* Deep structural equality for cons cells.  Critical for
+           macroexpand-h's fixed-point check: (= original walked).
+           Without this, cons==cons always returns false (falls through
+           to the NIL==NIL catch-all), causing infinite recursion. */
+        else if (a1.tag == VAL_CONS && a2.tag == VAL_CONS)
+            *acc = val_boolean(deep_equal(a1, a2));
         else *acc = val_boolean(a1.tag == VAL_NIL && a2.tag == VAL_NIL);
         return 0;
     }
@@ -1999,15 +2033,6 @@ int main(int argc, char **argv) {
                 run_test("rfas-via-apply",
                          "(mS[8:S]Makefileug[19:s]read-file-as-stringp)", 0);
 
-                /* Test 7b: read-from-string — SKIPPED.  Two issues:
-                   1. Must run after shen.initialise (for *macros* in macroexpand),
-                      but reordering breaks test 8.
-                   2. Even with initialise, macroexpand returns [0] instead of
-                      [[+ 1 2]], so the pipeline output is wrong.
-                   read-from-string-unprocessed works correctly (verified via
-                   vm_exec_env, but that call corrupts vm_error_jmp for run_test). */
-                printf("--- Test 7b: read-from-string [SKIPPED — needs macroexpand fix] ---\n");
-
                 /* shen.initialise MUST run before any test that uses macroexpand
                    (test 7+).  It sets up *macros*, *property-vector*, etc.
                    The first call errors "set: first arg must be a symbol"
@@ -2018,27 +2043,16 @@ int main(int argc, char **argv) {
                          "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
                 printf("-- init done --\n"); fflush(stdout);
 
-                /* Dump *macros* to diagnose macroexpand */
-                { Value mv = global_get("*macros*");
-                  printf("*macros* tag=%d", mv.tag);
-                  if (mv.tag == VAL_CONS) {
-                    Value car = *mv.cons.car;
-                    printf(" car tag=%d", car.tag);
-                    if (car.tag == VAL_CONS) {
-                      printf(" car.car tag=%d", car.cons.car->tag);
-                      if (car.cons.car->tag == VAL_SYMBOL)
-                        printf("='%s'", car.cons.car->sym.name);
-                      printf(" car.cdr tag=%d", car.cons.cdr->tag);
-                      if (car.cons.cdr->tag == VAL_LAMBDA)
-                        printf(" (closure)");
-                    }
-                  }
-                  printf("\n"); fflush(stdout); }
-
-                /* Diagnostic: test macroexpand directly with *ev1* = [+ 1 2] */
-                printf("\n--- Diagnostic: macroexpand on [+ 1 2] ---\n");
-                run_test("macroexpand-diag",
+                /* Smoke test: macroexpand on [+ 1 2] — verifies = cons==cons */
+                run_test("macroexpand-smoke",
                          "(mg[5:s]*ev1*ug[11:s]macroexpandp)", 0);
+
+                /* Test 7b: read-from-string — full read-compile-macroexpand pipeline.
+                   Currently returns [] instead of [[+ 1 2]] — compile/process-sexprs
+                   pipeline has remaining issues beyond the macroexpand fix. */
+                printf("--- Test 7b: read-from-string ---\n");
+                run_test("read-from-string",
+                         "(S[7:S](+ 1 2)ug[16:s]read-from-stringp)", 0);
 
                 /* Test 7tc: disable type checker */
                 printf("--- Test 7tc: disable *tc* ---\n");
