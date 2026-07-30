@@ -1476,23 +1476,15 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         switch (in->op) {
         case OP_NUMBER: case OP_STRING: case OP_SYMBOL: case OP_BOOLEAN:
             acc = in->operand;
-            if (pc + 1 < cur_len) {
-                uint8_t no = cur_code[pc + 1].op;
-                if (no == OP_ACCESS || no == OP_GLOBAL ||
-                    no == OP_NUMBER || no == OP_STRING ||
-                    no == OP_SYMBOL || no == OP_BOOLEAN ||
-                    no == OP_CUR) va_push(&stack, acc);
-            }
+            va_push(&stack, acc);  /* standard ZINC: always push to stack */
             pc++; break;
         case OP_PRIM: {
-            /* ZINC [prim X] executes primitive X with args from stack + acc.
-               Push acc so binary primitives find both args on the stack.
-               BUT: if the last instruction was a PUSH, acc is already on the
-               stack (duplicate), which breaks N-ary primitives like trap-error
-               that pop multiple args. Skip the push in that case. */
+            /* Standard ZINC: primitive args are on the stack (auto-pushed
+               by preceding value ops).  Execute primitive, then push the
+               result to the stack. */
             const char *pn = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
-            if (last_op != OP_PUSH) va_push(&stack, acc);
             if (exec_primitive(pn, &acc, &stack) < 0) goto done;
+            va_push(&stack, acc);  /* standard ZINC: push result to stack */
             if (trace_counter >= 0 && trace_counter < trace_limit + 5) {
                 fprintf(stderr, "    -> acc after prim %s: ", pn);
                 print_value(acc); fprintf(stderr, " (tag=%d)\n", acc.tag);
@@ -1501,7 +1493,15 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             break;
         }
         case OP_PUSHMARK: va_push(&stack, val_mark()); pc++; break;
-        case OP_PUSH: va_push(&stack, acc); pc++; break;
+        case OP_PUSH:
+            /* Standard ZINC: explicit push.  If the previous op already
+               auto-pushed this value to the stack, this push is a no-op. */
+            if (!(last_op == OP_NUMBER || last_op == OP_STRING ||
+                  last_op == OP_SYMBOL || last_op == OP_BOOLEAN ||
+                  last_op == OP_ACCESS || last_op == OP_GLOBAL ||
+                  last_op == OP_CUR || last_op == OP_PRIM))
+                va_push(&stack, acc);
+            pc++; break;
         case OP_GRAB: {
             if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) {
                 va_pop(&stack);
@@ -1518,16 +1518,14 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         case OP_APPLY: {
             if (acc.tag == VAL_LAMBDA) {
                 check_closure(acc, "APPLY");
-                /* Standard ZINC: pop all args from stack (up to the
-                   intentional pushmark), push them into the callee's
-                   environment.  The callee shares the caller's stack
-                   so OP_GRAB can pop remaining args from it.
-
-                   Stack layout: [... intentional-mark, argN, ..., arg1]
-                   (ZINC RTL: rightmost arg pushed first, leftmost last.)
-                   After failed pattern matches there may be stale marks
-                   on top; skip those first. */
+                /* Standard ZINC: the function and args are on the stack
+                   (auto-pushed by OP_GLOBAL/OP_CUR and value ops).
+                   Pop the function first (already in acc), then collect
+                   the actual args up to the intentional pushmark. */
                 while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
+                    va_pop(&stack);
+                /* Discard the function value from stack */
+                if (stack.len > 0 && va_peek(&stack).tag != VAL_MARK)
                     va_pop(&stack);
 
                 /* Collect all non-mark args (stop at the mark) */
@@ -1571,7 +1569,17 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
                 pc = 0;
             } else if (acc.tag == VAL_PRIM) {
-                if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) va_pop(&stack);
+                /* Pop stale marks, then discard the function value
+                   (auto-pushed by OP_GLOBAL), then pop the intentional
+                   mark before calling exec_primitive. */
+                while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
+                    va_pop(&stack);
+                /* Discard the function value from stack (already in acc) */
+                if (stack.len > 0 && va_peek(&stack).tag != VAL_MARK)
+                    va_pop(&stack);
+                /* Pop the intentional mark */
+                if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
+                    va_pop(&stack);
                 const char *pn = acc.prim.name;
                 if (exec_primitive(pn, &acc, &stack) < 0) goto done;
                 pc++;
@@ -1598,31 +1606,12 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         }
         case OP_ACCESS:
             acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len, pc, cur_code, cur_len);
-            /* Standard ZINC pushes access results to stack.  Our VM is
-               acc-based, but bundled bytecode (compiled by the Shen ZINC
-               compiler) assumes stack-push semantics.  Push to stack when
-               the next instruction will clobber acc — i.e. another
-               value-producing opcode.  OP_PRIM is excluded because it
-               handles its own push via the last_op != OP_PUSH guard. */
-            if (pc + 1 < cur_len) {
-                uint8_t no = cur_code[pc + 1].op;
-                if (no == OP_ACCESS || no == OP_GLOBAL ||
-                    no == OP_NUMBER || no == OP_STRING ||
-                    no == OP_SYMBOL || no == OP_BOOLEAN ||
-                    no == OP_CUR) va_push(&stack, acc);
-            }
+            va_push(&stack, acc);  /* standard ZINC: always push to stack */
             pc++; break;
         case OP_GLOBAL: {
             const char *nm = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
             acc = global_get(nm);
-            /* Same push-before-clobber logic as OP_ACCESS above */
-            if (pc + 1 < cur_len) {
-                uint8_t no = cur_code[pc + 1].op;
-                if (no == OP_ACCESS || no == OP_GLOBAL ||
-                    no == OP_NUMBER || no == OP_STRING ||
-                    no == OP_SYMBOL || no == OP_BOOLEAN ||
-                    no == OP_CUR) va_push(&stack, acc);
-            }
+            va_push(&stack, acc);  /* standard ZINC: always push to stack */
             pc++; break;
         }
         case OP_LET: env_push(&env, &env_len, &env_cap, acc); pc++; break;
@@ -1633,22 +1622,19 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         case OP_CUR: {
             /* val_lambda now GC-allocates its own env copy */
             acc = val_lambda(in->closure_code, in->closure_len, env, env_len);
-            if (pc + 1 < cur_len) {
-                uint8_t no = cur_code[pc + 1].op;
-                if (no == OP_ACCESS || no == OP_GLOBAL ||
-                    no == OP_NUMBER || no == OP_STRING ||
-                    no == OP_SYMBOL || no == OP_BOOLEAN ||
-                    no == OP_CUR) va_push(&stack, acc);
-            }
+            va_push(&stack, acc);  /* standard ZINC: always push to stack */
             pc++; break;
         }
         case OP_APPTERM: {
             if (acc.tag == VAL_LAMBDA) {
                 check_closure(acc, "APPTERM");
                 if (stack.len <= 0) { fprintf(stderr, "runtime: appterm empty stack\n"); goto done; }
-                /* Pop accumulated marks before args, then pop all args */
+                /* Pop accumulated marks, then discard the function value
+                   (already in acc from OP_GLOBAL/OP_CUR auto-push). */
                 while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
                     va_pop(&stack);
+                if (stack.len > 0 && va_peek(&stack).tag != VAL_MARK)
+                    va_pop(&stack);  /* discard function from stack */
                 int nargs = 0;
                 Value argbuf[64];
                 while (stack.len > 0 && va_peek(&stack).tag != VAL_MARK) {
@@ -1679,7 +1665,17 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
                 pc = 0; break;
             } else if (acc.tag == VAL_PRIM) {
-                if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) va_pop(&stack);
+                /* Pop stale marks, then discard the function value
+                   (auto-pushed by OP_GLOBAL), then pop the intentional
+                   mark before calling exec_primitive. */
+                while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
+                    va_pop(&stack);
+                /* Discard the function value from stack (already in acc) */
+                if (stack.len > 0 && va_peek(&stack).tag != VAL_MARK)
+                    va_pop(&stack);
+                /* Pop the intentional mark */
+                if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
+                    va_pop(&stack);
                 const char *pn = acc.prim.name;
                 if (exec_primitive(pn, &acc, &stack) < 0) goto done;
                 pc++; break;
@@ -2186,11 +2182,6 @@ int main(int argc, char **argv) {
                 run_test("init-only",
                          "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
                 printf("-- init done --\n"); fflush(stdout);
-
-                /* Diagnostic: test macroexpand directly with *ev1* = [+ 1 2] */
-                printf("\n--- Diagnostic: macroexpand on [+ 1 2] ---\n");
-                run_test("macroexpand-diag",
-                         "(mg[5:s]*ev1*ug[11:s]macroexpandp)", 0);
 
                 /* Test 7tc: disable type checker */
                 printf("--- Test 7tc: disable *tc* ---\n");
