@@ -462,6 +462,7 @@ static void global_set(const char *name, Value v) {
         global_table_len++;
     }
 }
+static int exec_primitive_valid(const char *name);
 static Value global_get(const char *name) {
     for (int i = 0; i < global_table_len; i++)
         if (strcmp(global_table[i].name, name) == 0)
@@ -564,6 +565,30 @@ static Value demarshal_from_tagged(Value tagged) {
 /* ------------------------------------------------------------------ */
 /*  Primitive dispatch                                                 */
 /* ------------------------------------------------------------------ */
+
+/* Returns true if `name` (possibly with "raw." prefix) is a known C primitive. */
+static int exec_primitive_valid(const char *name) {
+    if (strncmp(name, "raw.", 4) == 0) name += 4;
+    static const char *prims[] = {
+        "symbol?","boolean?","number?","string?","cons?",
+        "error?","function?","stream?",
+        "+","-","*","/","=","<",">","<=",">=",
+        "cons","hd","tl","cn","emptylist",
+        "simple-error","trap-error","error-to-string",
+        "eval-kl","absvector","<-address","address->",
+        "n->string","string->n","str","tlstr","hdstr","pos",
+        "intern","value","open","close","read-byte","write-byte",
+        "set","get-time","read-file-as-string","vm.read-file",
+        "@p","fst","snd","gensym","variable?","newvar",
+        "shen.fail!","fail",
+        "stinput","stoutput",
+        /* YACC terminals (yacc.kl) — not C prims but must resolve as symbols */
+        NULL
+    };
+    for (int i = 0; prims[i]; i++)
+        if (strcmp(name, prims[i]) == 0) return 1;
+    return 0;
+}
 
 static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     /* Strip "raw." prefix so raw.open, raw.close etc. dispatch to the
@@ -2117,10 +2142,14 @@ int main(int argc, char **argv) {
                 run_test("rfas-via-apply",
                          "(mS[8:S]Makefileug[19:s]read-file-as-stringp)", 0);
 
-                /* Test 7b: read-from-string — SKIPPED.  cons? NIL=false matches
-                   Scheme pair? semantics.  The YACC parser has a separate
-                   element? "non-list" error to fix. */
-                printf("--- Test 7b: read-from-string [SKIPPED — YACC element? error] ---\n");
+                /* Test 7b: read-from-string — SKIPPED.  Two issues:
+                   1. Must run after shen.initialise (for *macros* in macroexpand),
+                      but reordering breaks test 8.
+                   2. Even with initialise, macroexpand returns [0] instead of
+                      [[+ 1 2]], so the pipeline output is wrong.
+                   read-from-string-unprocessed works correctly (verified via
+                   vm_exec_env, but that call corrupts vm_error_jmp for run_test). */
+                printf("--- Test 7b: read-from-string [SKIPPED — needs macroexpand fix] ---\n");
 
                 /* shen.initialise MUST run before any test that uses macroexpand
                    (test 7+).  It sets up *macros*, *property-vector*, etc.
@@ -2132,7 +2161,7 @@ int main(int argc, char **argv) {
                          "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
                 printf("-- init done --\n"); fflush(stdout);
 
-                /* Test 7tc: disable type checker to isolate GC issue */
+                /* Test 7tc: disable type checker */
                 printf("--- Test 7tc: disable *tc* ---\n");
                 run_test("tc-off",
                          "(mb[5:b]falseus[4:s]*tc*ug[3:s]setp)", 0);
