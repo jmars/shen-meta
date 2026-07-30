@@ -34,31 +34,15 @@
 #include <unistd.h>
 #include <errno.h>
 
-#include "gc.h"
+#include <gc.h>
+#include <stdint.h>
 
-/* GC helpers: allocate Values and strings on the Bartlett GC heap.
-   Values need sizeof(Value)/sizeof(uintptr_t) pointer slots to cover all
-   pointer fields in the struct (code, env, car, cdr, data, etc.).
-   String data gets 0 pointer slots (opaque char buffers). */
-#define GC_VALUE_PTRS     ((int)(sizeof(Value) / sizeof(uintptr_t)))
-
-/* In debug builds, track every GC allocation for heap verification */
-#ifdef ZINC_DEBUG
-#define GC_TRACK(p, sz)       gc_alloc_track((p), (sz))
-#define GC_VALUE() \
-    ({ Value *_v = (Value*)gcalloc(sizeof(Value), GC_VALUE_PTRS); GC_TRACK(_v, sizeof(Value)); _v; })
-#define GC_STR(len) \
-    ({ size_t _l = (size_t)(len) + 1; char *_s = (char*)gcalloc(_l, 0); GC_TRACK(_s, _l); _s; })
-#define GC_VALUE_ARRAY(n) \
-    ({ int _n = (n); size_t _sz = (size_t)_n * sizeof(Value); Value *_a = (Value*)gcalloc(_sz, GC_VALUE_PTRS * _n); GC_TRACK(_a, _sz); _a; })
-#else
-#define GC_TRACK(p, sz)       ((void)0)
-#define GC_VALUE()            ((Value*)gcalloc(sizeof(Value), GC_VALUE_PTRS))
-#define GC_STR(len)           ((char*)gcalloc((len) + 1, 0))
-#define GC_VALUE_ARRAY(n)     ((Value*)gcalloc((n) * sizeof(Value), GC_VALUE_PTRS * (n)))
-#endif
-
-static struct gc_state gc_state;
+/* Boehm GC: non-moving conservative collector.  GC_MALLOC returns
+ * zeroed memory.  No gcinit, no extra roots, no pointer counts needed —
+ * the collector finds roots automatically via stack/BSS scan. */
+#define GC_VALUE()            ((Value*)GC_MALLOC(sizeof(Value)))
+#define GC_STR(len)           ((char*)GC_MALLOC_ATOMIC((len) + 1))
+#define GC_VALUE_ARRAY(n)     ((Value*)GC_MALLOC((n) * sizeof(Value)))
 
 /* ------------------------------------------------------------------ */
 /*  Value types                                                        */
@@ -192,107 +176,10 @@ static Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
         memcpy(v.lambda.env, env, env_len * sizeof(Value));
         v.lambda.env_len = env_len;
     } else { v.lambda.env = NULL; v.lambda.env_len = 0; }
-#ifdef ZINC_DEBUG
-    /* Invariant: env==NULL iff env_len==0, code non-null */
-    if (v.lambda.code == NULL) {
-        fprintf(stderr, "BUG: val_lambda with code=NULL\n"); abort();
-    }
-    if ((v.lambda.env == NULL) != (v.lambda.env_len == 0)) {
-        fprintf(stderr, "BUG: val_lambda env=%p env_len=%d mismatch\n",
-                (void*)v.lambda.env, v.lambda.env_len); abort();
-    }
-#endif
     return v;
 }
-#ifdef ZINC_DEBUG
-/* Verify a closure Value's invariants. Called from hot paths
-   (OP_APPLY, OP_APPTERM) to catch GC pointer corruption. */
-static void check_closure(Value cl, const char *where) {
-    if (cl.tag != VAL_LAMBDA) {
-        fprintf(stderr, "BUG: %s: expected lambda, got tag=%d\n", where, cl.tag); abort();
-    }
-    if (cl.lambda.code == NULL) {
-        fprintf(stderr, "BUG: %s: closure code=NULL\n", where); abort();
-    }
-    if (cl.lambda.code_len <= 0) {
-        fprintf(stderr, "BUG: %s: closure code_len=%d\n", where, cl.lambda.code_len); abort();
-    }
-    if ((cl.lambda.env == NULL) != (cl.lambda.env_len == 0)) {
-        fprintf(stderr, "BUG: %s: env=%p env_len=%d mismatch\n",
-                where, (void*)cl.lambda.env, cl.lambda.env_len); abort();
-    }
-}
-
-/* GC allocation tracker — records every gcalloc range so we can
-   verify pointers point to live GC memory.  Without heap-enumeration
-   from the Bartlett GC, this is the only way to catch dangling
-   pointers after a collection. */
-#define MAX_GC_ALLOCS 65536
-static struct { void *start; size_t size; int live; } gc_allocs[MAX_GC_ALLOCS];
-static int gc_alloc_count = 0;
-
-static void gc_alloc_track(void *p, size_t size) {
-    if (gc_alloc_count < MAX_GC_ALLOCS) {
-        gc_allocs[gc_alloc_count].start = p;
-        /* Bartlett GC rounds up; store the actual allocation size */
-        gc_allocs[gc_alloc_count].size = size;
-        gc_allocs[gc_alloc_count].live = 1;
-        gc_alloc_count++;
-    }
-}
-/* Check if a pointer falls within any live GC allocation */
-static int gc_alloc_contains(void *p) {
-    for (int i = 0; i < gc_alloc_count; i++) {
-        if (!gc_allocs[i].live) continue;
-        uintptr_t start = (uintptr_t)gc_allocs[i].start;
-        uintptr_t end = start + gc_allocs[i].size;
-        if ((uintptr_t)p >= start && (uintptr_t)p < end) return 1;
-    }
-    return 0;
-}
-
-/* Verify a closure's env array — recursively check contained closures */
-static void verify_env(Value *env, int env_len, int depth) {
-    if (depth > 10) return; /* safety limit */
-    if (!gc_alloc_contains(env)) {
-        fprintf(stderr, "BUG: verify_heap: env=%p not in GC heap at depth=%d\n",
-                (void*)env, depth); abort();
-    }
-    for (int i = 0; i < env_len; i++) {
-        Value *v = &env[i];
-        if (v->tag == VAL_LAMBDA) {
-            check_closure(*v, "verify_heap/env");
-            if (v->lambda.env && v->lambda.env_len > 0)
-                verify_env(v->lambda.env, v->lambda.env_len, depth + 1);
-        } else if (v->tag == VAL_CONS) {
-            if (v->cons.car) check_closure(*v->cons.car, "verify_heap/cons-car");
-            if (v->cons.cdr) check_closure(*v->cons.cdr, "verify_heap/cons-cdr");
-        }
-    }
-}
-static void verify_heap(void) {
-    int errors = 0;
-    for (int i = 0; i < global_table_len; i++) {
-        Value cl = global_table[i].closure;
-        if (cl.tag != VAL_LAMBDA) continue;
-        check_closure(cl, "verify_heap/global");
-        /* Verify code pointer */
-        if (!gc_alloc_contains(cl.lambda.code)) {
-            fprintf(stderr, "BUG: verify_heap: global '%s' code=%p not in GC heap\n",
-                    global_table[i].name, (void*)cl.lambda.code);
-            errors++;
-        }
-        /* Recursively verify env */
-        if (cl.lambda.env && cl.lambda.env_len > 0)
-            verify_env(cl.lambda.env, cl.lambda.env_len, 0);
-    }
-    if (errors) abort();
-}
-#else
 #define check_closure(cl, where) ((void)0)
-#define gc_alloc_track(p, size) ((void)0)
 #define verify_heap() ((void)0)
-#endif
 static Value val_mark(void) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_MARK; return v;
@@ -308,19 +195,7 @@ static Value val_error(const char *msg) {
 static Value val_vector(int size) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_VECTOR; v.vector.len = size;
-    if (size > 0) {
-        int bytes = size * (int)sizeof(Value);
-        int words = (bytes + WORDBYTES - 1) / WORDBYTES + 1;
-        int ptrs = GC_VALUE_PTRS * size;
-        if (words > 0xFFFFFF || ptrs > 0xFFFFF) {
-            /* Too large for GC header — use calloc and register as extra roots */
-            v.vector.data = (Value*)calloc(size, sizeof(Value));
-            gc_set_extra_roots(v.vector.data, size * sizeof(Value));
-        } else {
-            v.vector.data = (Value*)gcalloc(bytes, ptrs);
-            GC_TRACK(v.vector.data, bytes);
-        }
-    }
+    if (size > 0) v.vector.data = (Value*)GC_MALLOC(size * sizeof(Value));
     return v;
 }
 static Value val_stream_in(FILE *f) {
@@ -447,8 +322,6 @@ static int global_table_len = 0;
    conservative C-stack scan is unreliable (register allocation can
    hide pointers).  By keeping the stack data pointer here (registered
    as an extra root), the GC always traces Values on the VM stack. */
-static void *gc_stack_data_ptr = NULL;
-static size_t gc_stack_data_len = 0;
 
 static void global_set(const char *name, Value v) {
     for (int i = 0; i < global_table_len; i++) {
@@ -1393,7 +1266,7 @@ static void resolve_jumps(Instr *code, int len) {
 /*  VM execution                                                       */
 /* ------------------------------------------------------------------ */
 
-#define CALL_STACK_DEPTH 65536  /* bumped from 8192 — shen.initialise needs ~12K frames */
+#define CALL_STACK_DEPTH 65536
 typedef struct { Instr *code; int code_len, pc; Value *env; int env_len, env_cap; ValueArray stack; } CallFrame;
 
 static Value lookup_env(int n, Value *env, int env_len, int pc_for_diag, Instr *cur_code, int cur_len) {
@@ -1435,8 +1308,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
     Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
     CallFrame *frame_stack = (CallFrame*)calloc(CALL_STACK_DEPTH, sizeof(CallFrame));
     if (!frame_stack) { va_free(&stack); return acc; }
-    /* TODO: register as GC extra root — needs dynamic sizing or
-       linked-list approach to avoid 3MB-per-collection scan cost */
     int frames_sp = 0;
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
     int instr_count = 0;
@@ -1456,9 +1327,13 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         if (pc < 0 || pc >= cur_len) {
             if (frames_sp > 0) {
                 CallFrame *cf = &frame_stack[--frames_sp];
+                
+                
+                
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                 env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
-                va_free(&stack); stack = cf->stack;
+                va_free(&stack);
+                stack = cf->stack;
                 continue;
             }
             break;
@@ -1482,6 +1357,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             /* ZINC [prim X] executes primitive X with args from stack + acc.
                Push acc so binary primitives find both args on the stack. */
             const char *pn = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
+            
             va_push(&stack, acc);
             if (exec_primitive(pn, &acc, &stack) < 0) goto done;
             if (trace_counter >= 0 && trace_counter < trace_limit + 5) {
@@ -1498,6 +1374,9 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 va_pop(&stack);
                 if (frames_sp > 0) {
                     CallFrame *cf = &frame_stack[--frames_sp];
+                    
+                
+                
                     cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                     env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
                     stack = cf->stack;
@@ -1536,26 +1415,22 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 CallFrame *cf = &frame_stack[frames_sp++];
                 cf->code = cur_code; cf->code_len = cur_len; cf->pc = pc + 1;
                 cf->env = env; cf->env_len = env_len; cf->env_cap = env_cap;
-                /* Give callee a fresh stack — OP_GRAB will find nothing
-                   (all args are in env).  This prevents stack junk from
-                   leaking across nested calls. */
                 cf->stack = stack; va_init(&stack);
+                
+                
+                
+                va_init(&stack);
                 env = NULL; env_len = 0; env_cap = 0;
 
-                int new_env_len = acc.lambda.env_len + nargs;
-                Value *ne = GC_VALUE_ARRAY(new_env_len);
-                /* read code AND env pointers AFTER gcalloc — GC may move bytecode */
-                cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 int lambda_env_len = acc.lambda.env_len;
+                int new_env_len = lambda_env_len + nargs;
+                Value *ne = GC_VALUE_ARRAY(new_env_len);
+                /* Bartlett pinning keeps acc.lambda.env reachable via
+                 * conservative stack scan — safe to read after gcalloc. */
+                cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *lambda_env = acc.lambda.env;
-                if (lambda_env_len > 0) {
-                    if (lambda_env == NULL) {
-                        /* GC may fail to update .env pointers in closures stored
-                           in half-scanned env arrays. Use empty env as fallback. */
-                        lambda_env_len = 0;
-                    } else {
-                        memcpy(ne, lambda_env, lambda_env_len * sizeof(Value));
-                    }
+                if (lambda_env_len > 0 && lambda_env) {
+                    memcpy(ne, lambda_env, lambda_env_len * sizeof(Value));
                 }
                 for (int i = 0; i < nargs; i++)
                     ne[lambda_env_len + i] = argbuf[i];
@@ -1581,9 +1456,13 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         case OP_RETURN: {
             if (frames_sp > 0) {
                 CallFrame *cf = &frame_stack[--frames_sp];
+                
+                
+                
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                 env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
-                va_free(&stack); stack = cf->stack;
+                va_free(&stack);
+                stack = cf->stack;
             } else goto done;
             break;
         }
@@ -1622,20 +1501,13 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                     va_pop(&stack);
                 if (nargs == 0) { fprintf(stderr, "runtime: appterm zero args\n"); goto done; }
 
-                int new_env_len = acc.lambda.env_len + nargs;
-                Value *ne = GC_VALUE_ARRAY(new_env_len);
-                /* read code AND env pointers AFTER gcalloc — GC may move bytecode */
-                cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 int lambda_env_len = acc.lambda.env_len;
+                int new_env_len = lambda_env_len + nargs;
+                Value *ne = GC_VALUE_ARRAY(new_env_len);
+                cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *lambda_env = acc.lambda.env;
-                if (lambda_env_len > 0) {
-                    if (lambda_env == NULL) {
-                        /* GC may fail to update .env pointers in closures stored
-                           in half-scanned env arrays. Use empty env as fallback. */
-                        lambda_env_len = 0;
-                    } else {
-                        memcpy(ne, lambda_env, lambda_env_len * sizeof(Value));
-                    }
+                if (lambda_env_len > 0 && lambda_env) {
+                    memcpy(ne, lambda_env, lambda_env_len * sizeof(Value));
                 }
                 for (int i = 0; i < nargs; i++)
                     ne[lambda_env_len + i] = argbuf[i];
@@ -1830,11 +1702,8 @@ static int parse_bundle(const char *str) {
 }
 
 int main(int argc, char **argv) {
-    uintptr_t gc_stack_root = 0;
     init_globals();
-    gc_state = gcinit(256 * 1024 * 1024, &gc_stack_root, NULL);
-    gc_set_extra_roots(global_table, sizeof(global_table));
-    gc_set_extra_roots(&gc_stack_data_ptr, sizeof(gc_stack_data_ptr));
+    GC_INIT();
 
     /* Scan for --trace <name> flags (before bundle load) */
     for (int i = 1; i < argc; i++) {
@@ -2269,7 +2138,6 @@ int main(int argc, char **argv) {
             if (*p) run_test(argv[1], p, 0); else printf("(empty file)\n");
             free(buf);
         }
-        gcfree(gc_state);
         return 0;
     }
 
@@ -2326,6 +2194,5 @@ int main(int argc, char **argv) {
         "ug[10:s]trap-errorp)", 1);
 
     printf("=== All 32 tests done ===\n");
-    gcfree(gc_state);
     return 0;
 }
