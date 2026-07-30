@@ -2187,6 +2187,11 @@ int main(int argc, char **argv) {
                          "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
                 printf("-- init done --\n"); fflush(stdout);
 
+                /* Diagnostic: test macroexpand directly with *ev1* = [+ 1 2] */
+                printf("\n--- Diagnostic: macroexpand on [+ 1 2] ---\n");
+                run_test("macroexpand-diag",
+                         "(mg[5:s]*ev1*ug[11:s]macroexpandp)", 0);
+
                 /* Test 7tc: disable type checker */
                 printf("--- Test 7tc: disable *tc* ---\n");
                 run_test("tc-off",
