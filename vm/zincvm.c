@@ -37,10 +37,13 @@
 #include "gc.h"
 
 /* GC helpers: allocate Values and strings on the Bartlett GC heap.
-   Values get 4 pointer slots (covers cons car/cdr, lambda code/env, etc.).
+   Values need sizeof(Value)/sizeof(uintptr_t) pointer slots to cover all
+   pointer fields in the struct (code, env, car, cdr, data, etc.).
    String data gets 0 pointer slots (opaque char buffers). */
-#define GC_VALUE()        ((Value*)gcalloc(sizeof(Value), 4))
+#define GC_VALUE_PTRS     ((int)(sizeof(Value) / sizeof(uintptr_t)))
+#define GC_VALUE()        ((Value*)gcalloc(sizeof(Value), GC_VALUE_PTRS))
 #define GC_STR(len)       ((char*)gcalloc((len) + 1, 0))
+#define GC_VALUE_ARRAY(n) ((Value*)gcalloc((n) * sizeof(Value), GC_VALUE_PTRS * (n)))
 
 static struct gc_state gc_state;
 
@@ -172,7 +175,7 @@ static Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
     v.tag = VAL_LAMBDA;
     v.lambda.code = code; v.lambda.code_len = code_len;
     if (env_len > 0) {
-        v.lambda.env = (Value*)gcalloc(env_len * sizeof(Value), 4 * env_len);
+        v.lambda.env = (Value*)gcalloc(env_len * sizeof(Value), GC_VALUE_PTRS * env_len);
         memcpy(v.lambda.env, env, env_len * sizeof(Value));
         v.lambda.env_len = env_len;
     } else { v.lambda.env = NULL; v.lambda.env_len = 0; }
@@ -196,7 +199,7 @@ static Value val_vector(int size) {
     if (size > 0) {
         int bytes = size * (int)sizeof(Value);
         int words = (bytes + WORDBYTES - 1) / WORDBYTES + 1;
-        int ptrs = 4 * size;
+        int ptrs = GC_VALUE_PTRS * size;
         if (words > 0xFFFFFF || ptrs > 0xFFFFF) {
             /* Too large for GC header — use calloc and register as extra roots */
             v.vector.data = (Value*)calloc(size, sizeof(Value));
@@ -272,13 +275,13 @@ static void print_value(Value v) {
 typedef struct { Value *data; int len; int cap; } ValueArray;
 
 static void va_init(ValueArray *a) {
-    a->data = (Value*)gcalloc(STACK_INIT_CAP * sizeof(Value), 4 * STACK_INIT_CAP);
+    a->data = (Value*)gcalloc(STACK_INIT_CAP * sizeof(Value), GC_VALUE_PTRS * STACK_INIT_CAP);
     a->len = 0; a->cap = STACK_INIT_CAP;
 }
 static void va_push(ValueArray *a, Value v) {
     if (a->len >= a->cap) {
         int new_cap = a->cap * 2;
-        Value *new_data = (Value*)gcalloc(new_cap * sizeof(Value), 4 * new_cap);
+        Value *new_data = (Value*)gcalloc(new_cap * sizeof(Value), GC_VALUE_PTRS * new_cap);
         memcpy(new_data, a->data, a->len * sizeof(Value));
         a->data = new_data; a->cap = new_cap;
     }
@@ -756,7 +759,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         if (setjmp(vm_error_jmp)) {
             Value err = val_error(vm_error_val.error.message);
             Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
-            Value *henv = (Value*)gcalloc((handler.lambda.env_len + 1) * sizeof(Value), 4 * (handler.lambda.env_len + 1));
+            Value *henv = (Value*)gcalloc((handler.lambda.env_len + 1) * sizeof(Value), GC_VALUE_PTRS * (handler.lambda.env_len + 1));
             if (handler.lambda.env_len > 0)
                 memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
             henv[handler.lambda.env_len] = err;
@@ -774,7 +777,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
                    bytecode expects a dummy parameter at env index 0.
                    Append a nil to the captured env to match. */
                 int new_len = body.lambda.env_len + 1;
-                Value *new_env = (Value*)gcalloc(new_len * sizeof(Value), 4 * new_len);
+                Value *new_env = (Value*)gcalloc(new_len * sizeof(Value), GC_VALUE_PTRS * new_len);
                 if (body.lambda.env_len > 0)
                     memcpy(new_env, body.lambda.env, body.lambda.env_len * sizeof(Value));
                 new_env[body.lambda.env_len] = val_nil();
@@ -966,7 +969,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             fprintf(stderr, "runtime: eval-kl: extract-kl not found in bundle\n");
             goto done;
         }
-        Value *env1 = (Value*)gcalloc((extkl.lambda.env_len + 1) * sizeof(Value), 4 * (extkl.lambda.env_len + 1));
+        Value *env1 = (Value*)gcalloc((extkl.lambda.env_len + 1) * sizeof(Value), GC_VALUE_PTRS * (extkl.lambda.env_len + 1));
         if (extkl.lambda.env_len > 0)
             memcpy(env1, extkl.lambda.env, extkl.lambda.env_len * sizeof(Value));
         env1[extkl.lambda.env_len] = tagged;
@@ -979,7 +982,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             fprintf(stderr, "runtime: eval-kl: kl->zinc not found in bundle\n");
             goto done;
         }
-        Value *env2 = (Value*)gcalloc((klzinc.lambda.env_len + 1) * sizeof(Value), 4 * (klzinc.lambda.env_len + 1));
+        Value *env2 = (Value*)gcalloc((klzinc.lambda.env_len + 1) * sizeof(Value), GC_VALUE_PTRS * (klzinc.lambda.env_len + 1));
         if (klzinc.lambda.env_len > 0)
             memcpy(env2, klzinc.lambda.env, klzinc.lambda.env_len * sizeof(Value));
         env2[klzinc.lambda.env_len] = klambda;
@@ -992,7 +995,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             fprintf(stderr, "runtime: eval-kl: toplevel-interp not found in bundle\n");
             goto done;
         }
-        Value *env3 = (Value*)gcalloc((tli.lambda.env_len + 1) * sizeof(Value), 4 * (tli.lambda.env_len + 1));
+        Value *env3 = (Value*)gcalloc((tli.lambda.env_len + 1) * sizeof(Value), GC_VALUE_PTRS * (tli.lambda.env_len + 1));
         if (tli.lambda.env_len > 0)
             memcpy(env3, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
         env3[tli.lambda.env_len] = zinc_code;
@@ -1240,7 +1243,7 @@ static Value lookup_env(int n, Value *env, int env_len, int pc_for_diag, Instr *
 static void env_push(Value **env, int *env_len, int *env_cap, Value v) {
     if (*env_len >= *env_cap) {
         int new_cap = *env_cap ? (*env_cap) * 2 : 4;
-        Value *new_env = (Value*)gcalloc(new_cap * sizeof(Value), 4 * new_cap);
+        Value *new_env = (Value*)gcalloc(new_cap * sizeof(Value), GC_VALUE_PTRS * new_cap);
         memcpy(new_env, *env, *env_len * sizeof(Value));
         *env = new_env; *env_cap = new_cap;
     }
@@ -1259,7 +1262,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
     Value *env = NULL; int env_len = 0, env_cap = 0;
     if (init_env_len > 0 && init_env) {
         env_cap = init_env_len;
-        env = (Value*)gcalloc(env_cap * sizeof(Value), 4 * env_cap);
+        env = (Value*)gcalloc(env_cap * sizeof(Value), GC_VALUE_PTRS * env_cap);
         memcpy(env, init_env, init_env_len * sizeof(Value));
         env_len = init_env_len;
     }
@@ -1384,13 +1387,22 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 env = NULL; env_len = 0; env_cap = 0;
 
                 int new_env_len = acc.lambda.env_len + nargs;
-                Value *ne = (Value*)gcalloc(new_env_len * sizeof(Value), 4 * new_env_len);
-                /* read code pointers AFTER gcalloc — GC may move bytecode */
+                Value *ne = (Value*)gcalloc(new_env_len * sizeof(Value), GC_VALUE_PTRS * new_env_len);
+                /* read code AND env pointers AFTER gcalloc — GC may move bytecode */
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
-                if (acc.lambda.env_len > 0)
-                    memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
+                int lambda_env_len = acc.lambda.env_len;
+                Value *lambda_env = acc.lambda.env;
+                if (lambda_env_len > 0) {
+                    if (lambda_env == NULL) {
+                        /* GC may fail to update .env pointers in closures stored
+                           in half-scanned env arrays. Use empty env as fallback. */
+                        lambda_env_len = 0;
+                    } else {
+                        memcpy(ne, lambda_env, lambda_env_len * sizeof(Value));
+                    }
+                }
                 for (int i = 0; i < nargs; i++)
-                    ne[acc.lambda.env_len + i] = argbuf[i];
+                    ne[lambda_env_len + i] = argbuf[i];
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
                 pc = 0;
             } else if (acc.tag == VAL_PRIM) {
@@ -1482,13 +1494,22 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 if (nargs == 0) { fprintf(stderr, "runtime: appterm zero args\n"); goto done; }
 
                 int new_env_len = acc.lambda.env_len + nargs;
-                Value *ne = (Value*)gcalloc(new_env_len * sizeof(Value), 4 * new_env_len);
-                /* read code pointers AFTER gcalloc — GC may move bytecode */
+                Value *ne = (Value*)gcalloc(new_env_len * sizeof(Value), GC_VALUE_PTRS * new_env_len);
+                /* read code AND env pointers AFTER gcalloc — GC may move bytecode */
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
-                if (acc.lambda.env_len > 0)
-                    memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
+                int lambda_env_len = acc.lambda.env_len;
+                Value *lambda_env = acc.lambda.env;
+                if (lambda_env_len > 0) {
+                    if (lambda_env == NULL) {
+                        /* GC may fail to update .env pointers in closures stored
+                           in half-scanned env arrays. Use empty env as fallback. */
+                        lambda_env_len = 0;
+                    } else {
+                        memcpy(ne, lambda_env, lambda_env_len * sizeof(Value));
+                    }
+                }
                 for (int i = 0; i < nargs; i++)
-                    ne[acc.lambda.env_len + i] = argbuf[i];
+                    ne[lambda_env_len + i] = argbuf[i];
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
                 pc = 0; break;
             } else if (acc.tag == VAL_PRIM) {
@@ -1869,7 +1890,7 @@ int main(int argc, char **argv) {
                         Value nil = val_nil();
                         printf("  Test A ([] -> [cons]):\n");
 
-                        Value *env = (Value*)gcalloc((tli.lambda.env_len + 1) * sizeof(Value), 4 * (tli.lambda.env_len + 1));
+                        Value *env = (Value*)gcalloc((tli.lambda.env_len + 1) * sizeof(Value), GC_VALUE_PTRS * (tli.lambda.env_len + 1));
                         if (tli.lambda.env_len > 0)
                             memcpy(env, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
                         env[tli.lambda.env_len] = nil;  /* empty code */
@@ -1892,7 +1913,7 @@ int main(int argc, char **argv) {
                         Value n42 = val_number(42);
                         Value bc = val_cons(num_sym, val_cons(n42, nil));
 
-                        Value *env2 = (Value*)gcalloc((tli.lambda.env_len + 1) * sizeof(Value), 4 * (tli.lambda.env_len + 1));
+                        Value *env2 = (Value*)gcalloc((tli.lambda.env_len + 1) * sizeof(Value), GC_VALUE_PTRS * (tli.lambda.env_len + 1));
                         if (tli.lambda.env_len > 0)
                             memcpy(env2, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
                         env2[tli.lambda.env_len] = bc;
@@ -1942,7 +1963,7 @@ int main(int argc, char **argv) {
                             Value ctest = val_boolean(args[4].tag == VAL_CONS);
                             print_value(ctest); printf(" (expected false)\n");
 
-                            Value *env_i = (Value*)gcalloc((interp_fn.lambda.env_len + 5) * sizeof(Value), 4 * (interp_fn.lambda.env_len + 5));
+                            Value *env_i = (Value*)gcalloc((interp_fn.lambda.env_len + 5) * sizeof(Value), GC_VALUE_PTRS * (interp_fn.lambda.env_len + 5));
                             /* After the append fix, APPLY appends first arg (code),
                                then 4 GRABs append acc, senv, stk, ret.
                                Result: env = [captured..., code, acc, senv, stk, ret]
