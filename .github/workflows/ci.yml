@@ -28,13 +28,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgc-dev
+        run: sudo apt-get update && sudo apt-get install -y libgc-dev curl
 
       - name: Build C VM
         run: make
 
-      - name: Setup shen-scheme
-        run: make setup
+      - name: Clone shen-scheme
+        run: git clone https://github.com/Shen-Language/shen-scheme ../shen-scheme
+
+      - name: Build shen-scheme
+        run: make -C ../shen-scheme
 
       - name: Bundle
         run: make bundle
