@@ -757,7 +757,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             Value err = val_error(vm_error_val.error.message);
             Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
             Value *henv = (Value*)gcalloc((handler.lambda.env_len + 1) * sizeof(Value), 4 * (handler.lambda.env_len + 1));
-            memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
+            if (handler.lambda.env_len > 0)
+                memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
             henv[handler.lambda.env_len] = err;
             handler.lambda.env = henv; handler.lambda.env_len++;
             /* Save/restore in case handler itself errors (nested trap-error). */
@@ -774,7 +775,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
                    Append a nil to the captured env to match. */
                 int new_len = body.lambda.env_len + 1;
                 Value *new_env = (Value*)gcalloc(new_len * sizeof(Value), 4 * new_len);
-                memcpy(new_env, body.lambda.env, body.lambda.env_len * sizeof(Value));
+                if (body.lambda.env_len > 0)
+                    memcpy(new_env, body.lambda.env, body.lambda.env_len * sizeof(Value));
                 new_env[body.lambda.env_len] = val_nil();
                 *acc = vm_exec_env(body.lambda.code, body.lambda.code_len, new_env, new_len);
             }
@@ -1381,10 +1383,12 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 cf->stack = stack; va_init(&stack);
                 env = NULL; env_len = 0; env_cap = 0;
 
-                cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 int new_env_len = acc.lambda.env_len + nargs;
                 Value *ne = (Value*)gcalloc(new_env_len * sizeof(Value), 4 * new_env_len);
-                memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
+                /* read code pointers AFTER gcalloc — GC may move bytecode */
+                cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
+                if (acc.lambda.env_len > 0)
+                    memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
                 for (int i = 0; i < nargs; i++)
                     ne[acc.lambda.env_len + i] = argbuf[i];
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
@@ -1477,10 +1481,12 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                     va_pop(&stack);
                 if (nargs == 0) { fprintf(stderr, "runtime: appterm zero args\n"); goto done; }
 
-                cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 int new_env_len = acc.lambda.env_len + nargs;
                 Value *ne = (Value*)gcalloc(new_env_len * sizeof(Value), 4 * new_env_len);
-                memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
+                /* read code pointers AFTER gcalloc — GC may move bytecode */
+                cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
+                if (acc.lambda.env_len > 0)
+                    memcpy(ne, acc.lambda.env, acc.lambda.env_len * sizeof(Value));
                 for (int i = 0; i < nargs; i++)
                     ne[acc.lambda.env_len + i] = argbuf[i];
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
