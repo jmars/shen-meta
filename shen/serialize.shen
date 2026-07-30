@@ -29,6 +29,25 @@
 (interp-load-raw "/home/arch/github/shen-scheme/kl/stlib.kl")
 (interp-load-raw "/home/arch/github/shen-scheme/kl/init.kl")
 
+\* Add shen. prefix aliases for unprefixed closures.
+   The Shen module system adds the package prefix during Shen->KLambda
+   compilation, so bytecode references shen.<name>.  But yacc.kl defines
+   <e>, <!>, <end> without the prefix.  Create aliases so both lookup
+   paths work. *\
+(tc -)
+(define shen.has-dot?
+  "" -> false
+  S -> (if (= "." (hdstr S)) true (shen.has-dot? (tlstr S))))
+(define shen.add-prefix-aliases
+  [] -> aliases-added
+  [[Name Closure] | Rest] -> (do
+    (if (shen.has-dot? (str Name))
+        shen.skip
+        (set global-table (cons [(intern (cn "shen." (str Name))) Closure]
+                                (value global-table))))
+    (shen.add-prefix-aliases Rest)))
+(shen.add-prefix-aliases (value global-table))
+
 (define entry-str
   [N [lambda Code []]] -> (cn (cn (cn (cn "(" (csexp-atom N)) " ")
                                   (zinc->native [cur Code]))
