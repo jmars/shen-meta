@@ -1437,7 +1437,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
     if (!frame_stack) { va_free(&stack); return acc; }
     int frames_sp = 0;
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
-    uint8_t last_op = 0;  /* used by OP_PRIM to detect duplicate arg pushes */
     int instr_count = 0;
     #define INSTR_HARD_LIMIT 500000000
 
@@ -1476,22 +1475,12 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         switch (in->op) {
         case OP_NUMBER: case OP_STRING: case OP_SYMBOL: case OP_BOOLEAN:
             acc = in->operand;
-            if (pc + 1 < cur_len) {
-                uint8_t no = cur_code[pc + 1].op;
-                if (no == OP_ACCESS || no == OP_GLOBAL ||
-                    no == OP_NUMBER || no == OP_STRING ||
-                    no == OP_SYMBOL || no == OP_BOOLEAN ||
-                    no == OP_CUR) va_push(&stack, acc);
-            }
             pc++; break;
         case OP_PRIM: {
             /* ZINC [prim X] executes primitive X with args from stack + acc.
-               Push acc so binary primitives find both args on the stack.
-               BUT: if the last instruction was a PUSH, acc is already on the
-               stack (duplicate), which breaks N-ary primitives like trap-error
-               that pop multiple args. Skip the push in that case. */
+               Push acc so binary primitives find both args on the stack. */
             const char *pn = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
-            if (last_op != OP_PUSH) va_push(&stack, acc);
+            va_push(&stack, acc);
             if (exec_primitive(pn, &acc, &stack) < 0) goto done;
             if (trace_counter >= 0 && trace_counter < trace_limit + 5) {
                 fprintf(stderr, "    -> acc after prim %s: ", pn);
@@ -1598,49 +1587,20 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         }
         case OP_ACCESS:
             acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len, pc, cur_code, cur_len);
-            /* Standard ZINC pushes access results to stack.  Our VM is
-               acc-based, but bundled bytecode (compiled by the Shen ZINC
-               compiler) assumes stack-push semantics.  Push to stack when
-               the next instruction will clobber acc — i.e. another
-               value-producing opcode.  OP_PRIM is excluded because it
-               handles its own push via the last_op != OP_PUSH guard. */
-            if (pc + 1 < cur_len) {
-                uint8_t no = cur_code[pc + 1].op;
-                if (no == OP_ACCESS || no == OP_GLOBAL ||
-                    no == OP_NUMBER || no == OP_STRING ||
-                    no == OP_SYMBOL || no == OP_BOOLEAN ||
-                    no == OP_CUR) va_push(&stack, acc);
-            }
             pc++; break;
         case OP_GLOBAL: {
             const char *nm = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
             acc = global_get(nm);
-            /* Same push-before-clobber logic as OP_ACCESS above */
-            if (pc + 1 < cur_len) {
-                uint8_t no = cur_code[pc + 1].op;
-                if (no == OP_ACCESS || no == OP_GLOBAL ||
-                    no == OP_NUMBER || no == OP_STRING ||
-                    no == OP_SYMBOL || no == OP_BOOLEAN ||
-                    no == OP_CUR) va_push(&stack, acc);
-            }
             pc++; break;
         }
         case OP_LET: env_push(&env, &env_len, &env_cap, acc); pc++; break;
         case OP_ENDLET: if (env_len > 0) env_pop(&env, &env_len); pc++; break;
         case OP_JMP: pc = in->jmp_target; break;
         case OP_JMPF:
-            if (stack.len > 0) va_pop(&stack);  /* consume boolean condition from stack */
             if (acc.tag == VAL_BOOLEAN && !acc.boolean) pc = in->jmp_target; else pc++; break;
         case OP_CUR: {
             /* val_lambda now GC-allocates its own env copy */
             acc = val_lambda(in->closure_code, in->closure_len, env, env_len);
-            if (pc + 1 < cur_len) {
-                uint8_t no = cur_code[pc + 1].op;
-                if (no == OP_ACCESS || no == OP_GLOBAL ||
-                    no == OP_NUMBER || no == OP_STRING ||
-                    no == OP_SYMBOL || no == OP_BOOLEAN ||
-                    no == OP_CUR) va_push(&stack, acc);
-            }
             pc++; break;
         }
         case OP_APPTERM: {
@@ -1690,7 +1650,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         }
         default: fprintf(stderr, "runtime: unknown op '%c' at pc=%d\n", in->op, pc); goto done;
         }
-        last_op = in->op;
     }
 done:
     va_free(&stack);
