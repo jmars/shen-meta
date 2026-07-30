@@ -3,7 +3,7 @@
 ## Build & test
 
 ```sh
-make          # build C VM
+make          # build C VM (links Boehm GC via -lgc)
 make test     # run 28 built-in tests
 make pipeline # compile (+ 1 2) through full pipeline
 make bundle   # serialize all safe wrappers → globals.csexp
@@ -58,6 +58,9 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 - `%%` escapes to host Shen primitives; compiles to `[prim X]` in ZINC
 
 ## C VM conventions
+
+- **GC**: Boehm GC (libgc) — non-moving conservative collector. `GC_MALLOC`/`GC_MALLOC_ATOMIC` via macros `GC_VALUE()`, `GC_STR()`, `GC_VALUE_ARRAY()`. No gcinit, no extra roots, no pointer counts. Objects never move, so stack-local Value pointers are always safe across allocations.
+- The old Bartlett copying GC is archived at `vendor/bartlett-gc` branch `bartlett-mostly-copying` (pinned-page implementation) — kept for reference/experimentation.
 
 - csexp atoms: `[len:type]value` — type is `s`/`n`/`S`/`b`
 - Opcodes are single chars: `m` pushmark, `p` apply, `u` push, `r` grab, `v` return, etc.
