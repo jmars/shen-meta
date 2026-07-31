@@ -1,12 +1,12 @@
-# shen-meta
+# shen-meta · self-hosted Shen
 
 [![CI](https://github.com/jmars/shen-meta/actions/workflows/ci.yml/badge.svg)](https://github.com/jmars/shen-meta/actions/workflows/ci.yml)
 
-A meta-circular Shen ZINC abstract machine — Shen evaluating Shen, compiling itself to native bytecode, running on a native C VM with Boehm GC.
+**Shen evaluates Shen, compiles itself to native bytecode, runs on a native C VM with Boehm GC.** The full eval-kl chain is working: `(+ 1 2)` marshalled to tagged form, compiled through the metacircular pipeline, executed by the metacircular interpreter, demarshalled back to native — returns `3`. Pure self-hosting, no C bypass.
 
-This is a self-hosted Shen runtime: Shen compiles itself to native bytecode, running on a compact C VM. The meta-circular evaluator is the core — the ZINC abstract machine implemented in Shen, then serialized and loaded by the native VM.
+The meta-circular evaluator is the core — the ZINC abstract machine implemented in ~100 lines of Shen pattern-matching rules, serialized to ~1.6MB of bytecode, and loaded by a ~2100-line C VM. The VM is self-contained: a working Shen runtime that doesn't depend on anything beyond a C compiler and Boehm GC.
 
-This project is part of a larger architecture: sequent calculus provides the inference kernel (cut elimination as computation), LLMs handle pattern completion over the proof space, and Shen ties them together. But the VM itself is self-contained — a working Shen runtime that doesn't depend on anything beyond a C compiler.
+This project is part of a larger architecture: sequent calculus provides the inference kernel (cut elimination as computation), LLMs handle pattern completion over the proof space, and Shen ties them together. But the VM itself is self-contained.
 
 Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -104,25 +104,27 @@ Example: `(+ 1 2)` → `(mn[1:n]2un[1:n]1ug[1:s]+p)`
 
 ## Self-hosting
 
-The C VM loads `globals.csexp` — a ~1.4MB bundle of **~1200 closures** compiled by the metacircular interpreter from all 24 Shen OS KLambda files.
+The C VM loads `globals.csexp` — a ~1.6MB bundle of **~1750 closures** compiled by the metacircular interpreter from all 24 Shen OS KLambda files. The full eval-kl chain is proven: native values marshalled to tagged forms, compiled through `extract-kl → kl→zinc → toplevel-interp`, and demarshalled back. Shen compiles Shen, which runs on Shen, on the C VM.
+
+**All 11 self-hosting tests pass:**
 
 | Test | What it proves | Status |
 |---|---|---|
-| 1 | `(+ 1 2)` via bundled + | Pass |
-| 2 | `(reverse [1 2 3])` via bundled reverse | Pass |
-| 3 | `(factorial 5)` via bundled factorial | Pass |
-| 4 | `(raw.open/close)` — raw I/O primitives | Pass |
-| A | `toplevel-interp([])` → `[cons]` | Pass |
-| B | `toplevel-interp([number 42])` → `[number 42]` | Pass |
-| C | `interp [] [cons] [] [] []` → `[cons]` | Pass |
-| 5 | `eval-kl [+ 1 2]` via marshal chain | Pass |
-| 6 | `read-file-as-string` via bundled apply | Pass |
-| 7 | `load` via bundled chain | Pass |
-| 7b | `read-from-string "(+ 1 2)"` — macroexpand works, pipeline WIP | Fail (returns `[]`) |
-| 7c | `read` via string stream | Pass |
-| 8 | `load shen/util.shen` | Pass |
-| 9 | `id` closure (identity) | Pass |
-| 10 | `newvar` (gensym) | Pass |
+| 1 | `(+ 1 2)` via bundled + | ✅ 3 |
+| 2 | `(reverse [1 2 3])` via bundled reverse | ✅ [3 2 1] |
+| 3 | `(factorial 5)` via bundled factorial | ✅ 120 |
+| 4 | `(raw.open/close)` — raw I/O primitives | ✅ |
+| A | `toplevel-interp([])` → `[cons]` | ✅ |
+| B | `toplevel-interp([number 42])` → `[number 42]` | ✅ |
+| C | `interp [] [cons] [] [] []` → `[cons]` | ✅ |
+| 5 | **`eval-kl [+ 1 2]` via marshal chain** | ✅ **3** |
+| 6 | `read-file-as-string` via bundled apply | ✅ |
+| 7 | `load` via bundled chain | ✅ |
+| 7b | `read-from-string "(+ 1 2)"` | ✅ [[+ 1 2]] |
+| 7c | `read` via string stream | ✅ |
+| 8 | `load shen/util.shen` | ✅ (functions load) |
+| 9 | `id` closure (identity) | ✅ 42 |
+| 10 | `newvar` (gensym) | ✅ shen.V0 |
 
 ## Key design decisions
 
@@ -136,26 +138,27 @@ Non-moving conservative collector (libgc). Objects never move — stack-local Va
 
 ### Recursive eval-kl
 
-`eval-kl` delegates to the bundled closure via `vm_exec_env` with a recursion guard. The bundled `safe.eval-kl` (`A → %% eval-kl A`) re-enters `exec_primitive`; the guard catches re-entry and returns identity.
+`eval-kl` delegates to the bundled closure via `vm_exec_env` with a recursion guard. The bundled `safe.eval-kl` (`A → %% eval-kl A`) re-enters `exec_primitive`; the guard catches re-entry and returns identity. The full chain is: `marshal → extract-kl → kl→zinc → toplevel-interp → demarshal`. The metacircular `interp` function (97 pattern-match rules in `shen/interp.shen`) was updated to auto-push old accumulator values, matching the standard ZINC semantics of `zinc.shen`.
 
 ## Status
 
 - [x] 32 built-in VM tests (arithmetic, types, closures, error handling, I/O, trap-error routing)
-- [x] ~1200 bundled closures loaded and executing (full Shen OS)
-- [x] Bartlett copying GC with auto-grow/shrink and global-table roots
-- [x] Switched to Boehm GC (non-moving, no pointer staleness)
-- [x] `deep_equal` for cons==cons structural comparison (fixes macroexpand)
+- [x] ~1750 bundled closures loaded and executing (full Shen OS)
+- [x] **Self-hosting proven**: eval-kl chain returns `3` for `(+ 1 2)` — no C bypass
+- [x] Boehm GC (non-moving, no pointer staleness)
+- [x] `deep_equal` for cons==cons structural comparison
 - [x] `raw.X` namespace — bytecode calls C primitives directly
 - [x] Recursive `eval-kl` delegating to bundled closure
 - [x] Raw I/O from C VM
 - [x] KLambda primitives: `gensym`, `@p`, `fst`, `snd`, `variable?`
 - [x] Full read-compile-eval round-trip (bundled `load` works)
+- [x] `read-from-string` via YACC parser
 - [x] marshal_to_tagged / demarshal_from_tagged layer
+- [x] Metacircular interp auto-push (matches standard ZINC semantics)
 - [x] Standalone bytecode decompiler (`zincdec`) with 4 output formats
 - [x] Per-closure instruction tracing (`--trace`)
 - [x] String stream support in `open` primitive
 - [ ] REPL with interactive terminal I/O
-- [ ] `read-from-string` via YACC parser
 - [ ] `shen.initialise` non-idempotency fix
 
 ## Credits
