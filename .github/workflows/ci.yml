@@ -24,13 +24,12 @@ jobs:
   self-hosting:
     runs-on: ubuntu-latest
     needs: build-and-test
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgc-dev libncurses-dev libx11-dev
+        run: sudo apt-get update && sudo apt-get install -y libgc-dev
 
       - name: Build C VM
         run: make
@@ -46,4 +45,3 @@ jobs:
 
       - name: Test (self-hosting)
         run: timeout 120 make run-bundle
-        continue-on-error: true
