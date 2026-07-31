@@ -466,12 +466,11 @@ static int deep_equal(Value a, Value b) {
         case VAL_SYMBOL: {
             if (strcmp(a.sym.name, b.sym.name) == 0) return 1;
             /* Handle shen. prefix mismatch: the Shen module system
-               prefixes ALL symbols with the package name during
-               Shen→KLambda compilation.  Within the shen package,
-               shen.<x> and <x> are the same logical symbol.
-               Without this, pattern matches like [define F | X]
-               fail because the form's head is 'shen.define' while
-               the pattern compares against the literal 'define'. */
+               prefixes symbols during Shen→KLambda compilation.
+               Within the shen package, shen.<x> and <x> are the
+               same logical symbol.  Needed because .kl files have
+               shen.define baked in while pattern literals in bundled
+               bytecode use bare define. */
             const char *an = a.sym.name;
             const char *bn = b.sym.name;
             if (strncmp(an, "shen.", 5) == 0 && strcmp(an + 5, bn) == 0) return 1;
@@ -636,10 +635,9 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         }
         else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_CONS) {
             const char *sym = a1.sym.name;
-            /* The { hack: prevent (= { some-list) from matching when
-               {some-list} is a type annotation, not just the symbol {. 
-               For all other symbols, compare the cons car (with shen. prefix
-               handling) since forms may be wrapped in extra cons cells. */
+            /* Only block { here: prevents (= { {some-list}) from matching
+               type annotations.  All other symbols use prefix-aware
+               comparison of the cons car. */
             if (strcmp(sym, "{") == 0) {
                 *acc = val_boolean(false);
             } else if (a2.cons.car->tag == VAL_SYMBOL) {
