@@ -43,7 +43,7 @@ interp:
 
 setup:
 	@if [ ! -d ../shen-scheme ]; then \
-		git clone https://github.com/Shen-Language/shen-scheme ../shen-scheme; \
+		git clone https://github.com/tizoc/shen-scheme ../shen-scheme; \
 	else \
 		echo "shen-scheme already present"; \
 	fi

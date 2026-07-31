@@ -34,7 +34,7 @@ jobs:
         run: make
 
       - name: Clone shen-scheme
-        run: git clone --depth 1 https://github.com/Shen-Language/shen-scheme.git shen-scheme
+        run: git clone --depth 1 https://github.com/tizoc/shen-scheme.git shen-scheme
 
       - name: Build shen-scheme
         run: make -C shen-scheme
