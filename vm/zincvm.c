@@ -600,13 +600,33 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             *acc = val_boolean(a1.boolean == a2.boolean);
         /* HACK: zinc-c generates flat comparisons like = [number 42] "number"
            instead of = hd(hd(Code)) "number".  Treat cons-vs-symbol as
-           comparing the cons's car to the symbol (both directions). */
-        else if (a1.tag == VAL_CONS && a2.tag == VAL_SYMBOL)
-            *acc = val_boolean(a1.cons.car->tag == VAL_SYMBOL &&
-                               strcmp(a1.cons.car->sym.name, a2.sym.name) == 0);
-        else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_CONS)
-            *acc = val_boolean(a2.cons.car->tag == VAL_SYMBOL &&
-                               strcmp(a2.cons.car->sym.name, a1.sym.name) == 0);
+           comparing the cons's car to the symbol (both directions).
+           BUT skip this for Shen form-head keywords (define, defun, lambda,
+           let, cond, if) because they would incorrectly match multi-element
+           form lists like [[define newvar ...], ...] as the keyword itself. */
+        else if (a1.tag == VAL_CONS && a2.tag == VAL_SYMBOL) {
+            const char *sym = a2.sym.name;
+            /* Skip hack for form-head keywords that cause false matches */
+            if (strcmp(sym, "define") == 0 || strcmp(sym, "defun") == 0 ||
+                strcmp(sym, "lambda") == 0 || strcmp(sym, "let") == 0 ||
+                strcmp(sym, "cond") == 0 || strcmp(sym, "if") == 0) {
+                *acc = val_boolean(false);
+            } else {
+                *acc = val_boolean(a1.cons.car->tag == VAL_SYMBOL &&
+                                   strcmp(a1.cons.car->sym.name, sym) == 0);
+            }
+        }
+        else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_CONS) {
+            const char *sym = a1.sym.name;
+            if (strcmp(sym, "define") == 0 || strcmp(sym, "defun") == 0 ||
+                strcmp(sym, "lambda") == 0 || strcmp(sym, "let") == 0 ||
+                strcmp(sym, "cond") == 0 || strcmp(sym, "if") == 0) {
+                *acc = val_boolean(false);
+            } else {
+                *acc = val_boolean(a2.cons.car->tag == VAL_SYMBOL &&
+                                   strcmp(a2.cons.car->sym.name, sym) == 0);
+            }
+        }
         /* fail is registered as VAL_PRIM so it can be both applied (error)
            and compared in where clauses.  Compare symbol name with prim name. */
         else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_PRIM)
