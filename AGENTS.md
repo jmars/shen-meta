@@ -80,6 +80,16 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 - **`=`** now supports deep structural equality for cons cells via `deep_equal()`.
   Without this, `(= [+ 1 2] [+ 1 2])` returns false, breaking `macroexpand-h`'s
   fixed-point check.  Depth-limited to 1000 for cycle safety.
+- **`=` symbol comparison** handles `shen.` prefix mismatch: `shen.define` == `define`,
+  `shen.cons` == `cons`, etc.  This is critical because `packaged?` in the bundled
+  Shen code uses the `(package ...)` internal representation that our C VM doesn't
+  support (we use plain VAL_SYMBOL).  Without this, pattern matching in `find-arities`
+  and other bundled code fails when forms have the `shen.` prefix.
+- **`=` cons-vs-symbol** comparison (e.g., `(= define (hd X))` where `(hd X)` is a cons):
+  MUST handle the `shen.` prefix on the cons's car.  **Exception**: `{` always returns
+  false for `(= { some-cons)` — this prevents false matches on type annotations like
+  `{A --> B}` in `find-arities` case 1.  Do NOT add more keywords to this exclusion
+  list without thorough testing.
 - `n->string N`: number → single-character string via ASCII code. `(n->string 40)` → `"("`
 - `string->n S`: first character → ASCII code. `(string->n "(")` → `40`
 - `pos S N`: single character at index N (0-based). OOB → `""`. `(pos "hello" 1)` → `"e"`
