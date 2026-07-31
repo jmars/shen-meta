@@ -34,17 +34,13 @@ jobs:
         run: make
 
       - name: Clone shen-scheme
-        run: |
-          git clone --depth 1 \
-            https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Shen-Language/shen-scheme.git \
-            /tmp/shen-scheme
-          ln -s /tmp/shen-scheme ../shen-scheme
+        run: git clone --depth 1 https://github.com/Shen-Language/shen-scheme.git shen-scheme
 
       - name: Build shen-scheme
-        run: make -C ../shen-scheme
+        run: make -C shen-scheme
 
       - name: Bundle
-        run: make bundle
+        run: make bundle SHEN=shen-scheme/_build/bin/shen-scheme
 
       - name: Test (self-hosting)
         run: timeout 120 make run-bundle
