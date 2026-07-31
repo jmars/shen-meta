@@ -1165,7 +1165,7 @@ static int parse_csexp_list(ParseState *ps, Instr **out);
 
 static int parse_body(ParseState *ps, Instr **out) {
     int cap = 16, len = 0;
-    Instr *code = malloc(cap * sizeof(Instr));
+    Instr *code = (Instr*)GC_MALLOC(cap * sizeof(Instr));
     while (1) {
         skip_ws(ps); char c = *ps->p;
         if (c == ')' || c == '\0') break;
@@ -1197,7 +1197,7 @@ static int parse_body(ParseState *ps, Instr **out) {
             ps->p++; break;
         default: { char msg[64]; snprintf(msg, sizeof(msg), "unknown opcode '%c' (0x%02x)", c, (unsigned char)c); PARSE_ERROR(msg); }
         }
-        if (len >= cap) { cap *= 2; code = realloc(code, cap * sizeof(Instr)); }
+        if (len >= cap) { cap *= 2; code = (Instr*)GC_REALLOC(code, cap * sizeof(Instr)); }
         code[len++] = instr;
     }
     *out = code; return len;
@@ -1632,7 +1632,7 @@ static void run_test(const char *label, const char *bytecode, int show_code) {
         printf("Result: "); print_value(result); printf("\n\n"); fflush(stdout);
     }
     fprintf(stderr, "[run_test] %s: done, freeing code\n", label);
-    free(code);
+    /* code is GC_MALLOC'd — no free needed */
     verify_heap();
 }
 
@@ -1728,7 +1728,6 @@ static int parse_bundle(const char *str) {
         /* Unwrap the outer cur: use its closure_code as the lambda body */
         if (code_len < 1 || code[0].op != OP_CUR || code[0].closure_code == NULL) {
             fprintf(stderr, "bundle error: expected cur wrapper for '%s'\n", name);
-            free(code);
             return count;
         }
         Instr *body_code = code[0].closure_code;
@@ -1740,7 +1739,7 @@ static int parse_bundle(const char *str) {
         /* Create a closure from the body code (empty env) and store in globals */
         Value closure = val_lambda(body_code, body_len, NULL, 0);
         global_set(key, closure);
-        free(code);
+        /* code is GC_MALLOC'd — no free needed */
 
         /* Consume closing ')' of entry */
         skip_ws(&ps);
