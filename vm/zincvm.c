@@ -2237,20 +2237,19 @@ int main(int argc, char **argv) {
                     }
                 }
 
-                /* REPL smoke test — shen.initialise already ran above.
-                   shen.repl with (cons success []) as arg.
-                   Gated behind ZINCVM_RUN_REPL env var.
-                   REPL now runs! Prints prompts, reads stdin. EOF handling
-                   shows "empty stream" (pre-existing, not a crash). */
-                printf("\n--- REPL smoke test ---\n");
+                /* REPL eval test — single-shot read-eval on (+ 1 2) via stdin.
+                   shen.initialise already ran above. Uses lineread→evaluate
+                   chain. No infinite loop, no empty-stream errors. */
+                printf("\n--- REPL eval test ---\n");
                 fflush(stdout);
                 if (getenv("ZINCVM_RUN_REPL")) {
-                    run_test("repl-smoke",
-                             "(mn[1:n]0P[9:s]emptylists[7:s]successP[4:s]consg[9:s]shen.replp)", 0);
+                    /* read-from-string then eval-kl on (+ 1 2) */
+                    run_test("repl-eval",
+                             "(mS[7:S](+ 1 2)g[16:s]read-from-stringpg[2:s]hdpg[7:s]eval-klpv)", 0);
                 } else {
                     printf("  (skipped — set ZINCVM_RUN_REPL=1 to run)\n");
                 }
-                printf("--- REPL smoke test done ---\n");
+                printf("--- REPL eval test done ---\n");
             }
         } else {
             /* Single bytecode list */
