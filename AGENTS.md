@@ -244,26 +244,35 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
 - This routes OOB access sentinels (tag=0,n=0 from empty-env vm_exec calls) through
   error handlers, letting `bound?` correctly return false for unbound symbols
 
-## ZINC calling convention (CRITICAL — acc vs stack mismatch)
+## ZINC calling convention (STANDARD — fully aligned)
 
-Our VM uses an **acc-based** dispatch: opcodes set `acc` and explicit `u` (PUSH)
-moves values to the stack. The Shen compiler's bytecode (bundled closures)
-assumes **standard ZINC** where OP_GLOBAL, OP_ACCESS, OP_NUMBER, and OP_APPLY
-all push results to the stack implicitly.
+The VM now uses **standard ZINC** semantics: all value-producing opcodes push
+results to the stack AND set `acc`. The `zinc.shen` compiler no longer emits
+explicit `u` (PUSH) instructions — it was modified to rely on auto-push.
 
-**Partial fixes applied:**
-- `OP_APPLY` (VAL_PRIM): pushes result when next instruction is OP_GLOBAL
-- `OP_ACCESS`: pushes result when next instruction is OP_GLOBAL
+**Opcodes that push to stack:**
+- `OP_NUMBER`, `OP_STRING`, `OP_SYMBOL`, `OP_BOOLEAN` — push operand
+- `OP_ACCESS` — push env lookup result
+- `OP_GLOBAL` — push global table lookup result
+- `OP_CUR` — push newly created closure
+- `OP_PRIM` — push primitive result (after execution, no pre-push)
+- `OP_APPLY` (VAL_PRIM) — push primitive result
+- `OP_APPTERM` (VAL_PRIM) — push primitive result
+- `OP_RETURN` — push return value to caller's stack
+- `OP_PUSH` — kept for compatibility, duplicates acc to stack
 
-These prevent acc-clobbering in `stinput p g[...] p` and `a[...]0 g[...] p`
-patterns. Hand-written test bytecode (28 built-in + self-hosting) uses explicit
-`u` and is NOT affected.
+**Opcodes that pop from stack:**
+- `OP_JMPF` — pops condition from stack
+- `OP_LET` — pops value from stack (binds to env)
+- `OP_APPLY` / `OP_APPTERM` — pop function from stack top, then args up to mark
 
-**Remaining gap:** deeper patterns in `shen.read-loop`, `shen.evaluate-lineread`,
-and the property-vector system still have issues (pre-existing ZINC convention mismatches).
-Full ZINC convention alignment would require making
-OP_GLOBAL/ACCESS/NUMBER push to stack and removing redundant `u` from all
-hand-written tests.
+**Compiler changes:**
+- `shen/zinc.shen` (`zinc-c` and `zinc-t`): removed all `intersperse [push]`
+  and explicit `[push]` emissions. Multi-arg primitives and function calls
+  now emit bare operand sequences, relying on auto-push.
+
+**Bundle recompiled:** `globals.csexp` rebuilt with modified zinc.shen.
+All bundled closures now use push semantics natively.
 
 ## REPL
 

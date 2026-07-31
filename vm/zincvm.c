@@ -1415,14 +1415,14 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         switch (in->op) {
         case OP_NUMBER: case OP_STRING: case OP_SYMBOL: case OP_BOOLEAN:
             acc = in->operand;
+            va_push(&stack, acc);
             pc++; break;
         case OP_PRIM: {
-            /* ZINC [prim X] executes primitive X with args from stack + acc.
-               Push acc so binary primitives find both args on the stack. */
+            /* ZINC [prim X]: args already on stack (auto-pushed by loads).
+               Execute primitive, push result. */
             const char *pn = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
-            
-            va_push(&stack, acc);
             if (exec_primitive(pn, &acc, &stack) < 0) goto done;
+            va_push(&stack, acc);
             if (trace_counter >= 0 && trace_counter < trace_limit + 5) {
                 fprintf(stderr, "    -> acc after prim %s: ", pn);
                 print_value(acc); fprintf(stderr, " (tag=%d)\n", acc.tag);
@@ -1449,21 +1449,15 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             break;
         }
         case OP_APPLY: {
+            /* Standard ZINC: function is auto-pushed on stack top.
+               Pop it, then collect args up to the mark. */
+            while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
+                va_pop(&stack);
+            if (stack.len > 0) acc = va_pop(&stack);  /* pop function */
             if (acc.tag == VAL_LAMBDA) {
                 check_closure(acc, "APPLY");
-                /* Standard ZINC: pop all args from stack (up to the
-                   intentional pushmark), push them into the callee's
-                   environment.  The callee shares the caller's stack
-                   so OP_GRAB can pop remaining args from it.
-
-                   Stack layout: [... intentional-mark, argN, ..., arg1]
-                   (ZINC RTL: rightmost arg pushed first, leftmost last.)
-                   After failed pattern matches there may be stale marks
-                   on top; skip those first. */
-                while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
-                    va_pop(&stack);
-
-                /* Collect all non-mark args (stop at the mark) */
+                /* Collect all non-mark args (stop at the mark).
+                   Stale marks and function already popped above. */
                 int nargs = 0;
                 Value argbuf[64];
                 while (stack.len > 0 && va_peek(&stack).tag != VAL_MARK) {
@@ -1500,9 +1494,11 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
                 pc = 0;
             } else if (acc.tag == VAL_PRIM) {
+                /* Function already popped; pop mark before args if present */
                 if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) va_pop(&stack);
                 const char *pn = acc.prim.name;
                 if (exec_primitive(pn, &acc, &stack) < 0) goto done;
+                va_push(&stack, acc);
                 pc++;
             } else {
                 fprintf(stderr, "runtime: apply non-callable tag=%d", acc.tag);
@@ -1526,34 +1522,48 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
                 va_free(&stack);
                 stack = cf->stack;
+                va_push(&stack, acc);  /* push return value to caller stack */
             } else goto done;
             break;
         }
         case OP_ACCESS:
             acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len, pc, cur_code, cur_len);
+            va_push(&stack, acc);
             pc++; break;
         case OP_GLOBAL: {
             const char *nm = (in->operand.tag == VAL_SYMBOL) ? in->operand.sym.name : "";
             acc = global_get(nm);
+            va_push(&stack, acc);
             pc++; break;
         }
-        case OP_LET: env_push(&env, &env_len, &env_cap, acc); pc++; break;
+        case OP_LET: {
+            Value v = (stack.len > 0) ? va_pop(&stack) : acc;
+            env_push(&env, &env_len, &env_cap, v);
+            pc++; break;
+        }
         case OP_ENDLET: if (env_len > 0) env_pop(&env, &env_len); pc++; break;
         case OP_JMP: pc = in->jmp_target; break;
-        case OP_JMPF:
-            if (acc.tag == VAL_BOOLEAN && !acc.boolean) pc = in->jmp_target; else pc++; break;
+        case OP_JMPF: {
+            Value cond = (stack.len > 0) ? va_pop(&stack) : acc;
+            if (!(cond.tag == VAL_BOOLEAN && !cond.boolean)) pc++;
+            else pc = in->jmp_target;
+            break;
+        }
         case OP_CUR: {
             /* val_lambda now GC-allocates its own env copy */
             acc = val_lambda(in->closure_code, in->closure_len, env, env_len);
+            va_push(&stack, acc);
             pc++; break;
         }
         case OP_APPTERM: {
+            /* Standard ZINC: pop function from stack top, then args */
+            while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
+                va_pop(&stack);
+            if (stack.len > 0) acc = va_pop(&stack);  /* pop function */
             if (acc.tag == VAL_LAMBDA) {
                 check_closure(acc, "APPTERM");
                 if (stack.len <= 0) { fprintf(stderr, "runtime: appterm empty stack\n"); goto done; }
-                /* Pop accumulated marks before args, then pop all args */
-                while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
-                    va_pop(&stack);
+                /* Collect non-mark args (function and stale marks already popped) */
                 int nargs = 0;
                 Value argbuf[64];
                 while (stack.len > 0 && va_peek(&stack).tag != VAL_MARK) {
@@ -1577,9 +1587,11 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
                 pc = 0; break;
             } else if (acc.tag == VAL_PRIM) {
+                /* Function already popped; pop mark before args if present */
                 if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) va_pop(&stack);
                 const char *pn = acc.prim.name;
                 if (exec_primitive(pn, &acc, &stack) < 0) goto done;
+                va_push(&stack, acc);
                 pc++; break;
             } else {
                 fprintf(stderr, "runtime: appterm non-lambda\n"); goto done;
@@ -1879,23 +1891,23 @@ int main(int argc, char **argv) {
 
                 /* Test 1: (+ 1 2) through bundled + closure */
                 printf("--- Test 1: (+ 1 2) via bundled + ---\n");
-                run_test("add", "(mn[1:n]2un[1:n]1ug[1:s]+p)", 0);
+                run_test("add", "(mn[1:n]2n[1:n]1g[1:s]+p)", 0);
 
                 /* Test 2: (reverse [1 2 3]) through bundled reverse closure */
                 printf("--- Test 2: (reverse [1 2 3]) via bundled reverse ---\n");
                 run_test("reverse",
-                         "(mg[11:s]*test-list*ug[7:s]reversep)", 0);
+                         "(mg[11:s]*test-list*g[7:s]reversep)", 0);
 
                 /* Test 3: (factorial 5) through bundled factorial closure */
                 printf("--- Test 3: (factorial 5) via bundled factorial ---\n");
                 run_test("factorial",
-                         "(mn[1:n]5ug[9:s]factorialp)", 0);
+                         "(mn[1:n]5g[9:s]factorialp)", 0);
 
                 /* Test 4: raw.open / raw.close — prove raw primitives bypass
                    safe wrapper shadowing, enabling read-compile-eval round-trip */
                 printf("--- Test 4: (raw.open \"Makefile\" in) -> (raw.close stream) ---\n");
                 run_test("raw-io",
-                         "(s[2:s]inuS[8:S]Makefileumg[8:s]raw.openpumg[9:s]raw.closep)", 0);
+                         "(s[2:s]inS[8:S]Makefilemg[8:s]raw.openpmg[9:s]raw.closep)", 0);
 
                 /* Test 5: eval-kl [+ 1 2] through the marshal chain.
                    The C VM marshals the native Value to tagged form,
@@ -1913,7 +1925,7 @@ int main(int argc, char **argv) {
                 ev_list = val_cons(plus_sym, ev_list);             /* [+ 1 2] */
                 global_set("*ev1*", ev_list);
                 run_test("eval-kl-add",
-                         "(mg[5:s]*ev1*ug[11:s]raw.eval-klp)", 0);
+                         "(mg[5:s]*ev1*g[11:s]raw.eval-klp)", 0);
 
                 /* Diagnostic: dump bytecode of toplevel-interp and interp */
                 printf("--- Bytecode Dump ---\n");
@@ -2059,7 +2071,7 @@ int main(int argc, char **argv) {
                 /* Test 6: bundled read-file-as-string — exercises file I/O chain */
                 printf("--- Test 6: bundled read-file-as-string via apply ---\n");
                 run_test("rfas-via-apply",
-                         "(mS[8:S]Makefileug[19:s]read-file-as-stringp)", 0);
+                         "(mS[8:S]Makefileg[19:s]read-file-as-stringp)", 0);
 
                 /* shen.initialise MUST run before any test that uses macroexpand
                    (test 7+).  It sets up *macros*, *property-vector*, etc.
@@ -2068,52 +2080,52 @@ int main(int argc, char **argv) {
                 printf("\n--- shen.initialise smoke test ---\n");
                 fflush(stdout);
                 run_test("init-only",
-                         "(mn[1:n]0ug[15:s]shen.initialisep)", 0);
+                         "(mn[1:n]0g[15:s]shen.initialisep)", 0);
                 printf("-- init done --\n"); fflush(stdout);
 
                 /* Smoke test: macroexpand on [+ 1 2] — verifies = cons==cons */
                 run_test("macroexpand-smoke",
-                         "(mg[5:s]*ev1*ug[11:s]macroexpandp)", 0);
+                         "(mg[5:s]*ev1*g[11:s]macroexpandp)", 0);
 
                 /* Test 7b: read-from-string — full read-compile-macroexpand pipeline.
                    Currently returns [] instead of [[+ 1 2]] — compile/process-sexprs
                    pipeline has remaining issues beyond the macroexpand fix. */
                 printf("--- Test 7b: read-from-string ---\n");
                 run_test("read-from-string",
-                         "(S[7:S](+ 1 2)ug[16:s]read-from-stringp)", 0);
+                         "(S[7:S](+ 1 2)g[16:s]read-from-stringp)", 0);
 
                 /* Test 7tc: disable type checker */
                 printf("--- Test 7tc: disable *tc* ---\n");
                 run_test("tc-off",
-                         "(mb[5:b]falseus[4:s]*tc*ug[3:s]setp)", 0);
+                         "(mb[5:b]falses[4:s]*tc*g[3:s]setp)", 0);
 
                 /* Test 7: bundled load — exercises full read-compile chain */
                 printf("--- Test 7: bundled load via apply ---\n");
                 run_test("load-via-apply",
-                         "(mS[17:S]test_fixture.shenug[4:s]loadp)", 0);
+                         "(mS[17:S]test_fixture.sheng[4:s]loadp)", 0);
 
                 /* Test 7c: read via string stream — (read (open Str in)) */
 
                 /* Re-enable type checker for util.shen which uses type annotations */
                 printf("--- Test 8tc: re-enable *tc* ---\n");
                 run_test("tc-on",
-                         "(mb[4:b]trueus[4:s]*tc*ug[3:s]setp)", 0);
+                         "(mb[4:b]trues[4:s]*tc*g[3:s]setp)", 0);
 
                 /* Test 8: load a real Shen file — shen/util.shen */
                 printf("--- Test 8: bundled load shen/util.shen ---\n");
                 run_test("load-util",
-                         "(mS[14:S]shen/util.shenug[4:s]loadp)", 0);
+                         "(mS[14:S]shen/util.sheng[4:s]loadp)", 0);
 
 
                 /* Test 9: call (id 42) from loaded util.shen — verifies functions work */
                 printf("--- Test 9: call (id 42) from loaded util.shen ---\n");
                 run_test("id-from-util",
-                         "(mn[2:n]42ug[2:s]idp)", 0);
+                         "(mn[2:n]42g[2:s]idp)", 0);
 
                 /* Test 10: call (newvar) from loaded util.shen — verifies gensym works */
                 printf("--- Test 10: call (newvar) from loaded util.shen ---\n");
                 run_test("newvar-from-util",
-                         "(ug[6:s]newvarp)", 0);
+                         "(g[6:s]newvarp)", 0);
 
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
@@ -2174,7 +2186,7 @@ int main(int argc, char **argv) {
                 fflush(stdout);
                 if (getenv("ZINCVM_RUN_REPL")) {
                     run_test("repl-smoke",
-                             "(mn[1:n]0P[9:s]emptylistus[7:s]successP[4:s]consug[9:s]shen.replp)", 0);
+                             "(mn[1:n]0P[9:s]emptylists[7:s]successP[4:s]consg[9:s]shen.replp)", 0);
                 } else {
                     printf("  (skipped — set ZINCVM_RUN_REPL=1 to run)\n");
                 }
@@ -2190,55 +2202,55 @@ int main(int argc, char **argv) {
 
     printf("=== ZINC Bytecode VM with 37 Primitives ===\n\n");
 
-    run_test("1. [+ 1 2]",              "(mn[1:n]2un[1:n]1ug[1:s]+p)", 1);
+    run_test("1. [+ 1 2]",              "(mn[1:n]2n[1:n]1g[1:s]+p)", 1);
     run_test("2. [lambda X X]",         "(c(a[1:n]0v))", 1);
     run_test("3. [let X 1 X]",          "(n[1:n]1ea[1:n]0d)", 1);
-    run_test("4. [- 1 2] (expect -1)",  "(mn[1:n]2un[1:n]1ug[1:s]-p)", 1);
-    run_test("5. [* 3 4] (expect 12)",  "(mn[1:n]4un[1:n]3ug[1:s]*p)", 1);
-    run_test("6. [/ 10 2] (expect 5)",  "(mn[1:n]2un[2:n]10ug[1:s]/p)", 1);
-    run_test("7. [= 1 1] (expect true)","(mn[1:n]1un[1:n]1ug[1:s]=p)", 1);
-    run_test("8. [< 1 2] (expect true)","(mn[1:n]2un[1:n]1ug[1:s]<p)", 1);
-    run_test("9. [> 5 3] (expect true)","(mn[1:n]3un[1:n]5ug[1:s]>p)", 1);
-    run_test("10. [<= 2 2] (expect true)","(mn[1:n]2un[1:n]2ug[2:s]<=p)", 1);
-    run_test("11. [>= 5 3] (expect true)","(mn[1:n]3un[1:n]5ug[2:s]>=p)", 1);
-    run_test("12. [number? 42]",         "(mn[2:n]42ug[7:s]number?p)", 1);
-    run_test("13. [symbol? hello]",      "(ms[5:s]helloug[7:s]symbol?p)", 1);
-    run_test("14. [boolean? true]",      "(mb[4:b]trueug[8:s]boolean?p)", 1);
-    run_test("15. [string? \"hi\"]",     "(mS[2:S]hiug[7:s]string?p)", 1);
-    run_test("16. [string? 42] (expect false)", "(mn[2:n]42ug[7:s]string?p)", 1);
-    run_test("17. [cons 1 2]",           "(mn[1:n]2un[1:n]1ug[4:s]consp)", 1);
-    run_test("18. [cn \"hello\" \"world\"]", "(mS[5:S]worlduS[5:S]helloug[2:s]cnp)", 1);
-    run_test("19. [n->string 42] (expect *)",       "(mn[2:n]42ug[9:s]n->stringp)", 1);
-    run_test("20. [string->n \"42\"] (expect 52)",   "(mS[2:S]42ug[9:s]string->np)", 1);
-    run_test("21. [str hello]",          "(ms[5:s]helloug[3:s]strp)", 1);
-    run_test("22. [tlstr \"abc\"]",      "(mS[3:S]abcug[5:s]tlstrp)", 1);
-    run_test("23. [intern \"foo\"]",     "(mS[3:S]fooug[6:s]internp)", 1);
-    run_test("24. [= \"ab\" \"ab\"]",    "(mS[2:S]abuS[2:S]abug[1:s]=p)", 1);
-    run_test("25. [= 1 2] (expect false)","(mn[1:n]2un[1:n]1ug[1:s]=p)", 1);
-    run_test("26. simple-error caught",   "(mS[4:S]boomug[12:s]simple-errorp)", 1);
+    run_test("4. [- 1 2] (expect -1)",  "(mn[1:n]2n[1:n]1g[1:s]-p)", 1);
+    run_test("5. [* 3 4] (expect 12)",  "(mn[1:n]4n[1:n]3g[1:s]*p)", 1);
+    run_test("6. [/ 10 2] (expect 5)",  "(mn[1:n]2n[2:n]10g[1:s]/p)", 1);
+    run_test("7. [= 1 1] (expect true)","(mn[1:n]1n[1:n]1g[1:s]=p)", 1);
+    run_test("8. [< 1 2] (expect true)","(mn[1:n]2n[1:n]1g[1:s]<p)", 1);
+    run_test("9. [> 5 3] (expect true)","(mn[1:n]3n[1:n]5g[1:s]>p)", 1);
+    run_test("10. [<= 2 2] (expect true)","(mn[1:n]2n[1:n]2g[2:s]<=p)", 1);
+    run_test("11. [>= 5 3] (expect true)","(mn[1:n]3n[1:n]5g[2:s]>=p)", 1);
+    run_test("12. [number? 42]",         "(mn[2:n]42g[7:s]number?p)", 1);
+    run_test("13. [symbol? hello]",      "(ms[5:s]hellog[7:s]symbol?p)", 1);
+    run_test("14. [boolean? true]",      "(mb[4:b]trueg[8:s]boolean?p)", 1);
+    run_test("15. [string? \"hi\"]",     "(mS[2:S]hig[7:s]string?p)", 1);
+    run_test("16. [string? 42] (expect false)", "(mn[2:n]42g[7:s]string?p)", 1);
+    run_test("17. [cons 1 2]",           "(mn[1:n]2n[1:n]1g[4:s]consp)", 1);
+    run_test("18. [cn \"hello\" \"world\"]", "(mS[5:S]worldS[5:S]hellog[2:s]cnp)", 1);
+    run_test("19. [n->string 42] (expect *)",       "(mn[2:n]42g[9:s]n->stringp)", 1);
+    run_test("20. [string->n \"42\"] (expect 52)",   "(mS[2:S]42g[9:s]string->np)", 1);
+    run_test("21. [str hello]",          "(ms[5:s]hellog[3:s]strp)", 1);
+    run_test("22. [tlstr \"abc\"]",      "(mS[3:S]abcg[5:s]tlstrp)", 1);
+    run_test("23. [intern \"foo\"]",     "(mS[3:S]foog[6:s]internp)", 1);
+    run_test("24. [= \"ab\" \"ab\"]",    "(mS[2:S]abS[2:S]abg[1:s]=p)", 1);
+    run_test("25. [= 1 2] (expect false)","(mn[1:n]2n[1:n]1g[1:s]=p)", 1);
+    run_test("26. simple-error caught",   "(mS[4:S]boomg[12:s]simple-errorp)", 1);
     run_test("27. trap-error handler",
-        "(mc(mS[4:S]oopsug[12:s]simple-errorpv)"  /* body closure: simple-error "oops" */
-        "uc(S[6:S]caughtv)"                       /* handler closure: return "caught" */
-        "ug[10:s]trap-errorp)", 1);
-    run_test("28. [get-time unix]",      "(ms[4:s]unixug[8:s]get-timep)", 1);
+        "(mc(mS[4:S]oopsg[12:s]simple-errorpv)"  /* body closure: simple-error "oops" */
+        "c(S[6:S]caughtv)"                       /* handler closure: return "caught" */
+        "g[10:s]trap-errorp)", 1);
+    run_test("28. [get-time unix]",      "(ms[4:s]unixg[8:s]get-timep)", 1);
 
     /* Test that primitive type errors inside trap-error are caught by handler */
     run_test("29. trap-error catches value on non-symbol",
-        "(mc(mn[2:n]42ug[5:s]valuepv)"               /* body: (value 42) → error */
-        "uc(S[6:S]caughtv)"                            /* handler: return "caught" */
-        "ug[10:s]trap-errorp)", 1);
+        "(mc(mn[2:n]42g[5:s]valuepv)"               /* body: (value 42) → error */
+        "c(S[6:S]caughtv)"                            /* handler: return "caught" */
+        "g[10:s]trap-errorp)", 1);
     run_test("30. trap-error catches pos on bad types",
-        "(mc(mS[3:S]baduS[5:S]helloug[3:s]pospv)"    /* body: (pos "hello" "bad") → error */
-        "uc(S[6:S]caughtv)"
-        "ug[10:s]trap-errorp)", 1);
+        "(mc(mS[3:S]badS[5:S]hellog[3:s]pospv)"    /* body: (pos "hello" "bad") → error */
+        "c(S[6:S]caughtv)"
+        "g[10:s]trap-errorp)", 1);
     run_test("31. trap-error catches write-byte on non-output",
-        "(mc(mn[2:n]42un[2:n]65ug[10:s]write-bytepv)" /* body: (write-byte 65 42) → error */
-        "uc(S[6:S]caughtv)"
-        "ug[10:s]trap-errorp)", 1);
+        "(mc(mn[2:n]42n[2:n]65g[10:s]write-bytepv)" /* body: (write-byte 65 42) → error */
+        "c(S[6:S]caughtv)"
+        "g[10:s]trap-errorp)", 1);
     run_test("32. trap-error catches <-address bad types",
-        "(mc(mn[2:n]0un[2:n]0ug[10:s]<-addresspv)"    /* body: (<-address 0 0) → error */
-        "uc(S[6:S]caughtv)"
-        "ug[10:s]trap-errorp)", 1);
+        "(mc(mn[1:n]0n[1:n]0g[9:s]<-addresspv)"    /* body: (<-address 0 0) → error */
+        "c(S[6:S]caughtv)"
+        "g[10:s]trap-errorp)", 1);
 
     printf("=== All 32 tests done ===\n");
     return 0;
