@@ -606,14 +606,16 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            form lists like [[define newvar ...], ...] as the keyword itself. */
         else if (a1.tag == VAL_CONS && a2.tag == VAL_SYMBOL) {
             const char *sym = a2.sym.name;
-            /* Skip hack for form-head keywords that cause false matches */
             if (strcmp(sym, "define") == 0 || strcmp(sym, "defun") == 0 ||
                 strcmp(sym, "lambda") == 0 || strcmp(sym, "let") == 0 ||
                 strcmp(sym, "cond") == 0 || strcmp(sym, "if") == 0) {
                 *acc = val_boolean(false);
             } else {
-                *acc = val_boolean(a1.cons.car->tag == VAL_SYMBOL &&
-                                   strcmp(a1.cons.car->sym.name, sym) == 0);
+                int match = (a1.cons.car->tag == VAL_SYMBOL &&
+                             strcmp(a1.cons.car->sym.name, sym) == 0);
+                if (match) fprintf(stderr, "[HACK=] CONS(car='%s')=='%s'\n",
+                                   a1.cons.car->sym.name, sym);
+                *acc = val_boolean(match);
             }
         }
         else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_CONS) {
@@ -623,8 +625,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
                 strcmp(sym, "cond") == 0 || strcmp(sym, "if") == 0) {
                 *acc = val_boolean(false);
             } else {
-                *acc = val_boolean(a2.cons.car->tag == VAL_SYMBOL &&
-                                   strcmp(a2.cons.car->sym.name, sym) == 0);
+                int match = (a2.cons.car->tag == VAL_SYMBOL &&
+                             strcmp(a2.cons.car->sym.name, sym) == 0);
+                if (match) fprintf(stderr, "[HACK=] '%s'==CONS(car='%s')\n",
+                                   sym, a2.cons.car->sym.name);
+                *acc = val_boolean(match);
             }
         }
         /* fail is registered as VAL_PRIM so it can be both applied (error)
@@ -982,15 +987,9 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         return 0;
     }
     if (strcmp(name, "write-byte") == 0) {
-        /* ZINC RTL: (write-byte byte stream) — byte pushed first (rightmost),
-           stream pushed last (leftmost, on top).  First pop = stream, second = byte.
-           Use *stoutput* directly for the stream to avoid stack corruption issues. */
+        /* RTL: (write-byte Byte Stream) — Stream pushed first (bottom), Byte last (top). */
         Value byte = va_pop(stack);
-        Value s = global_get("*stoutput*");
-        if (s.tag != VAL_STREAM || s.stream.is_input) {
-            /* Fall back to stack if *stoutput* isn't available */
-            s = va_pop(stack);
-        }
+        Value s    = va_pop(stack);
         if (s.tag != VAL_STREAM || s.stream.is_input) {
             if (vm_in_trap_error) {
                 vm_error_pending = 1; vm_error_val = val_error("write-byte on non-output");
@@ -1463,6 +1462,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                     cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                     env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
                     stack = cf->stack;
+                    va_push(&stack, acc);  /* push return value to caller stack */
                 } else goto done;
             } else if (stack.len > 0) { env_push(&env, &env_len, &env_cap, va_pop(&stack)); pc++; }
             else pc++;
@@ -2222,6 +2222,12 @@ int main(int argc, char **argv) {
 
     printf("=== ZINC Bytecode VM with 37 Primitives ===\n\n");
 
+    /* CONVENTION: Hand-written bytecode MUST push args in RTL order
+       (rightmost Shen arg pushed first, leftmost arg pushed last/on top).
+       Zinc-c compiler output follows this — the C VM pops top-first.
+       For (f A B): emit "pushmark, B, A, global f, apply"
+       NOT:         "pushmark, A, B, global f, apply"                     */
+
     run_test("1. [+ 1 2]",              "(mn[1:n]2n[1:n]1g[1:s]+p)", 1);
     run_test("2. [lambda X X]",         "(c(a[1:n]0v))", 1);
     run_test("3. [let X 1 X]",          "(n[1:n]1ea[1:n]0d)", 1);
@@ -2248,28 +2254,30 @@ int main(int argc, char **argv) {
     run_test("24. [= \"ab\" \"ab\"]",    "(mS[2:S]abS[2:S]abg[1:s]=p)", 1);
     run_test("25. [= 1 2] (expect false)","(mn[1:n]2n[1:n]1g[1:s]=p)", 1);
     run_test("26. simple-error caught",   "(mS[4:S]boomg[12:s]simple-errorp)", 1);
+    /* RTL: (trap-error Body Handler) — Handler pushed first, Body last */
     run_test("27. trap-error handler",
-        "(mc(mS[4:S]oopsg[12:s]simple-errorpv)"  /* body closure: simple-error "oops" */
-        "c(S[6:S]caughtv)"                       /* handler closure: return "caught" */
+        "(mc(S[6:S]caughtv)"                       /* handler pushed FIRST (bottom) */
+        "c(mS[4:S]oopsg[12:s]simple-errorpv)"     /* body pushed LAST (top) */
         "g[10:s]trap-errorp)", 1);
     run_test("28. [get-time unix]",      "(ms[4:s]unixg[8:s]get-timep)", 1);
 
-    /* Test that primitive type errors inside trap-error are caught by handler */
+    /* Test that primitive type errors inside trap-error are caught by handler.
+       RTL: handler pushed FIRST (bottom), body pushed LAST (top). */
     run_test("29. trap-error catches value on non-symbol",
-        "(mc(mn[2:n]42g[5:s]valuepv)"               /* body: (value 42) → error */
-        "c(S[6:S]caughtv)"                            /* handler: return "caught" */
+        "(mc(S[6:S]caughtv)"                           /* handler pushed FIRST */
+        "c(mn[2:n]42g[5:s]valuepv)"                   /* body pushed LAST */
         "g[10:s]trap-errorp)", 1);
     run_test("30. trap-error catches pos on bad types",
-        "(mc(mS[3:S]badS[5:S]hellog[3:s]pospv)"    /* body: (pos "hello" "bad") → error */
-        "c(S[6:S]caughtv)"
+        "(mc(S[6:S]caughtv)"                           /* handler pushed FIRST */
+        "c(mS[3:S]badS[5:S]hellog[3:s]pospv)"        /* body pushed LAST */
         "g[10:s]trap-errorp)", 1);
     run_test("31. trap-error catches write-byte on non-output",
-        "(mc(mn[2:n]42n[2:n]65g[10:s]write-bytepv)" /* body: (write-byte 65 42) → error */
-        "c(S[6:S]caughtv)"
+        "(mc(S[6:S]caughtv)"                           /* handler pushed FIRST */
+        "c(mn[2:n]42n[2:n]65g[10:s]write-bytepv)"    /* body pushed LAST */
         "g[10:s]trap-errorp)", 1);
     run_test("32. trap-error catches <-address bad types",
-        "(mc(mn[1:n]0n[1:n]0g[9:s]<-addresspv)"    /* body: (<-address 0 0) → error */
-        "c(S[6:S]caughtv)"
+        "(mc(S[6:S]caughtv)"                           /* handler pushed FIRST */
+        "c(mn[1:n]0n[1:n]0g[9:s]<-addresspv)"        /* body pushed LAST */
         "g[10:s]trap-errorp)", 1);
 
     printf("=== All 32 tests done ===\n");

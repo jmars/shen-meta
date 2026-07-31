@@ -80,9 +80,8 @@
   _ -> (simple-error "error-to-string: arg must be an error"))
 
 (define safe.trap-error
-  T C -> (let R (%% trap-error T)
-          (if (%% error? R) (C R) R)) where (and (%% function? T) (%% function? C))
-  _ _ -> (simple-error "trap-error: second arg must be a function"))
+  T C -> (%% trap-error T C) where (and (%% function? T) (%% function? C))
+  _ _ -> (simple-error "trap-error: args must be functions"))
 
 (define safe.=
   A B -> (%% = A B))
