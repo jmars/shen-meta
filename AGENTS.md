@@ -219,14 +219,20 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
 
 ## ZINC argument convention
 
-- **ZINC evaluates args RIGHT-TO-LEFT**: rightmost Shen arg pushed first,
-  leftmost pushed last (on top of stack)
-- All two-arg C primitives pop `a1` (top = rightmost) then `a2` (below =
-  leftmost). E.g., `cons` does `val_cons(a1, a2)`, `-` does `a1 - a2`
+- **ZINC evaluates args RIGHT-TO-LEFT**: rightmost Shen arg pushed first
+  (ends at stack bottom), leftmost pushed last (on top of stack)
+- All two-arg C primitives pop `a1` (top = leftmost arg) then `a2` (below =
+  rightmost arg). E.g., for `(- 5 3)`: stack `[3, 5]`, pop a1=5, a2=3,
+  compute `a1 - a2` = 5-3 = 2. `cons` does `val_cons(a1, a2)` = cons(left, right).
 - `open` was the exception — had `dir`/`path` swapped, causing "open bad
   types" in bundled `load`. Fixed: pop `path` first, then `dir`
 - **When writing bytecode by hand**, push args in right-to-left order:
   `(s[2:s]in u S[8:S]Makefile u m g[8:s]raw.open p)` for `(open "Makefile" in)`
+- **CRITICAL**: Hand-written bytecode MUST use RTL order. The VM pops
+  top-first (leftmost arg). Writing LTR (natural reading order) works
+  for commutative ops (+, =, cons-as-pair) but silently produces wrong
+  results for non-commutative ops (-, /, trap-error, write-byte).
+  This is the #1 recurring bug pattern. See tests 27-32 for examples.
 - Built-in tests use `m` (pushmark) before args; mark ends up at stack bottom,
   not popped by `OP_APPLY` with `VAL_PRIM` (mark must be on top to be popped)
 
