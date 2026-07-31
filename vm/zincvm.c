@@ -2239,8 +2239,9 @@ int main(int argc, char **argv) {
 
                 /* REPL smoke test — shen.initialise already ran above.
                    shen.repl with (cons success []) as arg.
-                   Gated behind ZINCVM_RUN_REPL env var; REPL currently
-                   segfaults during Shen's read-eval-print loop. */
+                   Gated behind ZINCVM_RUN_REPL env var.
+                   REPL now runs! Prints prompts, reads stdin. EOF handling
+                   shows "empty stream" (pre-existing, not a crash). */
                 printf("\n--- REPL smoke test ---\n");
                 fflush(stdout);
                 if (getenv("ZINCVM_RUN_REPL")) {
