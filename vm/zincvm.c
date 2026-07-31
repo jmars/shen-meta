@@ -2133,8 +2133,7 @@ int main(int argc, char **argv) {
                          "(mg[5:s]*ev1*g[11:s]macroexpandp)", 0);
 
                 /* Test 7b: read-from-string — full read-compile-macroexpand pipeline.
-                   Currently returns [] instead of [[+ 1 2]] — compile/process-sexprs
-                   pipeline has remaining issues beyond the macroexpand fix. */
+                   Currently returns [[[+ 1] 2]] instead of [[+ 1 2]]. */
                 printf("--- Test 7b: read-from-string ---\n");
                 run_test("read-from-string",
                          "(S[7:S](+ 1 2)g[16:s]read-from-stringp)", 0);
