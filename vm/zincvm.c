@@ -465,12 +465,11 @@ static int deep_equal(Value a, Value b) {
                                  memcmp(a.str.data, b.str.data, a.str.len) == 0;
         case VAL_SYMBOL: {
             if (strcmp(a.sym.name, b.sym.name) == 0) return 1;
-            /* Handle shen. prefix mismatch: the Shen module system
-               prefixes symbols during Shen→KLambda compilation.
-               Within the shen package, shen.<x> and <x> are the
-               same logical symbol.  Needed because .kl files have
-               shen.define baked in while pattern literals in bundled
-               bytecode use bare define. */
+            /* Handle shen. prefix mismatch: all bundled code is in the
+               shen package.  .kl files have shen.define baked in, but
+               pattern literals in bytecode use bare define since they
+               were compiled within the shen package context.
+               Only strip shen. — cross-package prefixes must NOT match. */
             const char *an = a.sym.name;
             const char *bn = b.sym.name;
             if (strncmp(an, "shen.", 5) == 0 && strcmp(an + 5, bn) == 0) return 1;
