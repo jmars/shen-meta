@@ -297,6 +297,22 @@ explicit `u` (PUSH) instructions — it was modified to rely on auto-push.
 **Bundle recompiled:** `globals.csexp` rebuilt with modified zinc.shen.
 All bundled closures now use push semantics natively.
 
+### Metacircular interp auto-push
+
+The metacircular `interp` function (97 rules in `shen/interp.shen`) was updated
+to match standard ZINC auto-push semantics. Value-producing instructions
+(`number`, `string`, `symbol`, `boolean`, `access`, `global`, `cur`) now push
+the old accumulator to the stack before setting the new value:
+
+```
+[number N | C] A E S R  →  (interp C [number N] E [A | S] R)
+```
+
+This was needed because `zinc-c` no longer emits explicit `push` between
+value instructions — the metacircular interpreter must handle auto-push
+internally.  Without this, multi-arg primitive calls like `(+ 1 2)` would
+lose the first argument during evaluation through the eval-kl chain.
+
 ## REPL
 
 - `stinput`/`stoutput` C primitives added — return stdin/stdout VAL_STREAM.
