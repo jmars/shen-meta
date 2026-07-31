@@ -546,9 +546,24 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         Value a = va_pop(stack); *acc = val_boolean(a.tag == VAL_STREAM); return 0;
     }
     if (strcmp(name, "variable?") == 0) {
-        /* KLambda variable? — true for symbols that look like ZINC variables */
+        /* Shen variable: first char uppercase A-Z, rest alphanumeric + misc chars.
+           Misc: ` = * / + _ ? $ ! @ ~ . > < & % ' #  (matching shen.misc?) */
         Value a = va_pop(stack);
-        *acc = val_boolean(a.tag == VAL_SYMBOL); return 0;
+        if (a.tag != VAL_SYMBOL) { *acc = val_boolean(0); return 0; }
+        const char *s = a.sym.name;
+        if (!s[0] || s[0] < 'A' || s[0] > 'Z') { *acc = val_boolean(0); return 0; }
+        for (int i = 1; s[i]; i++) {
+            int c = (unsigned char)s[i];
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9')) continue;
+            /* shen.misc? chars: ` = * / + _ ? $ ! @ ~ . > < & % ' # */
+            if (c == '`' || c == '=' || c == '*' || c == '/' || c == '+' ||
+                c == '_' || c == '?' || c == '$' || c == '!' || c == '@' ||
+                c == '~' || c == '.' || c == '>' || c == '<' || c == '&' ||
+                c == '%' || c == '\'' || c == '#') continue;
+            *acc = val_boolean(0); return 0;
+        }
+        *acc = val_boolean(1); return 0;
     }
 
     /* --- KLambda tuple ops --- */
@@ -2133,7 +2148,7 @@ int main(int argc, char **argv) {
                          "(mg[5:s]*ev1*g[11:s]macroexpandp)", 0);
 
                 /* Test 7b: read-from-string — full read-compile-macroexpand pipeline.
-                   Currently returns [[[+ 1] 2]] instead of [[+ 1 2]]. */
+                   Result: [[+ 1 2]] — correct! Fixed by variable? C primitive fix. */
                 printf("--- Test 7b: read-from-string ---\n");
                 run_test("read-from-string",
                          "(S[7:S](+ 1 2)g[16:s]read-from-stringp)", 0);
