@@ -701,7 +701,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "str") == 0) {
         Value a = va_pop(stack);
         if (a.tag == VAL_SYMBOL) *acc = val_string(a.sym.name, strlen(a.sym.name));
-        else if (a.tag == VAL_STRING) *acc = a; /* already a string, return as-is */
+        else if (a.tag == VAL_STRING) *acc = a;
         else if (a.tag == VAL_NUMBER) { char buf[64]; int len = snprintf(buf, sizeof(buf), "%ld", a.number); *acc = val_string(buf, len); }
         else *acc = val_string("", 0);
         return 0;
@@ -726,10 +726,18 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             fprintf(stderr, "runtime: pos on bad types\n"); return -1;
         }
         /* Shen: (pos Str N) returns the single character at index N.
-           Out of bounds → empty string. (pos "hello" 1) → "e" */
+           Out of bounds → empty string. But when inside trap-error,
+           OOB must trigger an error so that callers (e.g. shen.string->byte)
+           can catch it and return shen.eos. Without this, shen.write-chars
+           loops forever writing NUL bytes. */
         int pl = (int)a2.number;
-        if (pl < 0 || pl >= a1.str.len) *acc = val_string("", 0);
-        else *acc = val_string(a1.str.data + pl, 1);
+        if (pl < 0 || pl >= a1.str.len) {
+            if (vm_in_trap_error) {
+                vm_error_pending = 1; vm_error_val = val_error("pos out of bounds");
+                longjmp(vm_error_jmp, 1);
+            }
+            *acc = val_string("", 0);
+        } else *acc = val_string(a1.str.data + pl, 1);
         return 0;
     }
 
