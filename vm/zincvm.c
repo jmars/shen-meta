@@ -463,19 +463,7 @@ static int deep_equal(Value a, Value b) {
         case VAL_NUMBER:  return a.number == b.number;
         case VAL_STRING:  return a.str.len == b.str.len &&
                                  memcmp(a.str.data, b.str.data, a.str.len) == 0;
-        case VAL_SYMBOL: {
-            if (strcmp(a.sym.name, b.sym.name) == 0) return 1;
-            /* Handle shen. prefix mismatch: all bundled code is in the
-               shen package.  .kl files have shen.define baked in, but
-               pattern literals in bytecode use bare define since they
-               were compiled within the shen package context.
-               Only strip shen. — cross-package prefixes must NOT match. */
-            const char *an = a.sym.name;
-            const char *bn = b.sym.name;
-            if (strncmp(an, "shen.", 5) == 0 && strcmp(an + 5, bn) == 0) return 1;
-            if (strncmp(bn, "shen.", 5) == 0 && strcmp(bn + 5, an) == 0) return 1;
-            return 0;
-        }
+        case VAL_SYMBOL:   return strcmp(a.sym.name, b.sym.name) == 0;
         case VAL_BOOLEAN: return a.boolean == b.boolean;
         case VAL_NIL:     return 1;
         case VAL_CONS:
@@ -640,13 +628,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             if (strcmp(sym, "{") == 0) {
                 *acc = val_boolean(false);
             } else if (a2.cons.car->tag == VAL_SYMBOL) {
-                const char *car_name = a2.cons.car->sym.name;
-                int match = (strcmp(sym, car_name) == 0);
-                if (!match && strncmp(car_name, "shen.", 5) == 0)
-                    match = (strcmp(sym, car_name + 5) == 0);
-                if (!match && strncmp(sym, "shen.", 5) == 0)
-                    match = (strcmp(sym + 5, car_name) == 0);
-                *acc = val_boolean(match);
+                *acc = val_boolean(strcmp(sym, a2.cons.car->sym.name) == 0);
             } else {
                 *acc = val_boolean(false);
             }
