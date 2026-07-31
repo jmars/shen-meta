@@ -80,16 +80,23 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 - **`=`** now supports deep structural equality for cons cells via `deep_equal()`.
   Without this, `(= [+ 1 2] [+ 1 2])` returns false, breaking `macroexpand-h`'s
   fixed-point check.  Depth-limited to 1000 for cycle safety.
-- **`=` symbol comparison** handles `shen.` prefix mismatch: `shen.define` == `define`,
-  `shen.cons` == `cons`, etc.  This is critical because `packaged?` in the bundled
-  Shen code uses the `(package ...)` internal representation that our C VM doesn't
-  support (we use plain VAL_SYMBOL).  Without this, pattern matching in `find-arities`
-  and other bundled code fails when forms have the `shen.` prefix.
-- **`=` cons-vs-symbol** comparison (e.g., `(= define (hd X))` where `(hd X)` is a cons):
-  MUST handle the `shen.` prefix on the cons's car.  **Exception**: `{` always returns
-  false for `(= { some-cons)` — this prevents false matches on type annotations like
-  `{A --> B}` in `find-arities` case 1.  Do NOT add more keywords to this exclusion
-  list without thorough testing.
+- **`=` symbol comparison** is strict strcmp — no prefix hack.  The Shen package
+  system's `package-symbols` / `internal?` / `sysfunc?` chain keeps external symbols
+  (like `define`, `defun`, `lambda`, `let`, `cond`, `if`) bare during `unpackage`.
+  This requires `shen.initialise` to have run — it sets up `shen.external-symbols`
+  in the property vector, which `sysfunc?` checks.  Without `shen.initialise`,
+  `define` gets incorrectly prefixed to `shen.define` and pattern matching fails.
+- **`=` cons-vs-symbol** comparison (e.g., `(= hd(Form) "number")`): compares the
+  cons's car to the symbol.  This is a flat-access pattern bug workaround — the
+  bundled zinc-c generates one fewer `hd` than needed for nested pattern matching.
+  **Exception**: `{` always returns false for `(= { some-cons)` — prevents false
+  matches on type annotations like `{A --> B}`.  Also blocks `define`/`defun`/
+  `lambda`/`let`/`cond`/`if` from matching via cons-vs-symbol (they're Shen form-
+  head keywords, not flat pattern tags).
+- **`%%` in normalize**: ALL primitives must use `%%` prefix in normalize.shen.
+  `[set S E]` was missing `%%`, causing `set` to go through `global set` + `apply`
+  (safe wrapper) instead of `prim set` (direct C primitive).  This broke
+  `shen.initialise`'s deeply nested `do` chain.  Always use `[%% set S T]`.
 - `n->string N`: number → single-character string via ASCII code. `(n->string 40)` → `"("`
 - `string->n S`: first character → ASCII code. `(string->n "(")` → `40`
 - `pos S N`: single character at index N (0-based). OOB → `""`. `(pos "hello" 1)` → `"e"`
