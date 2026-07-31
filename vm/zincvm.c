@@ -606,30 +606,28 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            form lists like [[define newvar ...], ...] as the keyword itself. */
         else if (a1.tag == VAL_CONS && a2.tag == VAL_SYMBOL) {
             const char *sym = a2.sym.name;
+            /* Skip hack for form-head keywords — they cause false
+               matches on multi-element form lists */
             if (strcmp(sym, "define") == 0 || strcmp(sym, "defun") == 0 ||
                 strcmp(sym, "lambda") == 0 || strcmp(sym, "let") == 0 ||
                 strcmp(sym, "cond") == 0 || strcmp(sym, "if") == 0) {
                 *acc = val_boolean(false);
             } else {
-                int match = (a1.cons.car->tag == VAL_SYMBOL &&
-                             strcmp(a1.cons.car->sym.name, sym) == 0);
-                if (match) fprintf(stderr, "[HACK=] CONS(car='%s')=='%s'\n",
-                                   a1.cons.car->sym.name, sym);
-                *acc = val_boolean(match);
+                *acc = val_boolean(a1.cons.car->tag == VAL_SYMBOL &&
+                                   strcmp(a1.cons.car->sym.name, sym) == 0);
             }
         }
         else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_CONS) {
             const char *sym = a1.sym.name;
+            /* Skip hack for form-head keywords — they cause false
+               matches on multi-element form lists */
             if (strcmp(sym, "define") == 0 || strcmp(sym, "defun") == 0 ||
                 strcmp(sym, "lambda") == 0 || strcmp(sym, "let") == 0 ||
                 strcmp(sym, "cond") == 0 || strcmp(sym, "if") == 0) {
                 *acc = val_boolean(false);
             } else {
-                int match = (a2.cons.car->tag == VAL_SYMBOL &&
-                             strcmp(a2.cons.car->sym.name, sym) == 0);
-                if (match) fprintf(stderr, "[HACK=] '%s'==CONS(car='%s')\n",
-                                   sym, a2.cons.car->sym.name);
-                *acc = val_boolean(match);
+                *acc = val_boolean(a2.cons.car->tag == VAL_SYMBOL &&
+                                   strcmp(a2.cons.car->sym.name, sym) == 0);
             }
         }
         /* fail is registered as VAL_PRIM so it can be both applied (error)
