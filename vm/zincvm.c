@@ -2094,6 +2094,11 @@ int main(int argc, char **argv) {
 
                 /* Test 7c: read via string stream — (read (open Str in)) */
 
+                /* Re-enable type checker for util.shen which uses type annotations */
+                printf("--- Test 8tc: re-enable *tc* ---\n");
+                run_test("tc-on",
+                         "(mb[4:b]trueus[4:s]*tc*ug[3:s]setp)", 0);
+
                 /* Test 8: load a real Shen file — shen/util.shen */
                 printf("--- Test 8: bundled load shen/util.shen ---\n");
                 run_test("load-util",
