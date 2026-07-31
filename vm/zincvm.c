@@ -33,6 +33,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
 
 #include <gc.h>
 #include <stdint.h>
@@ -355,6 +356,8 @@ static Value global_get(const char *name) {
 /* ------------------------------------------------------------------ */
 
 static jmp_buf vm_error_jmp;
+static jmp_buf alarm_jmp;
+static volatile sig_atomic_t test_timed_out = 0;
 static Value vm_error_val;
 static int vm_error_pending = 0;
 static int vm_in_trap_error = 0;  /* set while inside trap-error body/handler */
@@ -1651,7 +1654,17 @@ static char *read_file_or_stdin(const char *path) {
 /*  Test runner                                                        */
 /* ------------------------------------------------------------------ */
 
-static void run_test(const char *label, const char *bytecode, int show_code) {
+static void alarm_handler(int sig) {
+    (void)sig;
+    test_timed_out = 1;
+    /* Use a dedicated jmp_buf: vm_error_jmp is clobbered by nested
+       trap-error setjmp calls during load, so longjmp-ing there can land
+       on a stale target inside the recursion and never break out. */
+    longjmp(alarm_jmp, 1);
+}
+
+static void run_test_timeout(const char *label, const char *bytecode, int show_code, int timeout_sec) {
+    test_timed_out = 0;
     fprintf(stderr, "[run_test] %s: parsing...\n", label);
     printf("--- %s ---\n", label); fflush(stdout);
     printf("Bytecode: %s\n", bytecode); fflush(stdout);
@@ -1663,15 +1676,29 @@ static void run_test(const char *label, const char *bytecode, int show_code) {
     printf("\n"); fflush(stdout);
     resolve_jumps(code, len);
     fprintf(stderr, "[run_test] %s: executing...\n", label);
-    if (setjmp(vm_error_jmp)) {
+    if (timeout_sec > 0) {
+        signal(SIGALRM, alarm_handler);
+        alarm(timeout_sec);
+    }
+    if (setjmp(alarm_jmp)) {
+        /* Timed out: SIGALRM longjmp'd us out of the vm_exec recursion. */
+        alarm(0);
+        printf("TIMEOUT (exceeded %d s)\n\n", timeout_sec); fflush(stdout);
+    } else if (setjmp(vm_error_jmp)) {
+        alarm(0);
         printf("ERROR CAUGHT: "); print_value(vm_error_val); printf("\n\n"); fflush(stdout);
     } else {
         Value result = vm_exec(code, len);
+        alarm(0);
         printf("Result: "); print_value(result); printf("\n\n"); fflush(stdout);
     }
     fprintf(stderr, "[run_test] %s: done, freeing code\n", label);
     /* code is GC_MALLOC'd — no free needed */
     verify_heap();
+}
+
+static void run_test(const char *label, const char *bytecode, int show_code) {
+    run_test_timeout(label, bytecode, show_code, 0);
 }
 
 static void init_globals(void) {
@@ -2131,8 +2158,8 @@ int main(int argc, char **argv) {
 
                 /* Test 8: load a real Shen file — shen/util.shen */
                 printf("--- Test 8: bundled load shen/util.shen ---\n");
-                run_test("load-util",
-                         "(mS[14:S]shen/util.sheng[4:s]loadp)", 0);
+                run_test_timeout("load-util",
+                         "(mS[14:S]shen/util.sheng[4:s]loadp)", 0, 5);
 
 
                 /* Test 9: call (id 42) from loaded util.shen — verifies functions work */
