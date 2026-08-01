@@ -490,6 +490,64 @@ static int deep_equal(Value a, Value b) {
     #undef DEEP_EQUAL_MAX_DEPTH
 }
 
+/* Build string representation of any Value into buf (matching shen-scheme's
+   put-datum behaviour: full printed form for all types).  Used by str primitive. */
+static void str_value(Value v, char *buf, int *pos, int bufsize, int depth) {
+    if (depth > 100) { *pos += snprintf(buf + *pos, bufsize - *pos, "..."); return; }
+    switch (v.tag) {
+        case VAL_SYMBOL:
+            *pos += snprintf(buf + *pos, bufsize - *pos, "%s", v.sym.name);
+            break;
+        case VAL_STRING:
+            *pos += snprintf(buf + *pos, bufsize - *pos, "\"%.*s\"", v.str.len, v.str.data);
+            break;
+        case VAL_NUMBER:
+            *pos += snprintf(buf + *pos, bufsize - *pos, "%ld", v.number);
+            break;
+        case VAL_BOOLEAN:
+            *pos += snprintf(buf + *pos, bufsize - *pos, "%s", v.boolean ? "true" : "false");
+            break;
+        case VAL_NIL:
+            *pos += snprintf(buf + *pos, bufsize - *pos, "[]");
+            break;
+        case VAL_CONS: {
+            Value *cur = &v;
+            int first = 1;
+            *pos += snprintf(buf + *pos, bufsize - *pos, "[");
+            while (cur->tag == VAL_CONS && *pos < bufsize - 1) {
+                if (!first) *pos += snprintf(buf + *pos, bufsize - *pos, " ");
+                first = 0;
+                str_value(*cur->cons.car, buf, pos, bufsize, depth + 1);
+                cur = cur->cons.cdr;
+            }
+            if (cur->tag != VAL_NIL && *pos < bufsize - 1) {
+                *pos += snprintf(buf + *pos, bufsize - *pos, " . ");
+                str_value(*cur, buf, pos, bufsize, depth + 1);
+            }
+            *pos += snprintf(buf + *pos, bufsize - *pos, "]");
+            break;
+        }
+        case VAL_ERROR:
+            *pos += snprintf(buf + *pos, bufsize - *pos, "<error %s>", v.error.message);
+            break;
+        case VAL_LAMBDA:
+            *pos += snprintf(buf + *pos, bufsize - *pos, "<lambda>");
+            break;
+        case VAL_PRIM:
+            *pos += snprintf(buf + *pos, bufsize - *pos, "<prim %s>", v.prim.name);
+            break;
+        case VAL_VECTOR:
+            *pos += snprintf(buf + *pos, bufsize - *pos, "<vector %d>", v.vector.len);
+            break;
+        case VAL_STREAM:
+            *pos += snprintf(buf + *pos, bufsize - *pos, "<stream>");
+            break;
+        default:
+            *pos += snprintf(buf + *pos, bufsize - *pos, "<unknown>");
+            break;
+    }
+}
+
 /* Returns true if `name` (possibly with "raw." prefix) is a known C primitive. */
 static int exec_primitive_valid(const char *name) {
     if (strncmp(name, "raw.", 4) == 0) name += 4;
@@ -722,7 +780,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         else if (a.tag == VAL_NUMBER) { char buf[64]; int len = snprintf(buf, sizeof(buf), "%ld", a.number); *acc = val_string(buf, len); }
         else if (a.tag == VAL_BOOLEAN) *acc = val_string(a.boolean ? "true" : "false",
                                                          a.boolean ? 4 : 5);
-        else *acc = val_string("", 0);
+        else { static char buf[4096]; int pos = 0; str_value(a, buf, &pos, sizeof(buf), 0); *acc = val_string(buf, pos); }
         return 0;
     }
     if (strcmp(name, "tlstr") == 0) {

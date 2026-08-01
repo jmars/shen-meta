@@ -24,5 +24,8 @@
 ## 4. `str` primitive — FIXED
 
 **Status:** Fixed.  
-**Was:** Metacircular interp only handled `[symbol A]` for `str`; fell through to error for numbers, strings, booleans, etc.  
-**Fix:** Added rules for `[number A]`, `[string A]`, `[boolean true]`, `[boolean false]`, and catch-all `_ → ""`. Also fixed C VM's `str` to return `"true"`/`"false"` for booleans (was returning `""`), matching reference shen-scheme.
+**Was:** Metacircular interp only handled `[symbol A]` and C VM returned `""` for booleans/cons/nil/etc.  
+**Fix:** 
+- Interp: specific rules for symbol, number, string, boolean; catch-all delegates to host `(str A)`
+- C VM: `str_value()` helper handles all types — cons (bracket notation with proper ` . ` dotted pairs), nil (`[]`), error (`<error msg>`), lambda (`<lambda>`), prim (`<prim name>`), vector/stream (`<vector N>`/`<stream>`)
+- Matches shen-scheme's `put-datum` behavior: full printed representation for every type, never `""`

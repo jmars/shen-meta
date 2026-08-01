@@ -131,7 +131,7 @@
   [prim str | C] [string A] E S R                               -> (interp C [string A] E S R)
   [prim str | C] [boolean true] E S R                           -> (interp C [string "true"] E S R)
   [prim str | C] [boolean false] E S R                          -> (interp C [string "false"] E S R)
-  [prim str | C] _ E S R                                        -> (interp C [string ""] E S R)
+  [prim str | C] A E S R                                        -> (interp C [string (str A)] E S R)
   [prim tlstr | C] [string A] E S R                             -> (interp C [string (tlstr A)] E S R)
   [prim string? | C] [string _] E S R                           -> (interp C [boolean true] E S R)
   [prim string? | C] A E S R                                    -> (interp C [boolean false] E S R)
