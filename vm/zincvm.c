@@ -1111,9 +1111,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            infinite re-entry when %% eval-kl is called from within
            Shen code executed by the chain. */
         static int eval_kl_depth = 0;
-        if (eval_kl_depth > 0) {
-            *acc = a; return 0;  /* recursion guard: identity base case */
-        }
+        /* Recursion guard removed — was breaking defun compilation
+           by returning identity instead of evaluating nested eval-kl.
+           With Boehm GC, deep recursion through eval-kl→kl→zinc→eval-kl
+           is safe (no GC corruption). */
+        /* if (eval_kl_depth > 0) {
+            *acc = a; return 0;
+        } */
         eval_kl_depth++;
 
         /* Use setjmp to ensure eval_kl_depth is always decremented,
