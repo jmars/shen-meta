@@ -4,7 +4,7 @@
 
 ```sh
 make          # build C VM (links Boehm GC via -lgc)
-make test     # run 32 built-in tests
+make test     # run 38 built-in tests
 make pipeline # compile (+ 1 2) through full pipeline
 make bundle   # serialize all safe wrappers → globals.csexp
 make run-bundle  # run C VM with globals.csexp (self-hosting tests)
@@ -249,6 +249,14 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
   This is the #1 recurring bug pattern. See tests 27-32 for examples.
 - Built-in tests use `m` (pushmark) before args; mark ends up at stack bottom,
   not popped by `OP_APPLY` with `VAL_PRIM` (mark must be on top to be popped)
+- **Built-in tests**: 38 hand-written bytecode tests in `vm/zincvm.c`.
+  Tests 1-32 exercise apply ('p'), tests 33-38 exercise appterm ('t').
+  Built-in tests run without a bundle (`./zincvm`). Self-hosting tests
+  (10) + GC stress run with bundle (`./zincvm globals.csexp`).
+- `appterm` ('t') and `apply` ('p') share identical stack layout:
+  `[mark, argN..arg1, function]`. Difference: appterm reuses current frame
+  (tail-call, pc=0), apply pushes new CallFrame. Both reject >64 args.
+  Appterm additionally rejects zero args and requires pushmark.
 
 ## Commit style
 
