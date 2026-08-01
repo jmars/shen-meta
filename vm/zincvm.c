@@ -1858,6 +1858,7 @@ int main(int argc, char **argv) {
             /* Bundle format: ((name code) (name code) ...) */
             int n = parse_bundle(p);
             printf("Loaded %d closures into global table\n\n", n);
+            fflush(stdout);
 
             /* Register ZINC pattern keywords as symbols. When zinc-c, zinc-t,
                normalize-term, debruijn etc. were self-compiled via set-toplevel,
@@ -1924,6 +1925,56 @@ int main(int argc, char **argv) {
                 } else {
                     printf("Usage: %s <bundle> -d <function-name>\n", argv[0]);
                 }
+                return 0;
+            }
+            /* --repl: run the interactive Shen REPL */
+            if (ai < argc && strcmp(argv[ai], "--repl") == 0) {
+                printf("=== Shen REPL ===\n");
+                fflush(stdout);
+                /* shen.initialise is non-idempotent: first call errors
+                   (caught by trap-error in the bundle), second succeeds. */
+                Value init = global_get("shen.initialise");
+                if (init.tag != VAL_LAMBDA) {
+                    fprintf(stderr, "repl: shen.initialise not found (tag=%d)\n", init.tag);
+                    return 1;
+                }
+                /* Call twice — first error is expected and caught.
+                   Wrap in setjmp so simple-error doesn't escape. */
+                Value *env_init = GC_VALUE_ARRAY(init.lambda.env_len + 1);
+                if (init.lambda.env_len > 0)
+                    memcpy(env_init, init.lambda.env, init.lambda.env_len * sizeof(Value));
+                env_init[init.lambda.env_len] = val_number(0);
+                jmp_buf saved_jmp;
+                memcpy(saved_jmp, vm_error_jmp, sizeof(jmp_buf));
+                if (setjmp(vm_error_jmp) == 0) {
+                    vm_exec_env(init.lambda.code, init.lambda.code_len,
+                                env_init, init.lambda.env_len + 1);
+                }
+                memcpy(vm_error_jmp, saved_jmp, sizeof(jmp_buf));
+                if (setjmp(vm_error_jmp) == 0) {
+                    vm_exec_env(init.lambda.code, init.lambda.code_len,
+                                env_init, init.lambda.env_len + 1);
+                }
+                memcpy(vm_error_jmp, saved_jmp, sizeof(jmp_buf));
+                printf("Shen ready.\n\n");
+                fflush(stdout);
+
+                Value repl = global_get("shen.repl");
+                if (repl.tag != VAL_LAMBDA) {
+                    fprintf(stderr, "repl: shen.repl not found\n");
+                    return 1;
+                }
+                Value *env_repl = GC_VALUE_ARRAY(repl.lambda.env_len + 1);
+                if (repl.lambda.env_len > 0)
+                    memcpy(env_repl, repl.lambda.env, repl.lambda.env_len * sizeof(Value));
+                env_repl[repl.lambda.env_len] = val_number(0);
+                memcpy(saved_jmp, vm_error_jmp, sizeof(jmp_buf));
+                if (setjmp(vm_error_jmp) == 0) {
+                    vm_exec_env(repl.lambda.code, repl.lambda.code_len,
+                                env_repl, repl.lambda.env_len + 1);
+                }
+                memcpy(vm_error_jmp, saved_jmp, sizeof(jmp_buf));
+                printf("\nGoodbye.\n");
                 return 0;
             }
             /* If another arg, run it as bytecode; otherwise run tests */
