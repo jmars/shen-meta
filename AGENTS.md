@@ -4,7 +4,7 @@
 
 ```sh
 make          # build C VM (links Boehm GC via -lgc)
-make test     # run 28 built-in tests
+make test     # run 32 built-in tests
 make pipeline # compile (+ 1 2) through full pipeline
 make bundle   # serialize all safe wrappers → globals.csexp
 make run-bundle  # run C VM with globals.csexp (self-hosting tests)
@@ -29,7 +29,7 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 | C | interp `[] [cons] [] [] []` → `[cons]` | Pass |
 | 5 | eval-kl `[+ 1 2]` via marshal chain | Pass |
 | 6-7 | read-file-as-string, load via apply | Pass |
-| 7b | read-from-string | Fail (macroexpand returns 0, not [[+ 1 2]]) |
+| 7b | read-from-string | Pass (returns [[+ 1 2]]) |
 | 7c | read via string stream | Pass |
 | 8-10 | load shen/util.shen, id, newvar | Pass |
 
@@ -297,38 +297,39 @@ explicit `u` (PUSH) instructions — it was modified to rely on auto-push.
 **Bundle recompiled:** `globals.csexp` rebuilt with modified zinc.shen.
 All bundled closures now use push semantics natively.
 
-### Metacircular interp — current bridge approach
+### Metacircular interp — auto-push refactored (DONE)
 
-Since `zinc-c` no longer emits explicit `push`, the metacircular `interp`
-(original, no auto-push) can't process multi-arg primitives. The C `eval-kl`
-handler bridges this gap by post-processing the bytecode from `kl→zinc`:
-it walks the cons list and inserts a `push` symbol after each value-producing
-instruction (`number`, `string`, `symbol`, `boolean`, `access`, `global`, `cur`).
+The metacircular `interp` in `interp.shen` now implements standard ZINC auto-push
+semantics. Only 7 value-instruction rules were changed — each pushes the **old**
+accumulator to the stack before setting the new value:
 
-For `(+ 1 2)`, `[number, 2, number, 1, prim, +]` becomes
-`[number, 2, push, number, 1, push, prim, +]`, which the original interp
-processes correctly.
+```
+[access N | C] A E S R    → (interp C (lookup N E) E [A | S] R)
+[global G | C] A E S R    → (interp C (lookup-global G) E [A | S] R)
+[cur C1 | C] A E S R      → (interp C [lambda C1 E] E [A | S] R)
+[number N | C] A E S R    → (interp C [number N] E [A | S] R)
+[string Ss | C] A E S R   → (interp C [string Ss] E [A | S] R)
+[symbol Ss | C] A E S R   → (interp C [symbol Ss] E [A | S] R)
+[boolean B | C] A E S R   → (interp C [boolean B] E [A | S] R)
+```
 
-### Metacircular interp — future standard ZINC refactoring (ROADMAP)
+All 85 other rules (binary prims, unary prims, jmpf, let, grab, return, etc.)
+remain unchanged. Binary prim rules like `[prim + | C] [number A] E [[number A1] | S] R`
+work correctly because auto-push leaves the previous value on the stack top, which
+is exactly the rightmost argument.
 
-The bridge approach works but the metacircular interpreter should natively match
-the C VM's standard ZINC push-result semantics. This requires a full refactoring
-of all ~97 interp rules:
+**The C bridge (push insertion in eval_kl) has been REMOVED.** No bytecode
+transformation is needed — the interp natively handles standard ZINC output.
 
-1. **Value instructions** push their result (not old accumulator) to the stack
-2. **All prim rules** pop operands from the stack, push result to the stack
-3. **`jmpf`** pops the boolean condition from the stack
-4. **`let`** pops the value to bind from the stack
-5. **`return`** unwinds callee stack debris back to the mark, then pushes return value
-6. **`grab`** mark-return pushes the return value to the caller's stack
-7. **`apply`/`appterm`** pop the function from the stack, then pop arg(s)
-8. **`cn`** becomes a clean 2-arg primitive (4 rules → 1)
-9. **`trap-error`** pops body and handler from the stack
+**Key design choice:** Pushing OLD accumulator (not new value) means the accumulator
+remains the "current value" at every step, keeping all existing prim rules compatible.
 
-This is architecturally correct but high-risk — all rules are interdependent
-and must land together. The `apply`/`appterm` fix for multi-arg function calls
-depends on this refactoring. Deferred until the REPL needs arbitrary expression
-evaluation through the metacircular interpreter.
+### Metacircular interp — remaining gaps
+
+- **`apply`/`appterm` for multi-arg calls** — currently only pop 1 arg from stack.
+  Fixing this requires a recursive arg-collection helper. Single-arg calls through
+  apply actually work *better* now (auto-push puts the arg on the stack before
+  the function overwrites acc).
 
 ## REPL
 

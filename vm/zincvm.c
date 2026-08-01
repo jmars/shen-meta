@@ -1116,37 +1116,6 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         Value zinc_code = vm_exec_env(klzinc.lambda.code, klzinc.lambda.code_len,
                                        env2, klzinc.lambda.env_len + 1);
 
-        /* Bridge: insert push between value-producing instructions.
-           zinc-c outputs standard ZINC (auto-push), but the metacircular
-           interp uses explicit push.  Walk the cons list and insert a
-           [push] symbol after each value-producing instruction. */
-        {
-            Value *resultp = &zinc_code;
-            while (resultp->tag == VAL_CONS) {
-                Value car = *resultp->cons.car;
-                /* Check if the current element is a value-producing opcode */
-                int is_value_op = 0;
-                if (car.tag == VAL_SYMBOL) {
-                    const char *s = car.sym.name;
-                    is_value_op = (strcmp(s, "number") == 0 || strcmp(s, "string") == 0 ||
-                                   strcmp(s, "symbol") == 0 || strcmp(s, "boolean") == 0 ||
-                                   strcmp(s, "access") == 0 || strcmp(s, "global") == 0 ||
-                                   strcmp(s, "cur") == 0);
-                }
-                if (is_value_op) {
-                    /* Skip over opcode + operand (2 cons cells) */
-                    resultp = resultp->cons.cdr;  /* skip operand */
-                    if (resultp->tag != VAL_CONS) break;
-                    /* Insert push after operand */
-                    Value rest = *resultp->cons.cdr;
-                    *resultp->cons.cdr = val_cons(val_symbol("push"), rest);
-                    resultp = resultp->cons.cdr;  /* move to push */
-                }
-                resultp = resultp->cons.cdr;  /* advance */
-                if (resultp->tag != VAL_CONS) break;
-            }
-        }
-
         /* Step 3: toplevel-interp — ZINC bytecode → tagged result */
         Value tli = global_get("toplevel-interp");
         if (tli.tag != VAL_LAMBDA) {
