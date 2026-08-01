@@ -41,6 +41,16 @@
 
 
 
+(define collect-apply-args { (list zinc-value) --> (list zinc-value) }
+  \* Hit A0 before mark: A0 is the spurious old-acc from pre-pushmark.
+     Second element is the literal symbol mark — skip both, return saved stack. *\
+  [V1 V2 | S] -> [[] S] where (= V2 mark)
+  \* Collect V1 as an arg, recurse *\
+  [V1 | S] -> (let Result (collect-apply-args S)
+                [[V1 | (hd Result)] | (tl Result)])
+  \* Empty stack (shouldn't happen) *\
+  [] -> [[] []])
+
 (define interp { zinc-code --> zinc-value --> (list zinc-value) --> (list zinc-value) --> (list zinc-value) --> zinc-value }
   [access N | C] A E S R                                        -> (interp C (lookup N E) E [A | S] R)
   [global G | C] A E S R                                        -> (interp C (lookup-global G) E [A | S] R)
@@ -48,16 +58,30 @@
   [jmpf L | C] A E S R                                          -> (interp C A E S R)
   [jmp L | C] A E S R                                           -> (interp (interp-jmp C L) A E S R)
   [label L | C] A E S R                                         -> (interp C A E S R)
-  [appterm | C] [lambda C1 E1] E [V | S] R                -> (interp C1 [lambda C1 E1] [V | E1] S R)
-  [apply | C] [lambda C1 E1] E [V | S] R                      -> (interp C1 [lambda C1 E1] [V | E1] S [[lambda C1 E1] | R])
+  \* Apply: collect all args, isolate stack, save caller context *\
+  [apply | C] [lambda C1 E1] E S R ->
+    (let Collected (collect-apply-args S)
+      (let Args (hd Collected)
+        (let Rest (hd (tl Collected))
+          (interp C1 [lambda C1 E1] (append E1 Args) [] [[C E Rest] | R]))))
+  \* Appterm — tail call with return frame: single arg, replace saved stack *\
+  [appterm | C] [lambda C1 E1] E [V | S] [[C_call E_call _] | R] ->
+    (interp C1 [lambda C1 E1] [V | E1] [] [[C_call E_call S] | R])
+  \* Appterm — tail call at top level: single arg *\
+  [appterm | C] [lambda C1 E1] E [V | S] [] ->
+    (interp C1 [lambda C1 E1] [V | E1] [] [])
   [push | C] A E S R                                            -> (interp C A E [A | S] R)
   [pushmark | C] A E S R                                        -> (interp C A E [mark | S] R)
   [cur C1 | C] A E S R                                          -> (interp C [lambda C1 E] E [A | S] R)
-  [grab | C] A E [mark | S] [[lambda C1 E1] | R]               -> (interp C1 [lambda C1 E1] E1 S R)
+  \* Grab: with stack isolation, args are already in env. Empty stack = no-op. *\
   [grab | C] A E [] R                                              -> (interp C A E [] R)
+  \* Grab with value: bind it (curried partial application fallback) *\
   [grab | C] A E [V | S] R                                      -> (interp C A [V | E] S R)
-  [return | C] A E [mark | S] [[lambda C1 E1] | R]              -> (interp C A E S R)
-  [return | C] [lambda C1 E1] E [V | S] R                       -> (interp C1 [lambda C1 E1] [V | E1] S R)
+  \* Return: restore caller's code, env, and saved stack. Return value in A. *\
+  [return | C] A E S [[C_caller E_caller S_saved] | R] ->
+    (interp C_caller A E_caller S_saved R)
+  \* Return at top level: just return the accumulator *\
+  [return | C] A E S [] -> A
   [let | C] A E S R                                             -> (interp C A [A | E] S R)
   [endlet | C] A [V | E] S R                                    -> (interp C A E S R)
   [number N | C] A E S R                                        -> (interp C [number N] E [A | S] R)
@@ -238,6 +262,7 @@
 (set-toplevel lookup-global lookup-global)
 (set-toplevel lookup lookup)
 (set-toplevel interp-jmp interp-jmp)
+(set-toplevel collect-apply-args collect-apply-args)
 (set-toplevel interp interp)
 (tc +)
 
