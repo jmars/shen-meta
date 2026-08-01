@@ -80,12 +80,15 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 - **`=`** now supports deep structural equality for cons cells via `deep_equal()`.
   Without this, `(= [+ 1 2] [+ 1 2])` returns false, breaking `macroexpand-h`'s
   fixed-point check.  Depth-limited to 1000 for cycle safety.
-- **`=` symbol comparison** is strict strcmp — no prefix hack.  The Shen package
-  system's `package-symbols` / `internal?` / `sysfunc?` chain keeps external symbols
-  (like `define`, `defun`, `lambda`, `let`, `cond`, `if`) bare during `unpackage`.
-  This requires `shen.initialise` to have run — it sets up `shen.external-symbols`
-  in the property vector, which `sysfunc?` checks.  Without `shen.initialise`,
-  `define` gets incorrectly prefixed to `shen.define` and pattern matching fails.
+- **`=` symbol comparison** is strict `strcmp` — no prefix awareness.  Reference
+  shen-scheme's `kl:=` uses plain `eq?` (pointer identity on symbols); `foo` and
+  `shen.foo` are different symbols and must compare unequal.  The C VM MUST NOT
+  add `shen.` prefix handling to `=` — prefix consistency is a pipeline concern.
+  The pipeline enforces it via: `%% set` in normalize.shen → `shen.initialise`
+  completes → `shen.external-symbols` populated → `sysfunc?` returns true for
+  `define`/`defun`/`type`/etc. → `package-symbols` leaves them bare.  If `(= define
+  shen.define)` ever returns false at runtime, the bug is in `shen.initialise`
+  not completing (likely a missing `%%` on a primitive in normalize.shen), NOT in `=`.
 - **`=` cons-vs-symbol** comparison (e.g., `(= hd(Form) "number")`): compares the
   cons's car to the symbol.  This is a flat-access pattern bug workaround — the
   bundled zinc-c generates one fewer `hd` than needed for nested pattern matching.
@@ -154,7 +157,9 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
   `shen.<e>` resolve to the same closure.
 - **Do NOT add module prefix aliasing in the C VM** — it belongs at the Shen
   pipeline level, during bundle creation.  The C VM should only consume
-  correctly-named bundles.
+  correctly-named bundles.  This applies especially to `=` and `deep_equal`:
+  never make them `shen.`-prefix-aware; prefix consistency is enforced by the
+  pipeline (see Primitive semantics above).
 - `interp-load` does NOT apply package prefixing itself (unlike Shen's
   `eval-and-print` which goes through the reader).  The post-load aliasing step
   in serialize.shen is the correct place to reconcile the mismatch.

@@ -465,19 +465,7 @@ static int deep_equal(Value a, Value b) {
         case VAL_NUMBER:  return a.number == b.number;
         case VAL_STRING:  return a.str.len == b.str.len &&
                                  memcmp(a.str.data, b.str.data, a.str.len) == 0;
-        case VAL_SYMBOL:
-            if (strcmp(a.sym.name, b.sym.name) == 0) return 1;
-            /* Handle shen. prefix: shen.define == define and vice versa.
-               KLambda code uses bare symbols (define, defun) for pattern
-               matching, but the Shen reader may prefix them. */
-            {
-                char bufa[256], bufb[256];
-                snprintf(bufa, sizeof(bufa), "shen.%s", a.sym.name);
-                snprintf(bufb, sizeof(bufb), "shen.%s", b.sym.name);
-                if (strcmp(bufa, b.sym.name) == 0) return 1;
-                if (strcmp(a.sym.name, bufb) == 0) return 1;
-            }
-            return 0;
+        case VAL_SYMBOL:   return strcmp(a.sym.name, b.sym.name) == 0;
         case VAL_BOOLEAN: return a.boolean == b.boolean;
         case VAL_NIL:     return 1;
         case VAL_CONS:
@@ -626,20 +614,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             *acc = val_boolean(a1.number == a2.number);
         else if (a1.tag == VAL_STRING && a2.tag == VAL_STRING)
             *acc = val_boolean(a1.str.len == a2.str.len && memcmp(a1.str.data, a2.str.data, a1.str.len) == 0);
-        else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_SYMBOL) {
-            if (strcmp(a1.sym.name, a2.sym.name) == 0) {
-                *acc = val_boolean(true);
-            } else {
-                /* Handle shen. prefix for KLambda pattern matching.
-                   (= define shen.define) and (= shen.define define) both true. */
-                char bufa[256];
-                snprintf(bufa, sizeof(bufa), "shen.%s", a1.sym.name);
-                int match = (strcmp(bufa, a2.sym.name) == 0);
-                if (!match && strncmp(a1.sym.name, "shen.", 5) == 0)
-                    match = (strcmp(a1.sym.name + 5, a2.sym.name) == 0);
-                *acc = val_boolean(match);
-            }
-        }
+        else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_SYMBOL)
+            *acc = val_boolean(strcmp(a1.sym.name, a2.sym.name) == 0);
         else if (a1.tag == VAL_BOOLEAN && a2.tag == VAL_BOOLEAN)
             *acc = val_boolean(a1.boolean == a2.boolean);
         /* HACK: zinc-c generates flat comparisons like = [number 42] "number"
