@@ -3,10 +3,18 @@
 ## 1. Test 7e: runtime `.shen` load hangs in `shen.eval-and-print`
 
 **File:** `vm/zincvm.c:2294-2303` (commented out)  
-**Symptom:** Loading a `.shen` file at runtime via bundled `load` hangs when processing `define`/`defun` forms.  
-**Chain:** `load` → `shen.load-help` → `shen.for-each` → `shen.eval-and-print` → `shen.shen->kl`  
-**Status:** Skipped. The `=` prefix hack (removed in `ca18773`) was a premature attempt to fix this. Root cause is elsewhere.  
-**Debug strategy:** Use `--trace shen.eval-and-print --trace shen.shen->kl-h` to find the actual loop.
+**Symptom:** Loading a `.shen` file containing `(defun ...)` at runtime via bundled `load` hangs. `(+ 1 2)` loads fine.
+
+**Root cause found:** The `shen.eval-and-print` closure has nested `pushmark` instructions that leave stray marks on the stack after the inline `prim eval-kl` (P opcode) pops its argument. When `shen.app` is applied next, it receives wrong arguments. For `defun` forms, this triggers type-checker/error-reporter code that calls `shen.app` in a tight loop (~62K calls before timeout):
+```
+shen.app → shen.arg->str → shen.atom->str → returns → shen.app again
+```
+
+For `(+ 1 2)`, `eval-kl` completes without type checking, so the buggy stack layout isn't triggered.
+
+**Debug evidence:** `--trace` shows zero activity from `shen.shen->kl-h`, `shen.record-and-evaluate`, `interp`, `toplevel-interp`, `kl->zinc`, `extract-kl` — the hang is in the `eval-kl` C primitive's interaction with the `shen.eval-and-print` closure's stack layout.
+
+**Fix needed:** Rewrite the `shen.eval-and-print` closure's bytecode with correct mark discipline. The closure is 18 ZINC instructions compiled from bundled KLambda — needs proper stack cleanup between `eval-kl` and `shen.app` calls.
 
 ## 2. `=` cons-vs-symbol HACK — REMOVED
 
