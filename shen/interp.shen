@@ -64,12 +64,17 @@
       (let Args (hd Collected)
         (let Rest (hd (tl Collected))
           (interp C1 [lambda C1 E1] (append E1 Args) [] [[C E Rest] | R]))))
-  \* Appterm — tail call with return frame: single arg, replace saved stack *\
-  [appterm | C] [lambda C1 E1] E [V | S] [[C_call E_call _] | R] ->
-    (interp C1 [lambda C1 E1] [V | E1] [] [[C_call E_call S] | R])
-  \* Appterm — tail call at top level: single arg *\
-  [appterm | C] [lambda C1 E1] E [V | S] [] ->
-    (interp C1 [lambda C1 E1] [V | E1] [] [])
+  \* Appterm — tail call with return frame: collect all args up to mark *\
+  [appterm | C] [lambda C1 E1] E S [[C_call E_call _] | R] ->
+    (let Collected (collect-apply-args S)
+      (let Args (hd Collected)
+        (let Rest (hd (tl Collected))
+          (interp C1 [lambda C1 E1] (append E1 Args) [] [[C_call E_call Rest] | R]))))
+  \* Appterm — tail call at top level: collect all args up to mark *\
+  [appterm | C] [lambda C1 E1] E S [] ->
+    (let Collected (collect-apply-args S)
+      (let Args (hd Collected)
+          (interp C1 [lambda C1 E1] (append E1 Args) [] [])))
   [push | C] A E S R                                            -> (interp C A E [A | S] R)
   [pushmark | C] A E S R                                        -> (interp C A E [mark | S] R)
   [cur C1 | C] A E S R                                          -> (interp C [lambda C1 E] E [A | S] R)
