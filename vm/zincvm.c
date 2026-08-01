@@ -2220,10 +2220,10 @@ int main(int argc, char **argv) {
                 run_test("newvar-from-util",
                          "(mg[6:s]newvarp)", 0);
 
-                /* Test 10: defun->lambda from bundled util.shen */
-                printf("--- Test 10: call (defun->lambda) from bundled util.shen ---\n");
-                run_test("dfl-from-util",
-                         "(mg[13:s]defun->lambdap)", 0);
+                /* Test 10: instruction-keyword? from bundled util.shen */
+                printf("--- Test 10: call (instruction-keyword? push) from bundled util.shen ---\n");
+                run_test("ikw-from-util",
+                         "(ms[4:s]pushg[20:s]instruction-keyword?p)", 0);
 
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
