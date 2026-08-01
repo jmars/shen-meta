@@ -21,8 +21,8 @@
 **Reason:** Shen's `load` doesn't wrap forms in `trap-error`, so a single failing form would abort the entire load.  
 **Status:** Swallowing is intentional but fragile — hides genuine errors. Should re-raise once the load path wraps forms in `trap-error`.
 
-## 4. `str` primitive in metacircular interp: symbol-only
+## 4. `str` primitive — FIXED
 
-**File:** `shen/interp.shen:129`  
-**Symptom:** `[prim str | C] [symbol A] E S R` — only handles symbols.  
-**TODO:** Extend to other datatypes (numbers, strings, booleans) like the C VM's `exec_primitive("str")` does.
+**Status:** Fixed.  
+**Was:** Metacircular interp only handled `[symbol A]` for `str`; fell through to error for numbers, strings, booleans, etc.  
+**Fix:** Added rules for `[number A]`, `[string A]`, `[boolean true]`, `[boolean false]`, and catch-all `_ → ""`. Also fixed C VM's `str` to return `"true"`/`"false"` for booleans (was returning `""`), matching reference shen-scheme.

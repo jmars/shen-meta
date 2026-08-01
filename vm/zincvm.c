@@ -720,6 +720,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         if (a.tag == VAL_SYMBOL) *acc = val_string(a.sym.name, strlen(a.sym.name));
         else if (a.tag == VAL_STRING) *acc = a;
         else if (a.tag == VAL_NUMBER) { char buf[64]; int len = snprintf(buf, sizeof(buf), "%ld", a.number); *acc = val_string(buf, len); }
+        else if (a.tag == VAL_BOOLEAN) *acc = val_string(a.boolean ? "true" : "false",
+                                                         a.boolean ? 4 : 5);
         else *acc = val_string("", 0);
         return 0;
     }

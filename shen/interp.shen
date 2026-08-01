@@ -126,7 +126,12 @@
   [prim absvector? | C] A E S R                                 -> (interp C [boolean false] E S R)
   [prim n->string | C] [number A] E S R                         -> (interp C [string (n->string A)] E S R)
   [prim string->n | C] [string A] E S R                         -> (interp C [number (string->n A)] E S R)
-  [prim str | C] [symbol A] E S R                               -> (interp C [string (str A)] E S R) \* TODO: other datatypes *\
+  [prim str | C] [symbol A] E S R                               -> (interp C [string (str A)] E S R)
+  [prim str | C] [number A] E S R                               -> (interp C [string (str A)] E S R)
+  [prim str | C] [string A] E S R                               -> (interp C [string A] E S R)
+  [prim str | C] [boolean true] E S R                           -> (interp C [string "true"] E S R)
+  [prim str | C] [boolean false] E S R                          -> (interp C [string "false"] E S R)
+  [prim str | C] _ E S R                                        -> (interp C [string ""] E S R)
   [prim tlstr | C] [string A] E S R                             -> (interp C [string (tlstr A)] E S R)
   [prim string? | C] [string _] E S R                           -> (interp C [boolean true] E S R)
   [prim string? | C] A E S R                                    -> (interp C [boolean false] E S R)
