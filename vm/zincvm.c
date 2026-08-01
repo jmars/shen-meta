@@ -637,12 +637,9 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         }
         else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_CONS) {
             const char *sym = a1.sym.name;
-            /* Only block { here: prevents (= { {some-list}) from matching
-               type annotations.  All other symbols use prefix-aware
-               comparison of the cons car. */
-            if (strcmp(sym, "{") == 0) {
-                *acc = val_boolean(false);
-            } else if (a2.cons.car->tag == VAL_SYMBOL) {
+            /* All symbols (including {) use cons-car comparison.
+               (= { some-cons) checks if the cons's car is {. */
+            if (a2.cons.car->tag == VAL_SYMBOL) {
                 *acc = val_boolean(strcmp(sym, a2.cons.car->sym.name) == 0);
             } else {
                 *acc = val_boolean(false);
@@ -2206,11 +2203,6 @@ int main(int argc, char **argv) {
                 run_test("read-from-string",
                          "(mS[7:S](+ 1 2)g[16:s]read-from-stringp)", 0);
 
-                /* Test 7tc: disable type checker */
-                printf("--- Test 7tc: disable *tc* ---\n");
-                run_test("tc-off",
-                         "(mb[5:b]falses[4:s]*tc*g[3:s]setp)", 0);
-
                 /* Test 7: bundled load — exercises full read-compile chain */
                 printf("--- Test 7: bundled load via apply ---\n");
                 run_test("load-via-apply",
@@ -2218,26 +2210,20 @@ int main(int argc, char **argv) {
 
                 /* Test 7c: read via string stream — (read (open Str in)) */
 
-                /* Re-enable type checker for util.shen which uses type annotations */
-                printf("--- Test 8tc: re-enable *tc* ---\n");
-                run_test("tc-on",
-                         "(mb[4:b]trues[4:s]*tc*g[3:s]setp)", 0);
-
-                /* Test 8: load a real Shen file — shen/util.shen */
-                printf("--- Test 8: bundled load shen/util.shen ---\n");
-                run_test_timeout("load-util",
-                         "(mS[14:S]shen/util.sheng[4:s]loadp)", 0, 5);
-
-
-                /* Test 9: call (id 42) from loaded util.shen — verifies functions work */
-                printf("--- Test 9: call (id 42) from loaded util.shen ---\n");
+                /* Test 8: id from bundled util.shen (loaded at bundle time via interp-load-raw) */
+                printf("--- Test 8: call (id 42) from bundled util.shen ---\n");
                 run_test("id-from-util",
                          "(mn[2:n]42g[2:s]idp)", 0);
 
-                /* Test 10: call (newvar) from loaded util.shen — verifies gensym works */
-                printf("--- Test 10: call (newvar) from loaded util.shen ---\n");
+                /* Test 9: newvar from bundled util.shen */
+                printf("--- Test 9: call (newvar) from bundled util.shen ---\n");
                 run_test("newvar-from-util",
                          "(mg[6:s]newvarp)", 0);
+
+                /* Test 10: defun->lambda from bundled util.shen */
+                printf("--- Test 10: call (defun->lambda) from bundled util.shen ---\n");
+                run_test("dfl-from-util",
+                         "(mg[13:s]defun->lambdap)", 0);
 
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");

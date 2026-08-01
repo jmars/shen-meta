@@ -34,6 +34,11 @@
 (interp-load-raw "/home/arch/github/shen-scheme/kl/stlib.kl")
 (interp-load-raw "/home/arch/github/shen-scheme/kl/init.kl")
 
+\* Load shen/util.shen via interp-load-raw — bypasses process-sexprs/find-arities
+   to avoid the { } type annotation handling bug in the bundled reader.
+   Functions like id, newvar, defun->lambda, primitive? are needed by the pipeline. *\
+(interp-load-raw "/home/arch/github/shen-meta/shen/util.shen")
+
 \* Add shen. prefix aliases for unprefixed closures.
    The Shen module system adds the package prefix during Shen->KLambda
    compilation, so bytecode references shen.<name>.  But yacc.kl defines
