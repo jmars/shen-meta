@@ -1,24 +1,23 @@
 # Bugs & known issues
 
-## 1. Test 7e: runtime `.shen` load hangs in `shen.eval-and-print`
+## 1. Test 7e: runtime `.shen` load hangs during `kl->zinc` compilation of `defun`
 
 **File:** `vm/zincvm.c:2294-2303` (commented out)  
 **Symptom:** Loading a `.shen` file containing `(defun ...)` at runtime via bundled `load` hangs. `(+ 1 2)` loads fine.
 
-**Root cause found:** The `shen.eval-and-print` closure has nested `pushmark` instructions that leave stray marks on the stack after the inline `prim eval-kl` (P opcode) pops its argument. When `shen.app` is applied next, it receives wrong arguments. For `defun` forms, this triggers type-checker/error-reporter code that calls `shen.app` in a tight loop (~62K calls before timeout):
-```
-shen.app → shen.arg->str → shen.atom->str → returns → shen.app again
-```
+**Root cause:** During `eval-kl` processing of the `defun` form, `kl->zinc` compiles the KLambda. This triggers `shen.store-arity` → `shen.sysfunc?` → `element?` → `get` in a tight loop (24K calls before timeout). `shen.app` is called 63K times as a symptom of this arity-checking loop.
 
-For `(+ 1 2)`, `eval-kl` completes without type checking, so the buggy stack layout isn't triggered.
+**Trace evidence:**
+- `shen.store-arity`/`shen.sysfunc?`/`element?`/`get`: 24,295 calls
+- `shen.app`: 63,586 calls  
+- `shen.for-each`: 47 calls (was 0 before stale-push fix)
+- Zero activity from: `shen.shen->kl-h`, `shen.record-and-evaluate`, `interp`, `toplevel-interp`, `kl->zinc`, `extract-kl` — the hang is in the C `eval-kl` primitive, not in metacircular execution
 
-**Debug evidence:** `--trace` shows zero activity from `shen.shen->kl-h`, `shen.record-and-evaluate`, `interp`, `toplevel-interp`, `kl->zinc`, `extract-kl` — the hang is in the `eval-kl` C primitive's interaction with the `shen.eval-and-print` closure's stack layout.
+**Contributing factors fixed:**
+1. Stale `push` instructions in bundle (old `zinc.shen` pre-auto-push) — fixed by `make bundle`; restored `shen.for-each` execution
+2. `eval-kl` recursion guard returning identity — removed in `14b8d2d`; with Boehm GC deep recursion is safe
 
-**Fix needed:** The KLambda source in `load.kl:9` is:
-```
-(pr (shen.app (eval-kl (shen.shen->kl Z1253)) "\n" (shen.s (shen.shen->kl Z1253)) ""))
-```
-`shen.s` is a function call, but `zinc-c` emits `[symbol shen.s]` (literal) instead of `[global shen.s]` (function lookup), leaving the `apply` for `shen.s` missing from the bytecode. The orphaned args (`shen.s`, `"\n"`) corrupt `shen.app`'s stack, triggering infinite `shen.app`→`shen.arg->str`→`shen.atom->str` recursion for `defun` forms. Fix in `zinc-c` or KLambda IR — not in the bytecode.
+**Remaining issue:** The arity-checking chain (`shen.store-arity` → `shen.sysfunc?` → `element?` → `get`) loops inside `kl->zinc` specifically when compiling `defun` KLambda forms. The trigger is somewhere in how the bundled Shen compiler processes `defun` forms through the `extract-kl` → `kl->zinc` → `toplevel-interp` pipeline inside the C `eval-kl` primitive.
 
 ## 2. `=` cons-vs-symbol HACK — REMOVED
 
@@ -31,7 +30,7 @@ For `(+ 1 2)`, `eval-kl` completes without type checking, so the buggy stack lay
 **File:** `vm/zincvm.c:1148-1151`  
 **Symptom:** On error, `eval_kl` restores the caller's `jmp_buf` and returns the error value without re-raising.  
 **Reason:** Shen's `load` doesn't wrap forms in `trap-error`, so a single failing form would abort the entire load.  
-**Status:** Swallowing is intentional but fragile — hides genuine errors. Should re-raise once the load path wraps forms in `trap-error`.
+**Status:** Swallowing is intentional but fragile — hides genuine errors. Should re-raise once the load path wraps forms in `trap-error`. Note: the recursion guard (eval_kl_depth) was removed in `14b8d2d` — nested eval-kl now executes instead of returning identity. The depth counter is retained for potential future diagnostics.
 
 ## 4. `str` primitive — FIXED
 
