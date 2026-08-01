@@ -297,21 +297,38 @@ explicit `u` (PUSH) instructions — it was modified to rely on auto-push.
 **Bundle recompiled:** `globals.csexp` rebuilt with modified zinc.shen.
 All bundled closures now use push semantics natively.
 
-### Metacircular interp auto-push
+### Metacircular interp — current bridge approach
 
-The metacircular `interp` function (97 rules in `shen/interp.shen`) was updated
-to match standard ZINC auto-push semantics. Value-producing instructions
-(`number`, `string`, `symbol`, `boolean`, `access`, `global`, `cur`) now push
-the old accumulator to the stack before setting the new value:
+Since `zinc-c` no longer emits explicit `push`, the metacircular `interp`
+(original, no auto-push) can't process multi-arg primitives. The C `eval-kl`
+handler bridges this gap by post-processing the bytecode from `kl→zinc`:
+it walks the cons list and inserts a `push` symbol after each value-producing
+instruction (`number`, `string`, `symbol`, `boolean`, `access`, `global`, `cur`).
 
-```
-[number N | C] A E S R  →  (interp C [number N] E [A | S] R)
-```
+For `(+ 1 2)`, `[number, 2, number, 1, prim, +]` becomes
+`[number, 2, push, number, 1, push, prim, +]`, which the original interp
+processes correctly.
 
-This was needed because `zinc-c` no longer emits explicit `push` between
-value instructions — the metacircular interpreter must handle auto-push
-internally.  Without this, multi-arg primitive calls like `(+ 1 2)` would
-lose the first argument during evaluation through the eval-kl chain.
+### Metacircular interp — future standard ZINC refactoring (ROADMAP)
+
+The bridge approach works but the metacircular interpreter should natively match
+the C VM's standard ZINC push-result semantics. This requires a full refactoring
+of all ~97 interp rules:
+
+1. **Value instructions** push their result (not old accumulator) to the stack
+2. **All prim rules** pop operands from the stack, push result to the stack
+3. **`jmpf`** pops the boolean condition from the stack
+4. **`let`** pops the value to bind from the stack
+5. **`return`** unwinds callee stack debris back to the mark, then pushes return value
+6. **`grab`** mark-return pushes the return value to the caller's stack
+7. **`apply`/`appterm`** pop the function from the stack, then pop arg(s)
+8. **`cn`** becomes a clean 2-arg primitive (4 rules → 1)
+9. **`trap-error`** pops body and handler from the stack
+
+This is architecturally correct but high-risk — all rules are interdependent
+and must land together. The `apply`/`appterm` fix for multi-arg function calls
+depends on this refactoring. Deferred until the REPL needs arbitrary expression
+evaluation through the metacircular interpreter.
 
 ## REPL
 
