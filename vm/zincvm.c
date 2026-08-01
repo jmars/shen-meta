@@ -361,6 +361,8 @@ static volatile sig_atomic_t test_timed_out = 0;
 static Value vm_error_val;
 static int vm_error_pending = 0;
 static int vm_in_trap_error = 0;  /* set while inside trap-error body/handler */
+static int repl_mode = 0;          /* set while REPL is active */
+static jmp_buf repl_exit_jmp;      /* longjmp target for clean REPL EOF exit */
 
 /* ------------------------------------------------------------------ */
 /*  Forward declarations                                               */
@@ -837,6 +839,14 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     /* --- Error handling --- */
     if (strcmp(name, "simple-error") == 0) {
         Value a = va_pop(stack);
+        /* REPL EOF exit: when stdin hits EOF, the reader raises
+           "error: empty stream" and shen.loop would normally catch it
+           and re-loop infinitely.  In repl_mode, longjmp to repl_exit_jmp
+           for a clean exit instead. */
+        if (repl_mode && a.tag == VAL_STRING
+            && a.str.len == 19 && strncmp(a.str.data, "error: empty stream", 19) == 0) {
+            longjmp(repl_exit_jmp, 1);
+        }
         char msg[256];
         if (a.tag == VAL_STRING) snprintf(msg, sizeof(msg), "%.*s", a.str.len, a.str.data);
         else snprintf(msg, sizeof(msg), "simple-error called");
@@ -1928,26 +1938,18 @@ int main(int argc, char **argv) {
             if (ai < argc && strcmp(argv[ai], "--repl") == 0) {
                 printf("=== Shen REPL ===\n");
                 fflush(stdout);
-                /* shen.initialise is non-idempotent: first call errors
-                   (caught by trap-error in the bundle), second succeeds. */
+
                 Value init = global_get("shen.initialise");
                 if (init.tag != VAL_LAMBDA) {
                     fprintf(stderr, "repl: shen.initialise not found (tag=%d)\n", init.tag);
                     return 1;
                 }
-                /* Call twice — first error is expected and caught.
-                   Wrap in setjmp so simple-error doesn't escape. */
                 Value *env_init = GC_VALUE_ARRAY(init.lambda.env_len + 1);
                 if (init.lambda.env_len > 0)
                     memcpy(env_init, init.lambda.env, init.lambda.env_len * sizeof(Value));
                 env_init[init.lambda.env_len] = val_number(0);
                 jmp_buf saved_jmp;
                 memcpy(saved_jmp, vm_error_jmp, sizeof(jmp_buf));
-                if (setjmp(vm_error_jmp) == 0) {
-                    vm_exec_env(init.lambda.code, init.lambda.code_len,
-                                env_init, init.lambda.env_len + 1);
-                }
-                memcpy(vm_error_jmp, saved_jmp, sizeof(jmp_buf));
                 if (setjmp(vm_error_jmp) == 0) {
                     vm_exec_env(init.lambda.code, init.lambda.code_len,
                                 env_init, init.lambda.env_len + 1);
@@ -1965,12 +1967,20 @@ int main(int argc, char **argv) {
                 if (repl.lambda.env_len > 0)
                     memcpy(env_repl, repl.lambda.env, repl.lambda.env_len * sizeof(Value));
                 env_repl[repl.lambda.env_len] = val_number(0);
+
+                /* Set up REPL mode: intercept "error: empty stream" to
+                   exit cleanly on EOF instead of looping forever. */
+                repl_mode = 1;
                 memcpy(saved_jmp, vm_error_jmp, sizeof(jmp_buf));
-                if (setjmp(vm_error_jmp) == 0) {
-                    vm_exec_env(repl.lambda.code, repl.lambda.code_len,
-                                env_repl, repl.lambda.env_len + 1);
+                if (setjmp(repl_exit_jmp) == 0) {
+                    if (setjmp(vm_error_jmp) == 0) {
+                        vm_exec_env(repl.lambda.code, repl.lambda.code_len,
+                                    env_repl, repl.lambda.env_len + 1);
+                    }
                 }
+                repl_mode = 0;
                 memcpy(vm_error_jmp, saved_jmp, sizeof(jmp_buf));
+
                 printf("\nGoodbye.\n");
                 return 0;
             }
