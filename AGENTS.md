@@ -31,7 +31,7 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 | 6-7 | read-file-as-string, load via apply | Pass |
 | 7b | read-from-string | Pass (returns [[+ 1 2]]) |
 | 7c | read via string stream | Pass |
-| 8-10 | load shen/util.shen, id, newvar | Pass |
+| 8-10 | id, newvar, defun->lambda (bundled via interp-load-raw) | Pass |
 
 ## Key files (under `shen/` unless noted):
 - `shen/interp.shen` — meta-circular ZINC VM (loads everything)
@@ -89,10 +89,7 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 - **`=` cons-vs-symbol** comparison (e.g., `(= hd(Form) "number")`): compares the
   cons's car to the symbol.  This is a flat-access pattern bug workaround — the
   bundled zinc-c generates one fewer `hd` than needed for nested pattern matching.
-  **Exception**: `{` always returns false for `(= { some-cons)` — prevents false
-  matches on type annotations like `{A --> B}`.  Also blocks `define`/`defun`/
-  `lambda`/`let`/`cond`/`if` from matching via cons-vs-symbol (they're Shen form-
-  head keywords, not flat pattern tags).
+  All symbols (including `{`) use the same car-comparison — no exceptions.
 - **`%%` in normalize**: ALL primitives must use `%%` prefix in normalize.shen.
   `[set S E]` was missing `%%`, causing `set` to go through `global set` + `apply`
   (safe wrapper) instead of `prim set` (direct C primitive).  This broke
