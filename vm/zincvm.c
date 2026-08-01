@@ -2047,6 +2047,79 @@ int main(int argc, char **argv) {
                 run_test("eval-kl-add",
                          "(mg[5:s]*ev1*g[11:s]raw.eval-klp)", 0);
 
+                /* Test 11: eval-kl [cons 1 2] → [cons 1 . 2].
+                   Tests cons through the full marshal→eval→demarshal chain. */
+                {
+                    Value cons_sym = val_symbol("cons");
+                    Value n1 = val_number(1);
+                    Value n2 = val_number(2);
+                    Value nil = val_nil();
+                    Value lst = val_cons(n2, nil);           /* (2) */
+                    lst = val_cons(n1, lst);                 /* (1 2) */
+                    global_set("*ev2*", val_cons(cons_sym, lst)); /* (cons 1 2) */
+                }
+                printf("--- Test 11: eval-kl [cons 1 2] — expect [cons 1 . 2] ---\n");
+                run_test("eval-kl-cons",
+                         "(mg[5:s]*ev2*g[11:s]raw.eval-klp)", 0);
+
+                /* Test 12: eval-kl [+ [* 2 3] 4] → 10.
+                   Tests nested primitive evaluation. */
+                {
+                    Value plus_sym = val_symbol("+");
+                    Value mul_sym = val_symbol("*");
+                    Value n2 = val_number(2);
+                    Value n3 = val_number(3);
+                    Value n4 = val_number(4);
+                    Value nil = val_nil();
+                    /* Build: [* 2 3] */
+                    Value inner = val_cons(n3, nil);          /* (3) */
+                    inner = val_cons(n2, inner);              /* (2 3) */
+                    inner = val_cons(mul_sym, inner);         /* (* 2 3) */
+                    /* Build: [+ [* 2 3] 4] */
+                    Value outer = val_cons(n4, nil);          /* (4) */
+                    outer = val_cons(inner, outer);           /* ([* 2 3] 4) */
+                    outer = val_cons(plus_sym, outer);        /* (+ [* 2 3] 4) */
+                    global_set("*ev3*", outer);
+                }
+                printf("--- Test 12: eval-kl [+ [* 2 3] 4] — expect 10 ---\n");
+                run_test("eval-kl-nested",
+                         "(mg[5:s]*ev3*g[11:s]raw.eval-klp)", 0);
+
+                /* Test 13: eval-kl [cn "hello" "world"] → "helloworld".
+                   Tests string concat (multi-arg primitive) through eval-kl. */
+                {
+                    Value cn_sym = val_symbol("cn");
+                    /* val_string is not a function — use string literals via
+                       cons cells with VAL_STRING.  But we can't construct
+                       VAL_STRING without add_string.  Instead, build the form
+                       and marshal it — marshal_to_tagged converts native
+                       VAL_STRING to tagged string form automatically. */
+                    Value s1 = val_string("hello", 5);
+                    Value s2 = val_string("world", 5);
+                    Value nil = val_nil();
+                    Value lst = val_cons(s2, nil);           /* ("world") */
+                    lst = val_cons(s1, lst);                 /* ("hello" "world") */
+                    global_set("*ev4*", val_cons(cn_sym, lst)); /* (cn "hello" "world") */
+                }
+                printf("--- Test 13: eval-kl [cn \"hello\" \"world\"] — expect \"helloworld\" ---\n");
+                run_test("eval-kl-cn",
+                         "(mg[5:s]*ev4*g[11:s]raw.eval-klp)", 0);
+
+                /* Test 14: eval-kl error recovery: [hd 42] returns input.
+                   hd on a non-cons triggers simple-error → identity. */
+                {
+                    Value hd_sym = val_symbol("hd");
+                    Value n42 = val_number(42);
+                    Value nil = val_nil();
+                    /* Build: [hd 42] */
+                    Value lst = val_cons(n42, nil);           /* (42) */
+                    lst = val_cons(hd_sym, lst);              /* (hd 42) */
+                    global_set("*ev5*", lst);
+                }
+                printf("--- Test 14: eval-kl [hd 42] — expect identity (error swallowed) ---\n");
+                run_test("eval-kl-error",
+                         "(mg[5:s]*ev5*g[11:s]raw.eval-klp)", 0);
+
                 /* Diagnostic: dump bytecode of toplevel-interp and interp */
                 printf("--- Bytecode Dump ---\n");
                 {
