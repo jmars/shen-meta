@@ -618,35 +618,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             *acc = val_boolean(strcmp(a1.sym.name, a2.sym.name) == 0);
         else if (a1.tag == VAL_BOOLEAN && a2.tag == VAL_BOOLEAN)
             *acc = val_boolean(a1.boolean == a2.boolean);
-        /* HACK: zinc-c generates flat comparisons like = [number 42] "number"
-           instead of = hd(hd(Code)) "number".  Treat cons-vs-symbol as
-           comparing the cons's car to the symbol (both directions).
-           BUT skip this for Shen form-head keywords (define, defun, lambda,
-           let, cond, if) because they would incorrectly match multi-element
-           form lists like [[define newvar ...], ...] as the keyword itself. */
-        else if (a1.tag == VAL_CONS && a2.tag == VAL_SYMBOL) {
-            const char *sym = a2.sym.name;
-            /* Skip hack for form-head keywords — they cause false
-               matches on multi-element form lists */
-            if (strcmp(sym, "define") == 0 || strcmp(sym, "defun") == 0 ||
-                strcmp(sym, "lambda") == 0 || strcmp(sym, "let") == 0 ||
-                strcmp(sym, "cond") == 0 || strcmp(sym, "if") == 0) {
-                *acc = val_boolean(false);
-            } else {
-                *acc = val_boolean(a1.cons.car->tag == VAL_SYMBOL &&
-                                   strcmp(a1.cons.car->sym.name, sym) == 0);
-            }
-        }
-        else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_CONS) {
-            const char *sym = a1.sym.name;
-            /* All symbols (including {) use cons-car comparison.
-               (= { some-cons) checks if the cons's car is {. */
-            if (a2.cons.car->tag == VAL_SYMBOL) {
-                *acc = val_boolean(strcmp(sym, a2.cons.car->sym.name) == 0);
-            } else {
-                *acc = val_boolean(false);
-            }
-        }
+        /* cons-vs-symbol and symbol-vs-cons: always false.
+           zinc-c currently generates correct hd-wrapped comparisons, so
+           flat comparisons like = [number 42] "number" no longer occur. */
+        else if ((a1.tag == VAL_CONS && a2.tag == VAL_SYMBOL) ||
+                 (a1.tag == VAL_SYMBOL && a2.tag == VAL_CONS))
+            *acc = val_boolean(false);
         /* fail is registered as VAL_PRIM so it can be both applied (error)
            and compared in where clauses.  Compare symbol name with prim name. */
         else if (a1.tag == VAL_SYMBOL && a2.tag == VAL_PRIM)

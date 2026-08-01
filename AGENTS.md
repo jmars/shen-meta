@@ -89,10 +89,9 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
   `define`/`defun`/`type`/etc. → `package-symbols` leaves them bare.  If `(= define
   shen.define)` ever returns false at runtime, the bug is in `shen.initialise`
   not completing (likely a missing `%%` on a primitive in normalize.shen), NOT in `=`.
-- **`=` cons-vs-symbol** comparison (e.g., `(= hd(Form) "number")`): compares the
-  cons's car to the symbol.  This is a flat-access pattern bug workaround — the
-  bundled zinc-c generates one fewer `hd` than needed for nested pattern matching.
-  All symbols (including `{`) use the same car-comparison — no exceptions.
+- **`=` cons-vs-symbol** and symbol-vs-cons comparisons always return false.
+  zinc-c currently generates correct `hd`-wrapped comparisons (e.g.,
+  `(= hd(Code) define)`), so flat `(= [define ...] define)` no longer occurs.
 - **`%%` in normalize**: ALL primitives must use `%%` prefix in normalize.shen.
   `[set S E]` was missing `%%`, causing `set` to go through `global set` + `apply`
   (safe wrapper) instead of `prim set` (direct C primitive).  This broke

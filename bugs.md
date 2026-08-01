@@ -8,12 +8,11 @@
 **Status:** Skipped. The `=` prefix hack (removed in `ca18773`) was a premature attempt to fix this. Root cause is elsewhere.  
 **Debug strategy:** Use `--trace shen.eval-and-print --trace shen.shen->kl-h` to find the actual loop.
 
-## 2. `=` cons-vs-symbol HACK: flat-access pattern matching workaround
+## 2. `=` cons-vs-symbol HACK — REMOVED
 
-**File:** `vm/zincvm.c:621-640`  
-**Symptom:** `zinc-c` generates `(= [number 42] "number")` instead of `(= hd(hd(Code)) "number")`.  
-**Workaround:** `=` treats `(cons X) = symbol` as comparing the cons's car to the symbol. Form-head keywords (`define`, `defun`, `lambda`, `let`, `cond`, `if`) are excluded to avoid false matches on multi-element form lists.  
-**Status:** Workaround in place. Root cause is in `zinc-c` generating one fewer `hd` than needed for nested pattern matching. Fix in the Shen compiler, not the VM.
+**Status:** Fixed. Removed in commit after `019a969`.  
+**Was:** `zinc-c` generated flat `(= [number 42] "number")` instead of `(= hd(hd(Code)) "number")`.  
+**Resolution:** The zinc-c compiler now generates correct `hd`-wrapped comparisons. All 48 tests pass without any cons-vs-symbol special-casing in `=`. The hack was dead code.
 
 ## 3. `eval_kl` error swallowing
 
