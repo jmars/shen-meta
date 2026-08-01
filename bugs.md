@@ -14,7 +14,11 @@ For `(+ 1 2)`, `eval-kl` completes without type checking, so the buggy stack lay
 
 **Debug evidence:** `--trace` shows zero activity from `shen.shen->kl-h`, `shen.record-and-evaluate`, `interp`, `toplevel-interp`, `kl->zinc`, `extract-kl` — the hang is in the `eval-kl` C primitive's interaction with the `shen.eval-and-print` closure's stack layout.
 
-**Fix needed:** Rewrite the `shen.eval-and-print` closure's bytecode with correct mark discipline. The closure is 18 ZINC instructions compiled from bundled KLambda — needs proper stack cleanup between `eval-kl` and `shen.app` calls.
+**Fix needed:** The KLambda source in `load.kl:9` is:
+```
+(pr (shen.app (eval-kl (shen.shen->kl Z1253)) "\n" (shen.s (shen.shen->kl Z1253)) ""))
+```
+`shen.s` is a function call, but `zinc-c` emits `[symbol shen.s]` (literal) instead of `[global shen.s]` (function lookup), leaving the `apply` for `shen.s` missing from the bytecode. The orphaned args (`shen.s`, `"\n"`) corrupt `shen.app`'s stack, triggering infinite `shen.app`→`shen.arg->str`→`shen.atom->str` recursion for `defun` forms. Fix in `zinc-c` or KLambda IR — not in the bytecode.
 
 ## 2. `=` cons-vs-symbol HACK — REMOVED
 
