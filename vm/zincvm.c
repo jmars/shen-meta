@@ -2358,6 +2358,36 @@ int main(int argc, char **argv) {
         "c(mn[1:n]0n[1:n]0g[9:s]<-addresspv)"        /* body pushed LAST */
         "g[10:s]trap-errorp)", 1);
 
-    printf("=== All 32 tests done ===\n");
+    /* === appterm ('t' opcode) tests ===
+       Stack layout for appterm: [mark, argN..arg1, function]
+       Same RTL arg order as apply.  VAL_PRIM: pops optional mark, calls
+       primitive inline.  VAL_LAMBDA: collects args, builds env, tail-calls
+       in current frame (pc=0 — no new CallFrame, frame reuse).               */
+
+    /* 33. appterm to primitive (+) */
+    run_test("33. appterm: (+ 1 2)", "(mn[1:n]2n[1:n]1g[1:s]+t)", 1);
+
+    /* 34. appterm to lambda (1 arg, identity) */
+    run_test("34. appterm: id 42", "(mn[2:n]42c(a[1:n]0v)t)", 1);
+
+    /* 35. appterm to lambda (2 args, return rightmost via access 0).
+       RTL: 99 pushed first (rightmost Shen arg), 42 pushed last (leftmost).
+       Env=[42,99]; reverse-index: access 0 → env[1]=99.                */
+    run_test("35. appterm: 2-arg 2nd", "(mn[2:n]99n[2:n]42c(a[1:n]0v)t)", 1);
+
+    /* 36. appterm within apply — outer closure appterms to inner closure.
+       Tests frame reuse: appterm runs in apply's frame, return pops
+       correctly through the apply-saved CallFrame.                         */
+    run_test("36. appterm-in-apply",
+        "(mn[2:n]42c(ma[1:n]0c(a[1:n]0v)t)p)", 1);
+
+    /* 37. appterm error: zero args — stack has closure but no args */
+    run_test("37. appterm: zero args", "(c(a[1:n]0v)t)", 0);
+
+    /* 38. appterm error: missing mark for lambda — one arg pushed
+       but no pushmark; arg gets collected, then stack empty → error    */
+    run_test("38. appterm: missing mark", "(n[2:n]42c(a[1:n]0v)t)", 0);
+
+    printf("=== All 38 tests done ===\n");
     return 0;
 }
