@@ -41,15 +41,17 @@
 
 
 
-(define collect-apply-args { (list zinc-value) --> (list zinc-value) }
+(define collect-apply-args { (list zinc-value) --> number --> (list zinc-value) }
   \* Hit A0 before mark: A0 is the spurious old-acc from pre-pushmark.
      Second element is the literal symbol mark — skip both, return saved stack. *\
-  [V1 V2 | S] -> [[] S] where (= V2 mark)
-  \* Collect V1 as an arg, recurse *\
-  [V1 | S] -> (let Result (collect-apply-args S)
+  [V1 V2 | S] N -> [[] S] where (= V2 mark)
+  \* At A0 position but N > 64: too many args pushed before mark *\
+  [V1 V2 | S] N -> (simple-error "too many args (>64)") where (> N 64)
+  \* Collect V1 as an arg, recurse with incremented counter *\
+  [V1 | S] N -> (let Result (collect-apply-args S (+ N 1))
                 [[V1 | (hd Result)] | (tl Result)])
-  \* Empty stack (shouldn't happen) *\
-  [] -> [[] []])
+  \* Empty stack — no mark found, bytecode is malformed *\
+  [] _ -> (simple-error "missing pushmark"))
 
 (define interp { zinc-code --> zinc-value --> (list zinc-value) --> (list zinc-value) --> (list zinc-value) --> zinc-value }
   [access N | C] A E S R                                        -> (interp C (lookup N E) E [A | S] R)
@@ -60,21 +62,25 @@
   [label L | C] A E S R                                         -> (interp C A E S R)
   \* Apply: collect all args, isolate stack, save caller context *\
   [apply | C] [lambda C1 E1] E S R ->
-    (let Collected (collect-apply-args S)
+    (let Collected (collect-apply-args S 0)
       (let Args (hd Collected)
         (let Rest (hd (tl Collected))
-          (interp C1 [lambda C1 E1] (append E1 Args) [] [[C E Rest] | R]))))
+          (interp C1 [lambda C1 E1] (append (reverse Args) E1) [] [[C E Rest] | R]))))
   \* Appterm — tail call with return frame: collect all args up to mark *\
   [appterm | C] [lambda C1 E1] E S [[C_call E_call _] | R] ->
-    (let Collected (collect-apply-args S)
+    (let Collected (collect-apply-args S 0)
       (let Args (hd Collected)
-        (let Rest (hd (tl Collected))
-          (interp C1 [lambda C1 E1] (append E1 Args) [] [[C_call E_call Rest] | R]))))
+        (if (empty? Args)
+            (simple-error "appterm zero args")
+            (let Rest (hd (tl Collected))
+              (interp C1 [lambda C1 E1] (append (reverse Args) E1) [] [[C_call E_call Rest] | R])))))
   \* Appterm — tail call at top level: collect all args up to mark *\
   [appterm | C] [lambda C1 E1] E S [] ->
-    (let Collected (collect-apply-args S)
+    (let Collected (collect-apply-args S 0)
       (let Args (hd Collected)
-          (interp C1 [lambda C1 E1] (append E1 Args) [] [])))
+        (if (empty? Args)
+            (simple-error "appterm zero args")
+            (interp C1 [lambda C1 E1] (append (reverse Args) E1) [] []))))
   [push | C] A E S R                                            -> (interp C A E [A | S] R)
   [pushmark | C] A E S R                                        -> (interp C A E [mark | S] R)
   [cur C1 | C] A E S R                                          -> (interp C [lambda C1 E] E [A | S] R)
