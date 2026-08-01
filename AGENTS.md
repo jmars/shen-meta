@@ -324,12 +324,19 @@ transformation is needed — the interp natively handles standard ZINC output.
 **Key design choice:** Pushing OLD accumulator (not new value) means the accumulator
 remains the "current value" at every step, keeping all existing prim rules compatible.
 
-### Metacircular interp — remaining gaps
+### Metacircular interp — apply/appterm (DONE)
 
-- **`apply`/`appterm` for multi-arg calls** — currently only pop 1 arg from stack.
-  Fixing this requires a recursive arg-collection helper. Single-arg calls through
-  apply actually work *better* now (auto-push puts the arg on the stack before
-  the function overwrites acc).
+- **Multi-arg `apply`**: Uses `collect-apply-args` helper to collect all args
+  up to the mark (skipping A0+mark), then gives callee a fresh stack with
+  caller context saved as `[C E Rest]` return frame.
+- **Multi-arg `appterm`**: Same arg collection via `collect-apply-args`.
+  Tail-call semantics: replaces saved stack in return frame (or starts fresh
+  at top level). Zero-arg check added (matches C VM).
+- **`collect-apply-args`**: depth-limited (max 64 args, matches C VM),
+  errors if mark is missing, signature `(list zinc-value) -> number -> (list zinc-value)`.
+- **Env ordering fix**: `(append (reverse Args) E1)` — newest bindings at
+  head of env list, matching forward `lookup` in metacircular interp.
+  Equivalent to C VM's reverse-index `lookup_env`.
 
 ## REPL
 
