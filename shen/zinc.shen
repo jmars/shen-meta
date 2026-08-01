@@ -19,9 +19,6 @@
                     (append (fold-append [] (map-zinc-c (reverse (tl Args))))
                             (append (zinc-c (hd Args)) [prim F]))
                     (fail)) where (symbol? F)
-  \* Single-arg non-primitive tail call — no pushmark needed *\
-  [F A]        -> (append (zinc-c A) (append (zinc-c F) [appterm])) where (symbol? F)
-  \* Multi-arg non-primitive tail call — needs pushmark to delimit args *\
   [F | Args]   -> (append [pushmark]
                           (append (fold-append [] (map-zinc-c (reverse Args)))
                                   (append (zinc-c F) [appterm])))

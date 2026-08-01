@@ -1486,9 +1486,8 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         }
         case OP_APPLY: {
             /* Standard ZINC: function is auto-pushed on stack top.
-               Pop it, then collect args up to the mark. */
-            while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
-                va_pop(&stack);
+               Pop it, then collect args up to the mark.
+               zinc-c always emits pushmark — the mark is required. */
             if (stack.len > 0) acc = va_pop(&stack);  /* pop function */
             if (acc.tag == VAL_LAMBDA) {
                 check_closure(acc, "APPLY");
@@ -1500,9 +1499,11 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                     if (nargs < 64) argbuf[nargs++] = va_pop(&stack);
                     else { vm_error_val = val_error("runtime: too many args (>64)"); vm_error_pending = 1; longjmp(vm_error_jmp, 1); }
                 }
-                /* Pop the intentional mark */
-                if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
-                    va_pop(&stack);
+                /* Pop the required mark (zinc-c always emits pushmark) */
+                if (stack.len == 0 || va_peek(&stack).tag != VAL_MARK) {
+                    fprintf(stderr, "runtime: apply missing pushmark\n"); goto done;
+                }
+                va_pop(&stack);
 
                 if (frames_sp >= CALL_STACK_DEPTH) { goto done; }
                 CallFrame *cf = &frame_stack[frames_sp++];
@@ -1592,22 +1593,23 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             pc++; break;
         }
         case OP_APPTERM: {
-            /* Standard ZINC: pop function from stack top, then args */
-            while (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
-                va_pop(&stack);
+            /* Standard ZINC: pop function from stack top, collect args
+               up to mark.  zinc-t always emits pushmark — required. */
             if (stack.len > 0) acc = va_pop(&stack);  /* pop function */
             if (acc.tag == VAL_LAMBDA) {
                 check_closure(acc, "APPTERM");
                 if (stack.len <= 0) { fprintf(stderr, "runtime: appterm empty stack\n"); goto done; }
-                /* Collect non-mark args (function and stale marks already popped) */
                 int nargs = 0;
                 Value argbuf[64];
                 while (stack.len > 0 && va_peek(&stack).tag != VAL_MARK) {
                     if (nargs < 64) argbuf[nargs++] = va_pop(&stack);
                     else { vm_error_val = val_error("runtime: appterm too many args (>64)"); vm_error_pending = 1; longjmp(vm_error_jmp, 1); }
                 }
-                if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK)
-                    va_pop(&stack);
+                /* zinc-t always emits pushmark — required */
+                if (stack.len == 0 || va_peek(&stack).tag != VAL_MARK) {
+                    fprintf(stderr, "runtime: appterm missing pushmark\n"); goto done;
+                }
+                va_pop(&stack);  /* pop mark */
                 if (nargs == 0) { fprintf(stderr, "runtime: appterm zero args\n"); goto done; }
 
                 int lambda_env_len = acc.lambda.env_len;
@@ -2151,7 +2153,7 @@ int main(int argc, char **argv) {
                    Result: [[+ 1 2]] — correct! Fixed by variable? C primitive fix. */
                 printf("--- Test 7b: read-from-string ---\n");
                 run_test("read-from-string",
-                         "(S[7:S](+ 1 2)g[16:s]read-from-stringp)", 0);
+                         "(mS[7:S](+ 1 2)g[16:s]read-from-stringp)", 0);
 
                 /* Test 7tc: disable type checker */
                 printf("--- Test 7tc: disable *tc* ---\n");
@@ -2184,7 +2186,7 @@ int main(int argc, char **argv) {
                 /* Test 10: call (newvar) from loaded util.shen — verifies gensym works */
                 printf("--- Test 10: call (newvar) from loaded util.shen ---\n");
                 run_test("newvar-from-util",
-                         "(g[6:s]newvarp)", 0);
+                         "(mg[6:s]newvarp)", 0);
 
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
@@ -2245,7 +2247,7 @@ int main(int argc, char **argv) {
                 if (getenv("ZINCVM_RUN_REPL")) {
                     /* read-from-string then eval-kl on (+ 1 2) */
                     run_test("repl-eval",
-                             "(mS[7:S](+ 1 2)g[16:s]read-from-stringpg[2:s]hdpg[7:s]eval-klpv)", 0);
+                             "(mS[7:S](+ 1 2)g[16:s]read-from-stringpmg[2:s]hdpmg[7:s]eval-klpv)", 0);
                 } else {
                     printf("  (skipped — set ZINCVM_RUN_REPL=1 to run)\n");
                 }
