@@ -1116,18 +1116,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            in interp.shen:193-195.  The recursion guard prevents
            infinite re-entry when %% eval-kl is called from within
            Shen code executed by the chain. */
-        static int eval_kl_depth = 0;
         /* Recursion guard removed — was breaking defun compilation
            by returning identity instead of evaluating nested eval-kl.
            With Boehm GC, deep recursion through eval-kl→kl→zinc→eval-kl
-           is safe (no GC corruption). */
-        /* if (eval_kl_depth > 0) {
-            *acc = a; return 0;
-        } */
-        eval_kl_depth++;
-
-        /* CatchFrame ensures eval_kl_depth is always decremented,
-           even if the pipeline triggers simple-error → longjmp. */
+           is safe (no GC corruption).  A CatchFrame swallows pipeline
+           errors (simple-error → longjmp) and returns identity. */
         CatchFrame cf;
         cf.parent = vm_catch_chain;
         cf.in_trap_error = 0;
@@ -1182,13 +1175,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
 
         done:
         vm_catch_chain = cf.parent;
-        eval_kl_depth--;
         *acc = result;
         return 0;
         } /* end setjmp == 0 block */
-        /* Error path: unlink, decrement depth, return identity. */
+        /* Error path: unlink, return identity. */
         vm_catch_chain = cf.parent;
-        eval_kl_depth--;
         *acc = result;
         return 0;
     }
@@ -1411,7 +1402,7 @@ static void resolve_jumps(Instr *code, int len) {
 #define CALL_STACK_DEPTH 65536
 typedef struct { Instr *code; int code_len, pc; Value *env; int env_len, env_cap; ValueArray stack; } CallFrame;
 
-static Value lookup_env(int n, Value *env, int env_len, int pc_for_diag, Instr *cur_code, int cur_len) {
+static Value lookup_env(int n, Value *env, int env_len) {
     if (n < 0 || n >= env_len) {
         /* Out-of-bounds access: return 0 silently.
            This occurs in nested closures with empty captured environments
@@ -1613,7 +1604,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             break;
         }
         case OP_ACCESS:
-            acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len, pc, cur_code, cur_len);
+            acc = lookup_env((in->operand.tag == VAL_NUMBER) ? (int)in->operand.number : in->jmp_target, env, env_len);
             va_push(&stack, acc);
             pc++; break;
         case OP_GLOBAL: {

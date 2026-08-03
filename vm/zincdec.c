@@ -135,14 +135,6 @@ static Value val_boolean(int b) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_BOOLEAN; v.boolean = b; return v;
 }
-static Value val_cons(Value car, Value cdr) {
-    Value v; memset(&v, 0, sizeof(v));
-    v.tag = VAL_CONS; v.cons.car = GC_VALUE(); *v.cons.car = car; v.cons.cdr = GC_VALUE(); *v.cons.cdr = cdr; return v;
-}
-static Value val_nil(void) {
-    Value v; memset(&v, 0, sizeof(v));
-    v.tag = VAL_NIL; return v;
-}
 static Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
     /* env arrays are GC-allocated via gcalloc so GC traces captured
        Values when the closure is reachable (e.g. via global_table). */
@@ -157,58 +149,9 @@ static Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
     } else { v.lambda.env = NULL; v.lambda.env_len = 0; }
     return v;
 }
-static Value val_mark(void) {
-    Value v; memset(&v, 0, sizeof(v));
-    v.tag = VAL_MARK; return v;
-}
 static Value val_prim(const char *name) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_PRIM; v.prim.name = name; return v;
-}
-static Value val_error(const char *msg) {
-    Value v; memset(&v, 0, sizeof(v));
-    v.tag = VAL_ERROR; v.error.message = strdup(msg); return v;
-}
-static Value val_vector(int size) {
-    Value v; memset(&v, 0, sizeof(v));
-    v.tag = VAL_VECTOR; v.vector.len = size;
-    if (size > 0) {
-        v.vector.data = (Value*)GC_MALLOC(size * sizeof(Value));
-    }
-    return v;
-}
-static Value val_stream_in(FILE *f) {
-    Value v; memset(&v, 0, sizeof(v));
-    v.tag = VAL_STREAM; v.stream.file = f; v.stream.is_input = 1; return v;
-}
-static Value val_stream_out(FILE *f) {
-    Value v; memset(&v, 0, sizeof(v));
-    v.tag = VAL_STREAM; v.stream.file = f; v.stream.is_input = 0; return v;
-}
-
-/* String stream storage — avoids bloating sizeof(Value).
-   Index stored in stream.file cast to (FILE*)(intptr_t)idx. */
-#define MAX_STRING_STREAMS 8
-static struct { char *data; int len; int pos; } string_streams[MAX_STRING_STREAMS];
-static int n_string_streams = 0;
-
-static Value val_string_stream_in(const char *src, int srclen) {
-    if (n_string_streams >= MAX_STRING_STREAMS) {
-        fprintf(stderr, "runtime: too many string streams\n");
-        return val_error("too many string streams");
-    }
-    int idx = n_string_streams++;
-    string_streams[idx].data = malloc(srclen + 1);
-    memcpy(string_streams[idx].data, src, srclen);
-    string_streams[idx].data[srclen] = '\0';
-    string_streams[idx].len = srclen;
-    string_streams[idx].pos = 0;
-    Value v; memset(&v, 0, sizeof(v));
-    v.tag = VAL_STREAM;
-    v.stream.file = (FILE*)(intptr_t)(idx + 1);  /* +1 so 0 = no string stream */
-    v.stream.is_input = 1;
-    v.stream.is_string = 1;
-    return v;
 }
 
 
@@ -355,11 +298,6 @@ static int parse_csexp_list(ParseState *ps, Instr **out) {
     if (*ps->p != ')') PARSE_ERROR("expected ')' after list body");
     ps->p++;
     return len;
-}
-static int parse_bytecode(const char *str, Instr **out) {
-    ParseState ps; ps.p = str; ps.start = str;
-    if (setjmp(parse_err_jmp)) { fprintf(stderr, "%s\n", parse_err_msg); *out = NULL; return 0; }
-    return parse_csexp_list(&ps, out);
 }
 
 /* --- resolve_jumps --- */
