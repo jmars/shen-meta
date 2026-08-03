@@ -4,9 +4,13 @@
 
 **Symptom:** `read-from-string "(define id {A --> A} X -> X)"` hangs >10s. `read-from-string "(+ 1 2)"` works fine. The `read-from-string-unprocessed` path (parse only) is instant.
 
-**Current understanding (2026-08-02):** With the jmp_buf stack fix (da55d9b), the `shen.app` ping-pong is eliminated. The remaining hang is in `process-sexprs`. The typed define triggers a property-vector lookup for the freshly-read symbol, which fails (no arity stored), and the error recovery doesn't terminate. Backtrace after the jmp_buf fix shows `str->bytes` being called repeatedly from `read-from-string` at pc=4.
+**Debugging results (2026-08-03):**
+- `*property-vector*` is **correctly initialized** as a Shen dict (VAL_VECTOR, tag=10 in this codebase's enum) after `shen.initialise`. The dict is functional — `dict.kl` is loaded and `shen.dict` is in the bundle.
+- The jmp_buf stack (`error_jmp_stack`) is **balanced** — no corruption. Every `te_push` is matched by `te_pop` via either the body or handler path.
+- The hang manifests as: `simple-error("id has no attributes: arity")` fires at `error_jmp_sp=1` (the eval-kl level), the longjmp is caught, and the whole computation re-enters in an infinite loop. Trap-error bodies with `env_len=1` complete via BODY-DONE (no handler invoked) thousands of times, then the simple-error fires and the cycle repeats.
+- This is consistent with the **"arity loop in kl->zinc"** root cause from commit `825ff9b` — the problem is in the Shen-level arity lookup/error-recovery logic, not in the C VM's trap-error machinery.
 
-**Root cause chain:** `find-arities → store-arity → arity(id) → get(property-vector, arity, id) → <-dict → error → get's handler → simple-error → arity's handler returns -1`. After this, `store-arity` should continue and `put` the arity, but something re-enters the chain.
+**Root cause chain:** `find-arities → store-arity → arity(id) → get(property-vector, arity, id) → <-dict → "value id not found in dict" → get's handler → simple-error("id has no attributes: arity") → arity's handler returns -1 → store-arity calls execute-store-arity → put → ... → loop re-enters.
 
 **Contributing factors fixed:**
 1. Stale `push` instructions in bundle — fixed by `make bundle`
