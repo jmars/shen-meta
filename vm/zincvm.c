@@ -362,38 +362,32 @@ static Value global_get(const char *name) {
 /*  Error handling for trap-error / simple-error                       */
 /* ------------------------------------------------------------------ */
 
-/* Stack of jmp_bufs for nested trap-error.  simple-error always
-   longjmps to the current vm_error_jmp.  trap-error pushes the current
-   vm_error_jmp onto the stack before setjmp-ing a new one.  When a
-   handler runs, it pops FIRST so the handler's simple-error propagates
-   to the enclosing trap-error, not back to itself. */
-#define ERROR_JMP_MAX 64
-static jmp_buf error_jmp_stack[ERROR_JMP_MAX];
-static int error_jmp_sp = 0;  /* next free slot */
-static jmp_buf vm_error_jmp;
+/* Per-catch-site linked list of stack-allocated catch frames.
+   Replaces the global jmp_buf + manual save/restore stack design.
+   Each catch site declares a local CatchFrame, links it to the chain,
+   and setjmps into cf.buf.  On error, vm_throw writes the error value
+   and longjmps to the chain head.  The frame is unlinked FIRST on the
+   error path so a simple-error raised inside a handler propagates to
+   the ENCLOSING frame, not back to itself. */
+typedef struct CatchFrame {
+    jmp_buf          buf;
+    Value            error_val;
+    int              in_trap_error;   /* 1 while running a trap-error BODY */
+    struct CatchFrame *parent;
+} CatchFrame;
+static CatchFrame *vm_catch_chain = NULL;
 
-static void te_push(void) {
-    if (error_jmp_sp >= ERROR_JMP_MAX) {
-        fprintf(stderr, "runtime: error_jmp_stack overflow (%d nested trap-errors)\n", ERROR_JMP_MAX);
+static void vm_throw(const char *msg) {
+    if (!vm_catch_chain) {
+        fprintf(stderr, "uncaught Shen error: %s\n", msg);
         abort();
     }
-    memcpy(&error_jmp_stack[error_jmp_sp], vm_error_jmp, sizeof(jmp_buf));
-    error_jmp_sp++;
-}
-static void te_pop(void) {
-    if (error_jmp_sp <= 0) {
-        fprintf(stderr, "runtime: error_jmp_stack underflow\n");
-        abort();
-    }
-    error_jmp_sp--;
-    memcpy(vm_error_jmp, &error_jmp_stack[error_jmp_sp], sizeof(jmp_buf));
+    vm_catch_chain->error_val = val_error(msg);
+    longjmp(vm_catch_chain->buf, 1);
 }
 
 static jmp_buf alarm_jmp;
 static volatile sig_atomic_t test_timed_out = 0;
-static Value vm_error_val;
-static int vm_error_pending = 0;
-static int vm_in_trap_error = 0;
 static int repl_mode = 0;
 static jmp_buf repl_exit_jmp;
 
@@ -829,10 +823,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "pos") == 0) {
         Value a1 = va_pop(stack), a2 = va_pop(stack);
         if (a1.tag != VAL_STRING || a2.tag != VAL_NUMBER) {
-            if (vm_in_trap_error) {
-                vm_error_pending = 1; vm_error_val = val_error("pos on bad types");
-                longjmp(vm_error_jmp, 1);
-            }
+            if (vm_catch_chain && vm_catch_chain->in_trap_error)
+                vm_throw("pos on bad types");
             fprintf(stderr, "runtime: pos on bad types\n"); return -1;
         }
         /* Shen: (pos Str N) returns the single character at index N.
@@ -842,10 +834,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            loops forever writing NUL bytes. */
         int pl = (int)a2.number;
         if (pl < 0 || pl >= a1.str.len) {
-            if (vm_in_trap_error) {
-                vm_error_pending = 1; vm_error_val = val_error("pos out of bounds");
-                longjmp(vm_error_jmp, 1);
-            }
+            if (vm_catch_chain && vm_catch_chain->in_trap_error)
+                vm_throw("pos out of bounds");
             *acc = val_string("", 0);
         } else *acc = val_string(a1.str.data + pl, 1);
         return 0;
@@ -862,11 +852,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "value") == 0) {
         Value a = va_pop(stack);
         if (a.tag != VAL_SYMBOL) {
-            if (vm_in_trap_error) {
-                vm_error_pending = 1;
-                vm_error_val = val_error("value on non-symbol");
-                longjmp(vm_error_jmp, 1);
-            }
+            if (vm_catch_chain && vm_catch_chain->in_trap_error)
+                vm_throw("value on non-symbol");
             fprintf(stderr, "runtime: value on non-symbol\n");
             return -1;
         }
@@ -882,18 +869,14 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "<-address") == 0) {
         Value vec = va_pop(stack), idx = va_pop(stack);
         if (vec.tag != VAL_VECTOR || idx.tag != VAL_NUMBER) {
-            if (vm_in_trap_error) {
-                vm_error_pending = 1; vm_error_val = val_error("<-address bad types");
-                longjmp(vm_error_jmp, 1);
-            }
+            if (vm_catch_chain && vm_catch_chain->in_trap_error)
+                vm_throw("<-address bad types");
             fprintf(stderr, "runtime: <-address bad types\n"); return -1;
         }
         int i = (int)idx.number;
         if (i < 0 || i >= vec.vector.len) {
-            if (vm_in_trap_error) {
-                vm_error_pending = 1; vm_error_val = val_error("<-address OOB");
-                longjmp(vm_error_jmp, 1);
-            }
+            if (vm_catch_chain && vm_catch_chain->in_trap_error)
+                vm_throw("<-address OOB");
             fprintf(stderr, "runtime: <-address OOB\n"); return -1;
         }
         *acc = vec.vector.data[i]; return 0;
@@ -920,8 +903,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         char msg[256];
         if (a.tag == VAL_STRING) snprintf(msg, sizeof(msg), "%.*s", a.str.len, a.str.data);
         else snprintf(msg, sizeof(msg), "simple-error called");
-        vm_error_val = val_error(msg); vm_error_pending = 1;
-        longjmp(vm_error_jmp, 1);
+        vm_throw(msg);
     }
     if (strcmp(name, "shen.fail!") == 0 || strcmp(name, "fail") == 0) {
         /* (defun fail () shen.fail!) — called as (fail) triggers error.
@@ -934,8 +916,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             *acc = val_cons(val_symbol("fail"), val_cons(arg, val_nil()));
             return 0;
         }
-        vm_error_val = val_error("fail"); vm_error_pending = 1;
-        longjmp(vm_error_jmp, 1);
+        vm_throw("fail");
     }
     if (strcmp(name, "error-to-string") == 0) {
         Value a = va_pop(stack);
@@ -949,38 +930,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            Stack: [mark, Handler, Body] → pop Body first, then Handler. */
         Value body = va_pop(stack), handler = va_pop(stack);
         if (handler.tag != VAL_LAMBDA) { fprintf(stderr, "runtime: trap-error handler not fn\n"); return -1; }
-        vm_error_pending = 0;
-        /* Capture the enclosing vm_in_trap_error ONCE at entry so we can
-           restore it on every exit (normal and error/handler).  If read
-           only on the error path it would see the stale value the body left
-           set before longjmp, leaking vm_in_trap_error=1 forever. */
-        int saved_te = vm_in_trap_error;
-        /* Push-then-setjmp: the stack remembers the enclosing jmp_buf. */
-        te_push();
-        if (setjmp(vm_error_jmp)) {
-            /* Handler: pop to enclosing so simple-error propagates outward */
-            te_pop();
-            /* The original error is now being handled.  Clear the pending
-               flag BEFORE running the handler, otherwise the handler's
-               vm_exec_env hits the rescue setjmp at the top of vm_exec_env,
-               which clobbers vm_error_jmp (overwriting the enclosing trap-error
-               target we just restored via te_pop) and leaves a dangling
-               jmp_buf.  With the flag cleared, a simple-error raised inside
-               the handler propagates cleanly to the enclosing trap-error. */
-            vm_error_pending = 0;
-            Value err = val_error(vm_error_val.error.message);
-            Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
-            Value *henv = GC_VALUE_ARRAY(handler.lambda.env_len + 1);
-            if (handler.lambda.env_len > 0)
-                memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
-            henv[handler.lambda.env_len] = err;
-            handler.lambda.env = henv; handler.lambda.env_len++;
-            vm_in_trap_error = 1;
-            *acc = vm_exec_env(hc, hl, handler.lambda.env, handler.lambda.env_len);
-            vm_in_trap_error = saved_te;
-            return 0;
-        } else {
-            vm_in_trap_error = 1;
+        CatchFrame cf;
+        cf.parent = vm_catch_chain;
+        cf.in_trap_error = 0;   /* set to 1 inside body branch */
+        vm_catch_chain = &cf;
+        if (setjmp(cf.buf) == 0) {
+            /* Body path: in_trap_error=1 so primitive type errors throw */
+            cf.in_trap_error = 1;
             if (body.tag == VAL_LAMBDA) {
                 /* kmacros wraps the body in (lambda (newvar) B), so the
                    bytecode expects a dummy parameter at env index 0.
@@ -993,11 +949,22 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
                 *acc = vm_exec_env(body.lambda.code, body.lambda.code_len, new_env, new_len);
             }
             else *acc = body;
-            vm_in_trap_error = saved_te;
+            vm_catch_chain = cf.parent;
+            return 0;
+        } else {
+            /* Error path: unlink FIRST so handler's simple-error propagates
+               to the enclosing catch frame, not back to this one. */
+            vm_catch_chain = cf.parent;
+            Value err = cf.error_val;
+            Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
+            Value *henv = GC_VALUE_ARRAY(handler.lambda.env_len + 1);
+            if (handler.lambda.env_len > 0)
+                memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
+            henv[handler.lambda.env_len] = err;
+            handler.lambda.env = henv; handler.lambda.env_len++;
+            *acc = vm_exec_env(hc, hl, handler.lambda.env, handler.lambda.env_len);
+            return 0;
         }
-        /* Body path: restore enclosing jmp_buf */
-        te_pop();
-        return 0;
     }
 
     /* --- I/O --- */
@@ -1055,10 +1022,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "read-byte") == 0) {
         Value s = va_pop(stack);
         if (s.tag != VAL_STREAM || !s.stream.is_input) {
-            if (vm_in_trap_error) {
-                vm_error_pending = 1; vm_error_val = val_error("read-byte on non-input");
-                longjmp(vm_error_jmp, 1);
-            }
+            if (vm_catch_chain && vm_catch_chain->in_trap_error)
+                vm_throw("read-byte on non-input");
             fprintf(stderr, "runtime: read-byte on non-input\n"); return -1;
         }
         if (s.stream.is_string) {
@@ -1096,17 +1061,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         Value byte = va_pop(stack);
         Value s    = va_pop(stack);
         if (s.tag != VAL_STREAM || s.stream.is_input) {
-            if (vm_in_trap_error) {
-                vm_error_pending = 1; vm_error_val = val_error("write-byte on non-output");
-                longjmp(vm_error_jmp, 1);
-            }
+            if (vm_catch_chain && vm_catch_chain->in_trap_error)
+                vm_throw("write-byte on non-output");
             fprintf(stderr, "runtime: write-byte on non-output\n"); return -1;
         }
         if (byte.tag != VAL_NUMBER) {
-            if (vm_in_trap_error) {
-                vm_error_pending = 1; vm_error_val = val_error("write-byte requires number");
-                longjmp(vm_error_jmp, 1);
-            }
+            if (vm_catch_chain && vm_catch_chain->in_trap_error)
+                vm_throw("write-byte requires number");
             fprintf(stderr, "runtime: write-byte requires number\n"); return -1;
         }
         fputc((int)byte.number, s.stream.file);
@@ -1165,11 +1126,14 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         } */
         eval_kl_depth++;
 
-        /* Use setjmp to ensure eval_kl_depth is always decremented,
+        /* CatchFrame ensures eval_kl_depth is always decremented,
            even if the pipeline triggers simple-error → longjmp. */
-        te_push();
+        CatchFrame cf;
+        cf.parent = vm_catch_chain;
+        cf.in_trap_error = 0;
+        vm_catch_chain = &cf;
         Value result = a;  /* default: identity */
-        if (setjmp(vm_error_jmp) == 0) {
+        if (setjmp(cf.buf) == 0) {
 
         /* Marshal native Value → Shen tagged form */
         Value tagged = marshal_to_tagged(a);
@@ -1217,13 +1181,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         result = demarshal_from_tagged(tagged_result);
 
         done:
-        te_pop();
+        vm_catch_chain = cf.parent;
         eval_kl_depth--;
         *acc = result;
         return 0;
         } /* end setjmp == 0 block */
-        /* Error path: restore caller's jmp_buf, decrement depth. */
-        te_pop();
+        /* Error path: unlink, decrement depth, return identity. */
+        vm_catch_chain = cf.parent;
         eval_kl_depth--;
         *acc = result;
         return 0;
@@ -1467,7 +1431,11 @@ static void env_push(Value **env, int *env_len, int *env_cap, Value v) {
     (*env)[(*env_len)++] = v;
 }
 static Value env_pop(Value **env, int *env_len) {
-    if (*env_len <= 0) { fprintf(stderr, "runtime: pop empty environment\n"); exit(1); }
+    if (*env_len <= 0) {
+        if (vm_catch_chain && vm_catch_chain->in_trap_error)
+            vm_throw("runtime: pop empty environment");
+        fprintf(stderr, "runtime: pop empty environment\n"); exit(1);
+    }
     return (*env)[--(*env_len)];
 }
 
@@ -1491,8 +1459,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
     int instr_count = 0;
     #define INSTR_HARD_LIMIT 500000000
-
-    if (vm_error_pending) { vm_error_pending = 0; setjmp(vm_error_jmp); }
 
     while (1) {
         if (++instr_count >= INSTR_HARD_LIMIT) {
@@ -1578,7 +1544,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 Value argbuf[64];
                 while (stack.len > 0 && va_peek(&stack).tag != VAL_MARK) {
                     if (nargs < 64) argbuf[nargs++] = va_pop(&stack);
-                    else { vm_error_val = val_error("runtime: too many args (>64)"); vm_error_pending = 1; longjmp(vm_error_jmp, 1); }
+                    else { vm_throw("runtime: too many args (>64)"); }
                 }
                 /* Pop the required mark (zinc-c always emits pushmark) */
                 if (stack.len == 0 || va_peek(&stack).tag != VAL_MARK) {
@@ -1619,6 +1585,8 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 va_push(&stack, acc);
                 pc++;
             } else {
+                if (vm_catch_chain && vm_catch_chain->in_trap_error)
+                    vm_throw("apply non-callable");
                 fprintf(stderr, "runtime: apply non-callable tag=%d", acc.tag);
                 if (acc.tag == VAL_SYMBOL) {
                     fprintf(stderr, " sym='%s'", acc.sym.name);
@@ -1684,7 +1652,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 Value argbuf[64];
                 while (stack.len > 0 && va_peek(&stack).tag != VAL_MARK) {
                     if (nargs < 64) argbuf[nargs++] = va_pop(&stack);
-                    else { vm_error_val = val_error("runtime: appterm too many args (>64)"); vm_error_pending = 1; longjmp(vm_error_jmp, 1); }
+                    else { vm_throw("runtime: appterm too many args (>64)"); }
                 }
                 /* zinc-t always emits pushmark — required */
                 if (stack.len == 0 || va_peek(&stack).tag != VAL_MARK) {
@@ -1713,6 +1681,8 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 va_push(&stack, acc);
                 pc++; break;
             } else {
+                if (vm_catch_chain && vm_catch_chain->in_trap_error)
+                    vm_throw("appterm non-lambda");
                 fprintf(stderr, "runtime: appterm non-lambda\n"); goto done;
             }
         }
@@ -1755,8 +1725,8 @@ static char *read_file_or_stdin(const char *path) {
 static void alarm_handler(int sig) {
     (void)sig;
     test_timed_out = 1;
-    /* Use a dedicated jmp_buf: vm_error_jmp is clobbered by nested
-       trap-error setjmp calls during load, so longjmp-ing there can land
+    /* Use a dedicated jmp_buf: the catch-frame chain is clobbered by nested
+       trap-error during load, so longjmp-ing there can land
        on a stale target inside the recursion and never break out. */
     longjmp(alarm_jmp, 1);
 }
@@ -1782,13 +1752,21 @@ static void run_test_timeout(const char *label, const char *bytecode, int show_c
         /* Timed out: SIGALRM longjmp'd us out of the vm_exec recursion. */
         alarm(0);
         printf("TIMEOUT (exceeded %d s)\n\n", timeout_sec); fflush(stdout);
-    } else if (setjmp(vm_error_jmp)) {
-        alarm(0);
-        printf("ERROR CAUGHT: "); print_value(vm_error_val); printf("\n\n"); fflush(stdout);
     } else {
-        Value result = vm_exec(code, len);
-        alarm(0);
-        printf("Result: "); print_value(result); printf("\n\n"); fflush(stdout);
+        CatchFrame cf;
+        cf.parent = vm_catch_chain;
+        cf.in_trap_error = 0;
+        vm_catch_chain = &cf;
+        if (setjmp(cf.buf)) {
+            vm_catch_chain = cf.parent;
+            alarm(0);
+            printf("ERROR CAUGHT: "); print_value(cf.error_val); printf("\n\n"); fflush(stdout);
+        } else {
+            Value result = vm_exec(code, len);
+            vm_catch_chain = cf.parent;
+            alarm(0);
+            printf("Result: "); print_value(result); printf("\n\n"); fflush(stdout);
+        }
     }
     fprintf(stderr, "[run_test] %s: done, freeing code\n", label);
     /* code is GC_MALLOC'd — no free needed */
@@ -2022,12 +2000,17 @@ int main(int argc, char **argv) {
                 if (init.lambda.env_len > 0)
                     memcpy(env_init, init.lambda.env, init.lambda.env_len * sizeof(Value));
                 env_init[init.lambda.env_len] = val_number(0);
-                te_push();
-                if (setjmp(vm_error_jmp) == 0) {
-                    vm_exec_env(init.lambda.code, init.lambda.code_len,
-                                env_init, init.lambda.env_len + 1);
+                {
+                    CatchFrame cf;
+                    cf.parent = vm_catch_chain;
+                    cf.in_trap_error = 0;
+                    vm_catch_chain = &cf;
+                    if (setjmp(cf.buf) == 0) {
+                        vm_exec_env(init.lambda.code, init.lambda.code_len,
+                                    env_init, init.lambda.env_len + 1);
+                    }
+                    vm_catch_chain = cf.parent;
                 }
-                te_pop();
                 printf("Shen ready.\n\n");
                 fflush(stdout);
 
@@ -2045,12 +2028,15 @@ int main(int argc, char **argv) {
                    exit cleanly on EOF instead of looping forever. */
                 repl_mode = 1;
                 if (setjmp(repl_exit_jmp) == 0) {
-                    te_push();
-                    if (setjmp(vm_error_jmp) == 0) {
+                    CatchFrame cf;
+                    cf.parent = vm_catch_chain;
+                    cf.in_trap_error = 0;
+                    vm_catch_chain = &cf;
+                    if (setjmp(cf.buf) == 0) {
                         vm_exec_env(repl.lambda.code, repl.lambda.code_len,
                                     env_repl, repl.lambda.env_len + 1);
                     }
-                    te_pop();
+                    vm_catch_chain = cf.parent;
                 }
                 repl_mode = 0;
 
@@ -2236,13 +2222,21 @@ int main(int argc, char **argv) {
                             memcpy(env, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
                         env[tli.lambda.env_len] = nil;  /* empty code */
 
-                        if (setjmp(vm_error_jmp) == 0) {
-                            Value result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
-                                                        env, tli.lambda.env_len + 1);
-                            printf("    result: "); print_value(result);
-                            printf(" (tag=%d)\n", result.tag);
-                        } else {
-                            printf("    ERROR: "); print_value(vm_error_val); printf("\n");
+                        {
+                            CatchFrame cf;
+                            cf.parent = vm_catch_chain;
+                            cf.in_trap_error = 0;
+                            vm_catch_chain = &cf;
+                            if (setjmp(cf.buf) == 0) {
+                                Value result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
+                                                            env, tli.lambda.env_len + 1);
+                                printf("    result: "); print_value(result);
+                                printf(" (tag=%d)\n", result.tag);
+                                vm_catch_chain = cf.parent;
+                            } else {
+                                vm_catch_chain = cf.parent;
+                                printf("    ERROR: "); print_value(cf.error_val); printf("\n");
+                            }
                         }
 
                         /* Test B: [number 42] → should return [number 42]
@@ -2263,13 +2257,21 @@ int main(int argc, char **argv) {
                         /* Trace Test B — disabled */
                         /* trace_counter = 0; trace_limit = 800; */
 
-                        if (setjmp(vm_error_jmp) == 0) {
-                            Value result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
-                                                        env2, tli.lambda.env_len + 1);
-                            printf("    result: "); print_value(result);
-                            printf(" (tag=%d)\n", result.tag);
-                        } else {
-                            printf("    ERROR: "); print_value(vm_error_val); printf("\n");
+                        {
+                            CatchFrame cf;
+                            cf.parent = vm_catch_chain;
+                            cf.in_trap_error = 0;
+                            vm_catch_chain = &cf;
+                            if (setjmp(cf.buf) == 0) {
+                                Value result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
+                                                            env2, tli.lambda.env_len + 1);
+                                printf("    result: "); print_value(result);
+                                printf(" (tag=%d)\n", result.tag);
+                                vm_catch_chain = cf.parent;
+                            } else {
+                                vm_catch_chain = cf.parent;
+                                printf("    ERROR: "); print_value(cf.error_val); printf("\n");
+                            }
                         }
                         trace_counter = -1;
 
@@ -2318,13 +2320,21 @@ int main(int argc, char **argv) {
                             if (interp_fn.lambda.env_len > 0)
                                 memcpy(env_i + 5, interp_fn.lambda.env, interp_fn.lambda.env_len * sizeof(Value));
 
-                            if (setjmp(vm_error_jmp) == 0) {
-                                Value result = vm_exec_env(interp_fn.lambda.code, interp_fn.lambda.code_len,
-                                                            env_i, interp_fn.lambda.env_len + 5);
-                                printf("    result: "); print_value(result);
-                                printf(" (tag=%d)\n", result.tag);
-                            } else {
-                                printf("    ERROR: "); print_value(vm_error_val); printf("\n");
+                            {
+                                CatchFrame cf;
+                                cf.parent = vm_catch_chain;
+                                cf.in_trap_error = 0;
+                                vm_catch_chain = &cf;
+                                if (setjmp(cf.buf) == 0) {
+                                    Value result = vm_exec_env(interp_fn.lambda.code, interp_fn.lambda.code_len,
+                                                                env_i, interp_fn.lambda.env_len + 5);
+                                    printf("    result: "); print_value(result);
+                                    printf(" (tag=%d)\n", result.tag);
+                                    vm_catch_chain = cf.parent;
+                                } else {
+                                    vm_catch_chain = cf.parent;
+                                    printf("    ERROR: "); print_value(cf.error_val); printf("\n");
+                                }
                             }
                         } else {
                             printf("    interp not found (tag=%d)\n", interp_fn.tag);
@@ -2361,7 +2371,7 @@ int main(int argc, char **argv) {
 
                 /* Regression test (Bug #1): read-from-string on a typed define
                    `{ A --> A }`.  Used to hang indefinitely due to a stale
-                   vm_error_jmp left by the trap-error handler's vm_exec_env.
+                   catch target left by the trap-error handler's vm_exec_env.
                    Now returns [[define id { A --> A } X -> X]]. */
                 run_test("read-from-string-typed-define",
                          "(mS[30:S](define id { A --> A } X -> X)g[16:s]read-from-stringp)", 0);
