@@ -21,6 +21,34 @@ make run-bundle  # run C VM with globals.csexp (self-hosting tests)
 Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-zinc → nat->csexp → C VM
 ```
 
+## Design intent (why static sites skip safe wrappers)
+
+**The end goal:** the meta-circular interpreter (`interp` in `shen/interp.shen`) is
+written in Shen and is meant to be PROVEN type-safe using the Shen sequent-calculus
+type rules, and the C interpreter is meant to be GENERATED from that proven
+interpreter (a static compiler that only compiles that subset, or by specialising
+the interpreter). The C VM in `vm/zincvm.c` is a hand-written stand-in for that
+generated interpreter.
+
+Consequence — call sites split into two kinds:
+
+- **Static call sites** — code produced by the compiler is type-safe by
+  construction (it comes from the proven interpreter). These need NO runtime type
+  check and NO safe wrapper. This is why `zinc-c`/`zinc-t` in `shen/zinc.shen`
+  (lines 17-20 / 42-46) special-case `primitive?` heads to emit `[prim F]` — a
+  direct primitive dispatch that BYPASSES the global table (and thus any `safe.X`
+  wrapper registered via `set-toplevel`). This is intentional, NOT a bug.
+- **Dynamic call sites** — boundaries, higher-order use, and untyped user input
+  (e.g. `eval-kl` of `tc -` user code, `%%` escapes). These are NOT proven
+  type-safe, so they must route through the Shen safe wrappers (`safe.X` in
+  `shen/primitives.shen`) so a type error becomes a catchable `simple-error`.
+
+`[global X]` → `safe.X` only fires on the dynamic path (a primitive used *as a
+value*, higher-order, or explicit `(function X)`). Normal direct calls use
+`[prim X]`. Because static sites are type-safe, the C primitives' own type checks
+are redundant there and are compiled out in release; they remain only as
+`ZINCVM_DEBUG` defense-in-depth for the raw `[prim X]`/`%%` paths.
+
 ## Self-hosting tests
 
 | Test | Description | Status |
