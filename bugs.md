@@ -4,22 +4,17 @@
 
 **Symptom:** `read-from-string "(define id {A --> A} X -> X)"` hangs >10s. `read-from-string "(+ 1 2)"` works fine. The `read-from-string-unprocessed` path (parse only) is instant.
 
-**Debugging results (2026-08-03):**
-- `*property-vector*` is **correctly initialized** as a Shen dict (VAL_VECTOR, tag=10 in this codebase's enum) after `shen.initialise`. The dict is functional — `dict.kl` is loaded and `shen.dict` is in the bundle.
-- The jmp_buf stack (`error_jmp_stack`) is **balanced** — no corruption. Every `te_push` is matched by `te_pop` via either the body or handler path.
-- The hang manifests as: `simple-error("id has no attributes: arity")` fires at `error_jmp_sp=1` (the eval-kl level), the longjmp is caught, and the whole computation re-enters in an infinite loop. Trap-error bodies with `env_len=1` complete via BODY-DONE (no handler invoked) thousands of times, then the simple-error fires and the cycle repeats.
-- This is consistent with the **"arity loop in kl->zinc"** root cause from commit `825ff9b` — the problem is in the Shen-level arity lookup/error-recovery logic, not in the C VM's trap-error machinery.
+**Root cause (partially fixed):** `overrides.kl` from shen-scheme replaces pure-KLambda functions (`shen.<-dict`, `hash`, `@p`, `vector`, `read-file-as-string`, etc.) with Scheme-specific versions using `scm.*` primitives that don't exist in our C VM. When `arity` → `get` → `shen.<-dict` is called, the broken overrides version runs, `scm.hashtable-ref` fails, and the error propagates incorrectly.
 
-**Root cause chain:** `find-arities → store-arity → arity(id) → get(property-vector, arity, id) → <-dict → "value id not found in dict" → get's handler → simple-error("id has no attributes: arity") → arity's handler returns -1 → store-arity calls execute-store-arity → put → ... → loop re-enters.
+**Fix applied:** Replaced `overrides.kl` with `shen/overrides-pure.kl` — a minimal file containing only the 6 pure-KLambda functions from overrides.kl that (a) don't use `scm.*` primitives and (b) are not defined in other `.kl` files:
+- `shen.char-stinput?` → `false` (called by `shen.my-read-byte`)
+- `shen.char-stoutput?` → `false` (called by `pr`)
+- `shen.push-factorised-branch`, `shen.eval-factorised-branch`
+- `shen.show-exceptions?`, `shen.interactive-error?`
 
-**Contributing factors fixed:**
-1. Stale `push` instructions in bundle — fixed by `make bundle`
-2. `eval-kl` recursion guard — removed in `14b8d2d`
-3. Trap-error handler ping-pong — fixed in `da55d9b` (jmp_buf stack)
+All existing tests pass with the fix (38 built-in + 18 self-hosting + GC stress + REPL).
 
-**Older trace evidence:**
-- `shen.store-arity`/`shen.sysfunc?`/`element?`/`get`: 24,295 calls
-- `shen.app`: 63,586 calls
+**Remaining hang:** The `read-from-string` typed-define test still hangs. Tracing shows `assoc` enters infinite recursion when searching for a key not in the dict. The `assoc` base case `(= () V3871)` should return true for an empty list, but `assoc` never terminates. This suggests a deeper issue in how `prim =` handles `VAL_NIL` comparison in the auto-push stack model, or how `tl` of `VAL_NIL` behaves in the dict bucket context. Further investigation needed.
 
 ## 2. `=` cons-vs-symbol HACK — REMOVED
 

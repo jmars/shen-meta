@@ -25,7 +25,7 @@
 (interp-load-raw "/home/arch/github/shen-scheme/kl/prolog.kl")
 (interp-load-raw "/home/arch/github/shen-scheme/kl/sequent.kl")
 (interp-load-raw "/home/arch/github/shen-scheme/kl/t-star.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/overrides.kl")
+(interp-load-raw "/home/arch/github/shen-meta/shen/overrides-pure.kl")
 (interp-load-raw "/home/arch/github/shen-scheme/kl/extension-expand-dynamic.kl")
 (interp-load-raw "/home/arch/github/shen-scheme/kl/extension-features.kl")
 (interp-load-raw "/home/arch/github/shen-scheme/kl/extension-launcher.kl")
