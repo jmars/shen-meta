@@ -355,14 +355,32 @@ static Value global_get(const char *name) {
 /*  Error handling for trap-error / simple-error                       */
 /* ------------------------------------------------------------------ */
 
+/* Stack of jmp_bufs for nested trap-error.  simple-error always
+   longjmps to the current vm_error_jmp.  trap-error pushes the current
+   vm_error_jmp onto the stack before setjmp-ing a new one.  When a
+   handler runs, it pops FIRST so the handler's simple-error propagates
+   to the enclosing trap-error, not back to itself. */
+#define ERROR_JMP_MAX 64
+static jmp_buf error_jmp_stack[ERROR_JMP_MAX];
+static int error_jmp_sp = 0;  /* next free slot */
 static jmp_buf vm_error_jmp;
+
+static void te_push(void) {
+    memcpy(&error_jmp_stack[error_jmp_sp], vm_error_jmp, sizeof(jmp_buf));
+    error_jmp_sp++;
+}
+static void te_pop(void) {
+    error_jmp_sp--;
+    memcpy(vm_error_jmp, &error_jmp_stack[error_jmp_sp], sizeof(jmp_buf));
+}
+
 static jmp_buf alarm_jmp;
 static volatile sig_atomic_t test_timed_out = 0;
 static Value vm_error_val;
 static int vm_error_pending = 0;
-static int vm_in_trap_error = 0;  /* set while inside trap-error body/handler */
-static int repl_mode = 0;          /* set while REPL is active */
-static jmp_buf repl_exit_jmp;      /* longjmp target for clean REPL EOF exit */
+static int vm_in_trap_error = 0;
+static int repl_mode = 0;
+static jmp_buf repl_exit_jmp;
 
 /* ------------------------------------------------------------------ */
 /*  Forward declarations                                               */
@@ -917,11 +935,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         Value body = va_pop(stack), handler = va_pop(stack);
         if (handler.tag != VAL_LAMBDA) { fprintf(stderr, "runtime: trap-error handler not fn\n"); return -1; }
         vm_error_pending = 0;
-        /* Save/restore vm_error_jmp so nested trap-error or subsequent code
-           isn't corrupted by this setjmp overwriting the global jmp_buf. */
-        jmp_buf saved_error_jmp;
-        memcpy(saved_error_jmp, vm_error_jmp, sizeof(jmp_buf));
+        /* Push-then-setjmp: the stack remembers the enclosing jmp_buf. */
+        te_push();
         if (setjmp(vm_error_jmp)) {
+            /* Handler: pop to enclosing so simple-error propagates outward */
+            te_pop();
             Value err = val_error(vm_error_val.error.message);
             Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
             Value *henv = GC_VALUE_ARRAY(handler.lambda.env_len + 1);
@@ -929,11 +947,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
                 memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
             henv[handler.lambda.env_len] = err;
             handler.lambda.env = henv; handler.lambda.env_len++;
-            /* Save/restore in case handler itself errors (nested trap-error). */
             int saved_te = vm_in_trap_error;
             vm_in_trap_error = 1;
             *acc = vm_exec_env(hc, hl, handler.lambda.env, handler.lambda.env_len);
             vm_in_trap_error = saved_te;
+            return 0;
         } else {
             int saved_te = vm_in_trap_error;
             vm_in_trap_error = 1;
@@ -951,7 +969,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             else *acc = body;
             vm_in_trap_error = saved_te;
         }
-        memcpy(vm_error_jmp, saved_error_jmp, sizeof(jmp_buf));
+        /* Body path: restore enclosing jmp_buf */
+        te_pop();
         return 0;
     }
 
@@ -1121,17 +1140,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         eval_kl_depth++;
 
         /* Use setjmp to ensure eval_kl_depth is always decremented,
-           even if the pipeline triggers simple-error → longjmp.
-           Save/restore vm_error_jmp so the caller's error handler
-           (typically run_test or trap-error) isn't corrupted.
-           NOTE: currently swallows the error (returns identity a).
-           This is a known issue — the Shen-level `load` function in the
-           bundle doesn't wrap forms in trap-error, so re-raising would
-           cause tests to fail.  Fixing this requires either adding
-           trap-error wrappers in the Shen code or fixing the underlying
-           compilation errors that eval-kl is masking. */
-        jmp_buf saved_eval_jmp;
-        memcpy(saved_eval_jmp, vm_error_jmp, sizeof(jmp_buf));
+           even if the pipeline triggers simple-error → longjmp. */
+        te_push();
         Value result = a;  /* default: identity */
         if (setjmp(vm_error_jmp) == 0) {
 
@@ -1181,16 +1191,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         result = demarshal_from_tagged(tagged_result);
 
         done:
-        memcpy(vm_error_jmp, saved_eval_jmp, sizeof(jmp_buf));
+        te_pop();
         eval_kl_depth--;
         *acc = result;
         return 0;
         } /* end setjmp == 0 block */
-        /* Error path: restore caller's jmp_buf, decrement depth.
-           Currently swallows the error to avoid breaking Shen `load`
-           which doesn't wrap forms in trap-error. FIXME: re-raise
-           once load path is fixed. */
-        memcpy(vm_error_jmp, saved_eval_jmp, sizeof(jmp_buf));
+        /* Error path: restore caller's jmp_buf, decrement depth. */
+        te_pop();
         eval_kl_depth--;
         *acc = result;
         return 0;
@@ -1989,13 +1996,12 @@ int main(int argc, char **argv) {
                 if (init.lambda.env_len > 0)
                     memcpy(env_init, init.lambda.env, init.lambda.env_len * sizeof(Value));
                 env_init[init.lambda.env_len] = val_number(0);
-                jmp_buf saved_jmp;
-                memcpy(saved_jmp, vm_error_jmp, sizeof(jmp_buf));
+                te_push();
                 if (setjmp(vm_error_jmp) == 0) {
                     vm_exec_env(init.lambda.code, init.lambda.code_len,
                                 env_init, init.lambda.env_len + 1);
                 }
-                memcpy(vm_error_jmp, saved_jmp, sizeof(jmp_buf));
+                te_pop();
                 printf("Shen ready.\n\n");
                 fflush(stdout);
 
@@ -2012,15 +2018,15 @@ int main(int argc, char **argv) {
                 /* Set up REPL mode: intercept "error: empty stream" to
                    exit cleanly on EOF instead of looping forever. */
                 repl_mode = 1;
-                memcpy(saved_jmp, vm_error_jmp, sizeof(jmp_buf));
                 if (setjmp(repl_exit_jmp) == 0) {
+                    te_push();
                     if (setjmp(vm_error_jmp) == 0) {
                         vm_exec_env(repl.lambda.code, repl.lambda.code_len,
                                     env_repl, repl.lambda.env_len + 1);
                     }
+                    te_pop();
                 }
                 repl_mode = 0;
-                memcpy(vm_error_jmp, saved_jmp, sizeof(jmp_buf));
 
                 printf("\nGoodbye.\n");
                 return 0;
