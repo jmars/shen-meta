@@ -54,10 +54,20 @@ immediate hang but was superseded by this refactor.
 **Status:** Fixed.  
 **Fix:** `str_value()` handles all types with full `put-datum` representation.
 
-## 5. Trap-error handler ping-pong — FIXED (da55d9b)
+## 5. Trap-error handler ping-pong — FIXED (da55d9b), then SUPERSEDED (3ed45b1)
 
 **Symptom:** `get`'s handler's `simple-error` longjmp'd back to itself because `vm_error_jmp` wasn't restored.
 
 **Root cause:** Single `vm_error_jmp` + manual save/restore couldn't handle nested trap-errors where the inner handler calls `simple-error`.
 
 **Fix:** `error_jmp_stack[64]` + `te_push()`/`te_pop()`. `trap-error` pushes before `setjmp`. Handler pops FIRST so `simple-error` propagates outward. Also updated `eval-kl` and REPL code.
+
+**Superseded:** The whole jmp_buf-stack design was replaced by the per-catch-site `CatchFrame` chain (commit `3ed45b1`); `te_push`/`te_pop` and `error_jmp_stack` no longer exist.
+
+## 6. Error handling — remaining known limitations (post-CatchFrame refactor)
+
+These are deliberate, preserved behaviors that the CatchFrame refactor (`3ed45b1`) did not change. Not regressions.
+
+- **`eval-kl` swallows all pipeline errors** and returns the input unchanged (identity). `Shen`'s `load` path doesn't wrap forms in `trap-error`, so re-raising would expose pre-existing pipeline errors. This hides real user-code errors and compiler-pipeline bugs. A future fix would propagate a `VAL_ERROR` or rethrow via the catch chain and let callers wrap in `trap-error`.
+- **Type-error primitives only throw inside an active trap-error body** (`vm_catch_chain && in_trap_error`). Outside any trap they keep the legacy `fprintf(stderr, ...); return -1` behavior, so `trap-error` cannot catch a type error raised in top-level (non-trapped) code. This preserves built-in test behavior. Only ~6 primitives (`pos`, `value`, `<-address`, `read-byte`, `write-byte`, plus `apply`/`appterm` non-callable and `env_pop`) consult the catch chain; the other ~30 `fprintf+return -1` primitive type-check sites still bypass it. To make `trap-error` catch all type errors, those sites would need to route through `vm_throw` when a catch frame is active.
+- `val_error` messages are GC-allocated (no `strdup` leak). All error state is file-scope C statics (not thread-safe); the VM is single-threaded by design.
