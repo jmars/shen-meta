@@ -1,17 +1,7 @@
-\\ overrides-pure.kl — pure-KLambda replacements from shen-scheme's overrides.kl
-\\ Only includes functions that (a) are NOT defined in other .kl files and
-\\ (b) do NOT use scm.* Scheme primitives (unavailable in our C VM).
-\\ The scm.*-based overrides (hash, shen.dict, shen.<-dict, @p, vector, etc.)
-\\ are EXCLUDED — the pure KLambda versions from sys.kl, dict.kl, reader.kl are kept.
+\\ overrides-pure.kl — host primitives needed by the standard Shen OS Kernel
+\\ that are not defined in any .kl file.  Each Shen port must provide these.
+\\ In our C VM, character streams are not supported, so both return false.
 
 (defun shen.char-stinput? (V528) false)
 
 (defun shen.char-stoutput? (V529) false)
-
-(defun shen.push-factorised-branch (V530) (let BS (trap-error (value shen.*branches-stack*) (lambda E ())) (set shen.*branches-stack* (cons V530 BS))))
-
-(defun shen.eval-factorised-branch (V531) (cond ((and (cons? V531) (and (= defun (hd V531)) (and (cons? (tl V531)) (and (cons? (tl (tl V531))) (and (cons? (tl (tl (tl V531)))) (= () (tl (tl (tl (tl V531)))))))))) (shen.push-factorised-branch V531)) (true (shen.f-error shen.eval-factorised-branch))))
-
-(defun shen.show-exceptions? () (trap-error (value shen.*show-exceptions*) (lambda E false)))
-
-(defun shen.interactive-error? (V548 V549 V550) (cond ((not (shen.show-exceptions?)) true) ((= abort V549) true) ((= shen.string-match V549) true) ((and (= shen.toplineread_loop V549) (= "line read aborted" V550)) true) ((and (= shen.f_error V549) (= "aborted" V550)) true) ((and (= shen.typecheck-and-evaluate V549) (= "type error" V550)) true) ((= shen.unwind-types V549) true) (true false)))

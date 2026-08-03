@@ -8,31 +8,37 @@
    process-sexprs (macro expansion, arity finding, type-checking) since
    .kl files are already compiled KLambda.  This avoids the shen. prefix
    mismatch where bundled code patterns use bare 'define' but .kl forms
-   have 'shen.define' baked in by the module system. *\
-(interp-load-raw "/home/arch/github/shen-scheme/kl/core.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/declarations.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/types.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/macros.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/load.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/toplevel.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/sys.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/dict.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/track.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/reader.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/compiler.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/writer.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/yacc.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/prolog.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/sequent.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/t-star.kl")
+   have 'shen.define' baked in by the module system.
+   
+   Source: standard Shen OS Kernel 41.2 distribution (pure KLambda, no
+   host-specific overrides).  The shen-scheme kl/ directory has 3 extra
+   files (overrides.kl, compiler.kl, shen-scheme-extensions.kl) that use
+   scm.* Scheme primitives unavailable in our C VM — we don't load them.
+   The 2 host primitives needed by the standard distribution
+   (shen.char-stinput?, shen.char-stoutput?) are provided by
+   overrides-pure.kl. *\
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/core.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/declarations.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/types.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/macros.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/load.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/toplevel.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/sys.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/dict.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/track.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/reader.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/writer.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/yacc.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/prolog.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/sequent.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/t-star.kl")
 (interp-load-raw "/home/arch/github/shen-meta/shen/overrides-pure.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/extension-expand-dynamic.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/extension-features.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/extension-launcher.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/extension-programmable-pattern-matching.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/shen-scheme-extensions.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/stlib.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/kl/init.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/extension-expand-dynamic.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/extension-features.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/extension-launcher.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/extension-programmable-pattern-matching.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/stlib.kl")
+(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/init.kl")
 
 \* Load shen/util.shen via interp-load-raw — bypasses process-sexprs/find-arities
    to avoid the { } type annotation handling bug in the bundled reader.
