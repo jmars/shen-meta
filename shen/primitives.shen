@@ -70,6 +70,10 @@
   S  -> (%% hdstr S) where (string? S)
   _  -> (simple-error "hdstr: arg must be a string"))
 
+(define safe.read-file-as-string
+  S -> (%% read-file-as-string S) where (string? S)
+  _ -> (simple-error "read-file-as-string: arg must be a string"))
+
 (define safe.value
   S -> (%% value S) where (symbol? S)
   _ -> (simple-error "value: arg must be a symbol"))
