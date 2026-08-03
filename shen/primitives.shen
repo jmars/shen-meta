@@ -65,6 +65,11 @@
   S  -> (%% tlstr S) where (string? S)
   _  -> (simple-error "tlstr: arg must be a string"))
 
+(define safe.hdstr
+  "" -> (simple-error "hdstr: empty string")
+  S  -> (%% hdstr S) where (string? S)
+  _  -> (simple-error "hdstr: arg must be a string"))
+
 (define safe.value
   S -> (%% value S) where (symbol? S)
   _ -> (simple-error "value: arg must be a symbol"))
