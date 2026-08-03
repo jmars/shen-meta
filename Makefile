@@ -1,13 +1,22 @@
-.PHONY: all vm test bundle pipeline interp setup clean
+.PHONY: all vm test test-debug debug bundle pipeline interp setup clean
 
 SHEN   = ../shen-scheme/_build/bin/shen-scheme
 CFLAGS = -Wall -Wextra -O2
+# Debug build enables ZINCVM_DEBUG: C primitives route type-errors through
+# vm_throw as defense-in-depth (normally owned by the Shen safe wrappers).
+DCFLAGS = -Wall -Wextra -O0 -g -DZINCVM_DEBUG
 GC_LIB = -lgc
 
 all: zincvm zincdec
 
 zincvm: vm/zincvm.c
 	$(CC) $(CFLAGS) -o $@ vm/zincvm.c $(GC_LIB)
+
+zincvm-debug: vm/zincvm.c
+	$(CC) $(DCFLAGS) -o $@ vm/zincvm.c $(GC_LIB)
+
+debug: zincvm-debug
+	@echo "Built ./zincvm-debug (ZINCVM_DEBUG: C-level type-error defense-in-depth active)"
 
 zincvm-asan: vm/zincvm.c
 	$(CC) $(CFLAGS) -O0 -g -fsanitize=address -o $@ vm/zincvm.c $(GC_LIB)
@@ -17,6 +26,9 @@ zincdec: vm/zincdec.c
 
 test: zincvm
 	./zincvm
+
+test-debug: zincvm-debug
+	./zincvm-debug
 
 test-asan: zincvm-asan
 	ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 ./zincvm-asan

@@ -3,8 +3,10 @@
 ## Build & test
 
 ```sh
-make          # build C VM (links Boehm GC via -lgc)
-make test     # run 39 built-in tests
+make          # build C VM (release; links Boehm GC via -lgc)
+make test     # run 34 built-in tests (release)
+make debug    # build C VM with -DZINCVM_DEBUG (C-level type-error defense active)
+make test-debug # run 39 built-in tests (adds debug-only trap-error tests 29-32b)
 make pipeline # compile (+ 1 2) through full pipeline
 make bundle   # serialize all safe wrappers → globals.csexp
 make run-bundle  # run C VM with globals.csexp (self-hosting tests)
@@ -254,8 +256,8 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
   This is the #1 recurring bug pattern. See tests 27-32 for examples.
 - Built-in tests use `m` (pushmark) before args; mark ends up at stack bottom,
   not popped by `OP_APPLY` with `VAL_PRIM` (mark must be on top to be popped)
-- **Built-in tests**: 39 hand-written bytecode tests in `vm/zincvm.c`.
-  Tests 1-32b exercise apply ('p'), tests 33-39 exercise appterm ('t').
+- **Built-in tests**: 34 hand-written bytecode tests in `vm/zincvm.c` (release build; 39 in `ZINCVM_DEBUG`, which adds debug-only C-primitive trap-error tests 29-32b).
+  Tests 1-32 exercise apply ('p'), tests 33-38 exercise appterm ('t').
   Built-in tests run without a bundle (`./zincvm`). Self-hosting tests
   (10) + GC stress run with bundle (`./zincvm globals.csexp`).
 - `appterm` ('t') and `apply` ('p') share identical stack layout:
@@ -283,17 +285,16 @@ rescue `setjmp(vm_error_jmp)` at the top of `vm_exec_env`.
   and `setjmp(cf.buf)`. On the error path the frame is **unlinked first** so a
   `simple-error` raised inside a handler propagates to the enclosing frame.
 - `simple-error` always `vm_throw`s to the current chain head. Inside a trap-error
-  BODY the frame's `in_trap_error=1`, so type-error primitives throw too. All
-  primitive type-check sites are routed through `vm_throw` via the `PRIM_TYPE_ERROR`
-  macro (and inline guards for dynamic-message errors): `fst`/`snd`/`hd`/`tl`/`pos`/
-  `value`/`<-address`/`address->`/`absvector`/`n->string`/`string->n`/`tlstr`/`hdstr`/
-  `intern`/`emptylist`/`+ - * /`/division-by-zero/`read-byte`/`write-byte`/`get-time`/
-  `set`/`open` bad-types/`close`/`read-file-as-string`/`trap-error` handler-not-fn,
-  plus `apply`/`appterm` non-callable and `env_pop`. Outside any trap they keep the
-  `fprintf(stderr, ...); return -1` / `exit(1)` behavior (so built-in tests that run
-  outside trap-error are unchanged). Resource/internal errors (file-open failures,
-  `open` direction, string-stream index, eval-kl bundle-miss) are deliberately not
-  routed.
+  BODY the frame's `in_trap_error=1`, so type-error primitives throw too. **However,
+  C-level type-error routing is DEFENSE-IN-DEPTH, compiled only in `ZINCVM_DEBUG`
+  builds** (the `PRIM_TYPE_ERROR` macro + inline guards). Primary ownership is the
+  Shen safe-wrapper layer (`shen/primitives.shen`): each `safe.X` validates args and
+  raises a catchable `simple-error` before the raw primitive is called, so in release
+  builds a primitive that still receives bad input prints `runtime: ...` + `return -1`
+  (hard, uncatchable — correct, since the wrapper never forwards bad input). The
+  always-on throw sites are those NOT protected by a safe wrapper: `simple-error`,
+  `fail`, `apply`/`appterm` non-callable + too-many-args, `env_pop`, and eval-kl's
+  catch. Debug-only tests 29-32b verify the C-primitive-level defense path.
 - `val_error` GC-allocates its message (no `strdup` leak).
 - The `alarm_jmp` (test TIMEOUT) and `repl_exit_jmp` (REPL EOF) mechanisms are
   separate from the catch chain and unaffected.

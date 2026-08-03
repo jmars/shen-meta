@@ -386,11 +386,15 @@ static void vm_throw(const char *msg) {
     longjmp(vm_catch_chain->buf, 1);
 }
 
-/* Type-error in a primitive: when a trap-error body is active, throw so
-   Shen code can catch it; otherwise print and return -1 (legacy path used
-   by built-in tests, which run outside any trap).  vm_throw longjmps out
-   of this function entirely, so no locals are read after it and there is
-   no -Wclobbered risk. */
+/* Type-error in a primitive.  Primary ownership is the Shen safe-wrapper layer
+   (shen/primitives.shen): those wrappers validate args and raise a catchable
+   simple-error before the raw primitive is ever called.  This C-level routing is
+   therefore only DEFENSE-IN-DEPTH, enabled solely in debug builds (ZINCVM_DEBUG)
+   so that raw/%%-style direct calls into a primitive are still catchable while
+   developing.  In release builds the wrapper is the contract: a primitive that
+   reaches here prints and returns -1 (a hard, non-catchable VM error), which is
+   fine because the wrapper never forwards bad input. */
+#ifdef ZINCVM_DEBUG
 #define PRIM_TYPE_ERROR(msg) \
     do { \
         if (vm_catch_chain && vm_catch_chain->in_trap_error) \
@@ -398,6 +402,13 @@ static void vm_throw(const char *msg) {
         fprintf(stderr, "runtime: %s\n", msg); \
         return -1; \
     } while (0)
+#else
+#define PRIM_TYPE_ERROR(msg) \
+    do { \
+        fprintf(stderr, "runtime: %s\n", msg); \
+        return -1; \
+    } while (0)
+#endif
 
 static jmp_buf alarm_jmp;
 static volatile sig_atomic_t test_timed_out = 0;
@@ -836,8 +847,10 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "pos") == 0) {
         Value a1 = va_pop(stack), a2 = va_pop(stack);
         if (a1.tag != VAL_STRING || a2.tag != VAL_NUMBER) {
+#ifdef ZINCVM_DEBUG
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("pos on bad types");
+#endif
             fprintf(stderr, "runtime: pos on bad types\n"); return -1;
         }
         /* Shen: (pos Str N) returns the single character at index N.
@@ -847,8 +860,10 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            loops forever writing NUL bytes. */
         int pl = (int)a2.number;
         if (pl < 0 || pl >= a1.str.len) {
+#ifdef ZINCVM_DEBUG
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("pos out of bounds");
+#endif
             *acc = val_string("", 0);
         } else *acc = val_string(a1.str.data + pl, 1);
         return 0;
@@ -865,8 +880,10 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "value") == 0) {
         Value a = va_pop(stack);
         if (a.tag != VAL_SYMBOL) {
+#ifdef ZINCVM_DEBUG
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("value on non-symbol");
+#endif
             fprintf(stderr, "runtime: value on non-symbol\n");
             return -1;
         }
@@ -882,14 +899,18 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "<-address") == 0) {
         Value vec = va_pop(stack), idx = va_pop(stack);
         if (vec.tag != VAL_VECTOR || idx.tag != VAL_NUMBER) {
+#ifdef ZINCVM_DEBUG
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("<-address bad types");
+#endif
             fprintf(stderr, "runtime: <-address bad types\n"); return -1;
         }
         int i = (int)idx.number;
         if (i < 0 || i >= vec.vector.len) {
+#ifdef ZINCVM_DEBUG
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("<-address OOB");
+#endif
             fprintf(stderr, "runtime: <-address OOB\n"); return -1;
         }
         *acc = vec.vector.data[i]; return 0;
@@ -987,8 +1008,10 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            For (open path dir): stack=[dir, path], path on top. */
         Value path = va_pop(stack), dir = va_pop(stack);
         if (path.tag != VAL_STRING || dir.tag != VAL_SYMBOL) {
+#ifdef ZINCVM_DEBUG
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("open bad types");
+#endif
             fprintf(stderr, "runtime: open bad types — path.tag=%d dir.tag=%d", path.tag, dir.tag);
             if (path.tag == VAL_SYMBOL) fprintf(stderr, " path='%s'", path.sym.name);
             if (path.tag == VAL_MARK) fprintf(stderr, " path=MARK");
@@ -1012,13 +1035,20 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
                 *acc = val_string_stream_in(path.str.data, path.str.len);
                 return 0;
             }
-            fprintf(stderr, "runtime: cannot open '%s' for reading: %s\n", pb, strerror(errno));
-            return -1;
+            /* Genuine open failure (EACCES/ENOTDIR/...).  Return false so the
+               Shen safe wrapper (safe.open) can detect it and raise a catchable
+               simple-error — reference Shen's kl:open raises "File does not
+               exist".  The wrapper owns this error, not the C primitive. */
+            *acc = val_boolean(false); return 0;
         } else if (strcmp(dir.sym.name, "out") == 0) {
             FILE *f = fopen(pb, "w");
-            if (!f) { fprintf(stderr, "runtime: cannot open '%s' for writing: %s\n", pb, strerror(errno)); return -1; }
+            if (!f) { *acc = val_boolean(false); return 0; }
             *acc = val_stream_out(f); return 0;
         }
+#ifdef ZINCVM_DEBUG
+        if (vm_catch_chain && vm_catch_chain->in_trap_error)
+            vm_throw("open invalid direction");
+#endif
         fprintf(stderr, "runtime: open direction must be in or out\n"); return -1;
     }
     if (strcmp(name, "close") == 0) {
@@ -1037,8 +1067,10 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "read-byte") == 0) {
         Value s = va_pop(stack);
         if (s.tag != VAL_STREAM || !s.stream.is_input) {
+#ifdef ZINCVM_DEBUG
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("read-byte on non-input");
+#endif
             fprintf(stderr, "runtime: read-byte on non-input\n"); return -1;
         }
         if (s.stream.is_string) {
@@ -1076,13 +1108,17 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         Value byte = va_pop(stack);
         Value s    = va_pop(stack);
         if (s.tag != VAL_STREAM || s.stream.is_input) {
+#ifdef ZINCVM_DEBUG
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("write-byte on non-output");
+#endif
             fprintf(stderr, "runtime: write-byte on non-output\n"); return -1;
         }
         if (byte.tag != VAL_NUMBER) {
+#ifdef ZINCVM_DEBUG
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("write-byte requires number");
+#endif
             fprintf(stderr, "runtime: write-byte requires number\n"); return -1;
         }
         fputc((int)byte.number, s.stream.file);
@@ -1095,8 +1131,10 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         if (strcmp(mode.sym.name, "unix") == 0 || strcmp(mode.sym.name, "real") == 0)
             { *acc = val_number((long)time(NULL)); return 0; }
         if (strcmp(mode.sym.name, "run") == 0) { *acc = val_number((long)clock()); return 0; }
+#ifdef ZINCVM_DEBUG
         if (vm_catch_chain && vm_catch_chain->in_trap_error)
             vm_throw("get-time unknown mode");
+#endif
         fprintf(stderr, "runtime: unknown get-time mode '%s'\n", mode.sym.name); return -1;
     }
 
@@ -2187,6 +2225,22 @@ int main(int argc, char **argv) {
                 run_test("eval-kl-error",
                          "(mg[5:s]*ev5*g[11:s]raw.eval-klp)", 0);
 
+                /* Test 14b: eval-kl [/ 1 0] — safe./ must intercept the zero
+                   divisor and raise simple-error (swallowed by eval-kl →
+                   identity).  Without the safe./ zero-check the raw C / would
+                   compute 1/0 and crash with SIGFPE, so this guards that
+                   regression. */
+                {
+                    Value nil = val_nil();
+                    Value zero = val_number(0), one = val_number(1);
+                    Value body = val_cons(zero, nil);          /* (0) */
+                    body = val_cons(one, body);                /* (1 0) */
+                    body = val_cons(val_symbol("/"), body);    /* (/ 1 0) */
+                    global_set("*ev6*", body);
+                }
+                printf("--- Test 14b: eval-kl [/ 1 0] — expect identity, no SIGFPE (safe./ div-zero) ---\n");
+                run_test("eval-kl-trap-divzero", "(mg[5:s]*ev6*g[11:s]raw.eval-klp)", 0);
+
                 /* Diagnostic: dump bytecode of toplevel-interp and interp */
                 printf("--- Bytecode Dump ---\n");
                 {
@@ -2531,7 +2585,11 @@ int main(int argc, char **argv) {
         "g[10:s]trap-errorp)", 1);
     run_test("28. [get-time unix]",      "(ms[4:s]unixg[8:s]get-timep)", 1);
 
-    /* Test that primitive type errors inside trap-error are caught by handler.
+#ifdef ZINCVM_DEBUG
+    /* C-primitive-level type errors inside trap-error being caught by the
+       handler.  These verify the DEFENSE-IN-DEPTH routing that is enabled
+       only in debug builds; in release builds the Shen safe wrappers own
+       these errors and the raw primitives return -1 (uncatchable) instead.
        RTL: handler pushed FIRST (bottom), body pushed LAST (top). */
     run_test("29. trap-error catches value on non-symbol",
         "(mc(S[6:S]caughtv)"                           /* handler pushed FIRST */
@@ -2553,6 +2611,7 @@ int main(int argc, char **argv) {
         "(mc(S[6:S]caughtv)"                           /* handler pushed FIRST */
         "c(mS[1:S]xn[1:n]1g[1:s]+pv)"                /* body: (+ 1 "x") */
         "g[10:s]trap-errorp)", 1);
+#endif
 
     /* === appterm ('t' opcode) tests ===
        Stack layout for appterm: [mark, argN..arg1, function]
@@ -2584,6 +2643,10 @@ int main(int argc, char **argv) {
        but no pushmark; arg gets collected, then stack empty → error    */
     run_test("38. appterm: missing mark", "(n[2:n]42c(a[1:n]0v)t)", 0);
 
+#ifdef ZINCVM_DEBUG
     printf("=== All 39 tests done ===\n");
+#else
+    printf("=== All 34 tests done ===\n");
+#endif
     return 0;
 }

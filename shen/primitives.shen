@@ -46,8 +46,8 @@
   _  -> (simple-error "hd: arg cannot be empty list"))
 
 (define safe.absvector
-  N -> (%% absvector N) where (number? N)
-  _ -> (simple-error "absvector: arg must be a number"))
+  N -> (%% absvector N) where (and (number? N) (>= N 0))
+  _ -> (simple-error "absvector: arg must be a non-negative number"))
 
 (define safe.n->string
   N -> (%% n->string N) where (number? N)
@@ -86,9 +86,13 @@
 (define safe.=
   A B -> (%% = A B))
 
+(define safe.open-ok
+  S -> S where (%% stream? S)
+  _ -> (simple-error "open: cannot open file"))
+
 (define safe.open
-  P in  -> (%% open P in) where (string? P)
-  P out -> (%% open P out) where (string? P)
+  P in  -> (safe.open-ok (%% open P in)) where (string? P)
+  P out -> (safe.open-ok (%% open P out)) where (string? P)
   _ _   -> (simple-error "open: invalid arguments"))
 
 (define safe.write-byte
@@ -97,6 +101,18 @@
 
 (define safe.cons
   H T -> (%% cons H T))
+
+(define safe.fst
+  C -> (%% fst C) where (cons? C)
+  _ -> (simple-error "fst: arg must be a cons"))
+
+(define safe.snd
+  C -> (%% snd C) where (cons? C)
+  _ -> (simple-error "snd: arg must be a cons"))
+
+(define safe.emptylist
+  0 -> (%% emptylist 0)
+  _ -> (simple-error "emptylist: arg must be 0"))
 
 (define safe.<-address
   V N -> (%% <-address V N) where (and (absvector? V) (number? N))
@@ -139,6 +155,7 @@
   _ _ -> (simple-error "+: invalid args"))
 
 (define safe./
+  A 0 -> (simple-error "division by zero")
   A B -> (%% / A B) where (and (number? A) (number? B))
   _ _ -> (simple-error "+: invalid args"))
 
