@@ -270,29 +270,28 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
 
 ## trap-error / primitive error handling
 
-- `vm_in_trap_error` flag set during trap-error body/handler execution
-- Primitives that detect type errors (pos, value, <-address, write-byte) check this flag
-- Inside trap-error: longjmp to vm_error_jmp → trap-error's handler catches the error
-- Outside trap-error (built-in tests): print error to stderr + return -1 (unchanged)
+Error handling uses a **per-catch-site linked list of stack-allocated `CatchFrame`
+structs** (commit `3ed45b1`). This replaced the earlier global `vm_error_jmp` +
+`error_jmp_stack[64]` + `te_push()/te_pop()` memcpy save/restore design, and the
+rescue `setjmp(vm_error_jmp)` at the top of `vm_exec_env`.
+
+- `CatchFrame { jmp_buf buf; Value error_val; int in_trap_error; struct CatchFrame *parent; }`
+  + a `vm_catch_chain` head + `vm_throw(msg)` (writes `error_val` into the chain
+  head, then `longjmp`s to its `buf`; if the chain is empty it prints and `abort()`s).
+- Each catch site (trap-error, eval-kl, run_test_timeout, main initialise + REPL,
+  self-hosting Tests A/B/C) declares a local `CatchFrame`, links it onto the chain,
+  and `setjmp(cf.buf)`. On the error path the frame is **unlinked first** so a
+  `simple-error` raised inside a handler propagates to the enclosing frame.
+- `simple-error` always `vm_throw`s to the current chain head. Inside a trap-error
+  BODY the frame's `in_trap_error=1`, so type-error primitives (`pos`, `value`,
+  `<-address`, `read-byte`, `write-byte`, `apply`/`appterm` non-callable, `env_pop`)
+  throw too. Outside any trap they keep the `fprintf(stderr, ...); return -1`
+  / `exit(1)` behavior (so built-in tests that run outside trap-error are unchanged).
+- `val_error` GC-allocates its message (no `strdup` leak).
+- The `alarm_jmp` (test TIMEOUT) and `repl_exit_jmp` (REPL EOF) mechanisms are
+  separate from the catch chain and unaffected.
 - This routes OOB access sentinels (tag=0,n=0 from empty-env vm_exec calls) through
-  error handlers, letting `bound?` correctly return false for unbound symbols
-
-### jmp_buf stack (commit da55d9b)
-
-- `error_jmp_stack[64]` + `error_jmp_sp` + `te_push()`/`te_pop()`
-- All `setjmp(vm_error_jmp)` sites MUST use `te_push()` before and `te_pop()` after
-- `simple-error` always longjmps to current `vm_error_jmp` — no manual restore needed
-- trap-error handler path: `te_pop()` BEFORE executing handler so the handler's
-  `simple-error` propagates to the enclosing trap-error, not back to itself.
-  This prevents infinite ping-pong where an inner handler calls simple-error
-  and longjmps back to its own setjmp.
-- **Also clear `vm_error_pending = 0` BEFORE running the handler.** Otherwise the
-  handler's `vm_exec_env` hits the rescue `setjmp(vm_error_jmp)` at the top of
-  `vm_exec_env` (`if (vm_error_pending) { vm_error_pending=0; setjmp(vm_error_jmp); }`),
-  which overwrites `vm_error_jmp` without `te_push()` and leaves it pointing into
-  the returned handler frame. The next `simple-error` without an enclosing
-  trap-error then `longjmp`s to that dangling target and loops forever (Bug #1).
-- `eval-kl` and REPL code also use `te_push/te_pop` (not manual memcpy save/restore)
+  error handlers, letting `bound?` correctly return false for unbound symbols.
 
 ## ZINC calling convention (STANDARD — fully aligned)
 

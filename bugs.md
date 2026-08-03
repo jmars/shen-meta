@@ -21,7 +21,16 @@ The bug was in how that handler was executed. In `vm/zincvm.c`, the `trap-error`
 5. When `vm_exec_env` returned, `vm_error_jmp` was left pointing into that returned (dangling) C frame.
 6. The next error raised without an active `trap-error` (e.g. `simple-error "id has no attributes: arity"` during arity storage) `longjmp`'d to the dangling target, which looped forever (each `longjmp` returned to the stale `setjmp`, re-ran, and re-raised the same error).
 
-**Fix (commit `b2b1988`):** In the `trap-error` primitive's error path, clear `vm_error_pending = 0` **before** running the handler. The original error is already being handled by the selected handler, so the handler starts fresh; its `vm_exec_env` no longer triggers the rescue `setjmp`, `vm_error_jmp` stays pointing at the enclosing trap-error (restored by `te_pop`), and a `simple-error` raised *inside* the handler propagates cleanly outward (matching the `te_pop`-before-handler intent).
+**Fix (commit `3ed45b1` — final):** The whole error-handling design was refactored to
+remove the root cause structurally. Instead of the global `vm_error_jmp` +
+`error_jmp_stack` + `te_push()/te_pop()` + the rescue `setjmp(vm_error_jmp)` at the
+top of `vm_exec_env`, the VM now uses a linked list of stack-allocated `CatchFrame`
+structs. The rescue `setjmp` — which clobbered the global jmp_buf without pairing
+with `te_push`, leaving a dangling target — is deleted; a `simple-error` raised in a
+handler now propagates to the enclosing catch frame, and `vm_catch_chain` is
+restored by plain frame unlink on every exit. An earlier intermediate fix (commit
+`b2b1988`: clear `vm_error_pending` before running the handler) resolved the
+immediate hang but was superseded by this refactor.
 
 **Earlier (partial) fixes kept:** `overrides.kl` → `overrides-pure.kl` (removes `scm.*` dependencies), and switching the KLambda source to the standard Shen OS Kernel 41.2 distribution. These removed the broken `scm.*`-based `shen.<-dict`/`hash` that could not run in the C VM, but the hang persisted until the stale-jmp fix above.
 
@@ -38,7 +47,7 @@ The bug was in how that handler was executed. In `vm/zincvm.c`, the `trap-error`
 **File:** `vm/zincvm.c`  
 **Symptom:** On error, `eval_kl` returns identity instead of re-raising.  
 **Reason:** Shen's `load` doesn't wrap forms in `trap-error`.  
-**Status:** Intentional but fragile. Now uses `te_push/te_pop` (da55d9b).
+**Status:** Intentional but fragile. Now uses a `CatchFrame` (see AGENTS.md trap-error section).
 
 ## 4. `str` primitive — FIXED
 
