@@ -940,6 +940,14 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         if (setjmp(vm_error_jmp)) {
             /* Handler: pop to enclosing so simple-error propagates outward */
             te_pop();
+            /* The original error is now being handled.  Clear the pending
+               flag BEFORE running the handler, otherwise the handler's
+               vm_exec_env hits the rescue setjmp at the top of vm_exec_env,
+               which clobbers vm_error_jmp (overwriting the enclosing trap-error
+               target we just restored via te_pop) and leaves a dangling
+               jmp_buf.  With the flag cleared, a simple-error raised inside
+               the handler propagates cleanly to the enclosing trap-error. */
+            vm_error_pending = 0;
             Value err = val_error(vm_error_val.error.message);
             Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
             Value *henv = GC_VALUE_ARRAY(handler.lambda.env_len + 1);
@@ -2332,6 +2340,13 @@ int main(int argc, char **argv) {
                 printf("--- Test 7b: read-from-string ---\n");
                 run_test("read-from-string",
                          "(mS[7:S](+ 1 2)g[16:s]read-from-stringp)", 0);
+
+                /* Regression test (Bug #1): read-from-string on a typed define
+                   `{ A --> A }`.  Used to hang indefinitely due to a stale
+                   vm_error_jmp left by the trap-error handler's vm_exec_env.
+                   Now returns [[define id { A --> A } X -> X]]. */
+                run_test("read-from-string-typed-define",
+                         "(mS[30:S](define id { A --> A } X -> X)g[16:s]read-from-stringp)", 0);
 
                 /* Test 7: bundled load — exercises full read-compile chain */
                 printf("--- Test 7: bundled load via apply ---\n");

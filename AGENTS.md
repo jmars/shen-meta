@@ -30,6 +30,7 @@ Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-z
 | 5 | eval-kl `[+ 1 2]` via marshal chain | Pass |
 | 6-7 | read-file-as-string, load via apply | Pass |
 | 7b | read-from-string | Pass (returns [[+ 1 2]]) |
+| 7b' | read-from-string typed define `{ A --> A }` | Pass (returns [[define id ...]]) — regression test for Bug #1 |
 | 7c | read via string stream | Pass |
 | 8-10 | id, newvar, defun->lambda (bundled via interp-load-raw) | Pass |
 
@@ -285,6 +286,12 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
   `simple-error` propagates to the enclosing trap-error, not back to itself.
   This prevents infinite ping-pong where an inner handler calls simple-error
   and longjmps back to its own setjmp.
+- **Also clear `vm_error_pending = 0` BEFORE running the handler.** Otherwise the
+  handler's `vm_exec_env` hits the rescue `setjmp(vm_error_jmp)` at the top of
+  `vm_exec_env` (`if (vm_error_pending) { vm_error_pending=0; setjmp(vm_error_jmp); }`),
+  which overwrites `vm_error_jmp` without `te_push()` and leaves it pointing into
+  the returned handler frame. The next `simple-error` without an enclosing
+  trap-error then `longjmp`s to that dangling target and loops forever (Bug #1).
 - `eval-kl` and REPL code also use `te_push/te_pop` (not manual memcpy save/restore)
 
 ## ZINC calling convention (STANDARD — fully aligned)
