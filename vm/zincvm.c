@@ -386,6 +386,19 @@ static void vm_throw(const char *msg) {
     longjmp(vm_catch_chain->buf, 1);
 }
 
+/* Type-error in a primitive: when a trap-error body is active, throw so
+   Shen code can catch it; otherwise print and return -1 (legacy path used
+   by built-in tests, which run outside any trap).  vm_throw longjmps out
+   of this function entirely, so no locals are read after it and there is
+   no -Wclobbered risk. */
+#define PRIM_TYPE_ERROR(msg) \
+    do { \
+        if (vm_catch_chain && vm_catch_chain->in_trap_error) \
+            vm_throw(msg); \
+        fprintf(stderr, "runtime: %s\n", msg); \
+        return -1; \
+    } while (0)
+
 static jmp_buf alarm_jmp;
 static volatile sig_atomic_t test_timed_out = 0;
 static int repl_mode = 0;
@@ -660,35 +673,35 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "fst") == 0) {
         Value a = va_pop(stack);
-        if (a.tag != VAL_CONS) { fprintf(stderr, "runtime: fst on non-cons\n"); return -1; }
+        if (a.tag != VAL_CONS) PRIM_TYPE_ERROR("fst on non-cons");
         *acc = *a.cons.car; return 0;
     }
     if (strcmp(name, "snd") == 0) {
         Value a = va_pop(stack);
-        if (a.tag != VAL_CONS) { fprintf(stderr, "runtime: snd on non-cons\n"); return -1; }
+        if (a.tag != VAL_CONS) PRIM_TYPE_ERROR("snd on non-cons");
         *acc = *a.cons.cdr; return 0;
     }
 
     /* --- Arithmetic --- */
     if (strcmp(name, "+") == 0) {
         Value a1 = va_pop(stack), a2 = va_pop(stack);
-        if (a1.tag != VAL_NUMBER || a2.tag != VAL_NUMBER) { fprintf(stderr, "runtime: + on non-numbers\n"); return -1; }
+        if (a1.tag != VAL_NUMBER || a2.tag != VAL_NUMBER) PRIM_TYPE_ERROR("+ on non-numbers");
         *acc = val_number(a1.number + a2.number); return 0;
     }
     if (strcmp(name, "-") == 0) {
         Value a1 = va_pop(stack), a2 = va_pop(stack);
-        if (a1.tag != VAL_NUMBER || a2.tag != VAL_NUMBER) { fprintf(stderr, "runtime: - on non-numbers\n"); return -1; }
+        if (a1.tag != VAL_NUMBER || a2.tag != VAL_NUMBER) PRIM_TYPE_ERROR("- on non-numbers");
         *acc = val_number(a1.number - a2.number); return 0;
     }
     if (strcmp(name, "*") == 0) {
         Value a1 = va_pop(stack), a2 = va_pop(stack);
-        if (a1.tag != VAL_NUMBER || a2.tag != VAL_NUMBER) { fprintf(stderr, "runtime: * on non-numbers\n"); return -1; }
+        if (a1.tag != VAL_NUMBER || a2.tag != VAL_NUMBER) PRIM_TYPE_ERROR("* on non-numbers");
         *acc = val_number(a1.number * a2.number); return 0;
     }
     if (strcmp(name, "/") == 0) {
         Value a1 = va_pop(stack), a2 = va_pop(stack);
-        if (a1.tag != VAL_NUMBER || a2.tag != VAL_NUMBER) { fprintf(stderr, "runtime: / on non-numbers\n"); return -1; }
-        if (a2.number == 0) { fprintf(stderr, "runtime: division by zero\n"); return -1; }
+        if (a1.tag != VAL_NUMBER || a2.tag != VAL_NUMBER) PRIM_TYPE_ERROR("/ on non-numbers");
+        if (a2.number == 0) PRIM_TYPE_ERROR("division by zero");
         *acc = val_number(a1.number / a2.number); return 0;
     }
 
@@ -751,19 +764,19 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "hd") == 0) {
         Value a = va_pop(stack);
         if (a.tag == VAL_NIL) { *acc = val_nil(); return 0; }
-        if (a.tag != VAL_CONS) { fprintf(stderr, "runtime: hd on non-cons\n"); return -1; }
+        if (a.tag != VAL_CONS) PRIM_TYPE_ERROR("hd on non-cons");
         *acc = *a.cons.car; return 0;
     }
     if (strcmp(name, "tl") == 0) {
         Value a = va_pop(stack);
         if (a.tag == VAL_NIL) { *acc = val_nil(); return 0; }
-        if (a.tag != VAL_CONS) { fprintf(stderr, "runtime: tl on non-cons\n"); return -1; }
+        if (a.tag != VAL_CONS) PRIM_TYPE_ERROR("tl on non-cons");
         *acc = *a.cons.cdr; return 0;
     }
     if (strcmp(name, "emptylist") == 0) {
         Value a = va_pop(stack);
         if (a.tag == VAL_NUMBER && a.number == 0) { *acc = val_nil(); return 0; }
-        fprintf(stderr, "runtime: emptylist on non-zero\n"); return -1;
+        if (a.tag != VAL_NUMBER || a.number != 0) PRIM_TYPE_ERROR("emptylist on non-zero");
     }
 
     /* --- String ops --- */
@@ -789,14 +802,14 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "n->string") == 0) {
         Value a = va_pop(stack);
-        if (a.tag != VAL_NUMBER) { fprintf(stderr, "runtime: n->string on non-number\n"); return -1; }
+        if (a.tag != VAL_NUMBER) PRIM_TYPE_ERROR("n->string on non-number");
         /* Shen: number→character code (ASCII). (n->string 40) → "(" */
         char buf[2] = { (char)a.number, '\0' };
         *acc = val_string(buf, 1); return 0;
     }
     if (strcmp(name, "string->n") == 0) {
         Value a = va_pop(stack);
-        if (a.tag != VAL_STRING) { fprintf(stderr, "runtime: string->n on non-string\n"); return -1; }
+        if (a.tag != VAL_STRING) PRIM_TYPE_ERROR("string->n on non-string");
         /* Shen: character code of first character. (string->n "(") → 40 */
         *acc = val_number(a.str.len > 0 ? (unsigned char)a.str.data[0] : 0); return 0;
     }
@@ -812,12 +825,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "tlstr") == 0) {
         Value a = va_pop(stack);
-        if (a.tag != VAL_STRING || a.str.len < 1) { fprintf(stderr, "runtime: tlstr on empty/non-string\n"); return -1; }
+        if (a.tag != VAL_STRING || a.str.len < 1) PRIM_TYPE_ERROR("tlstr on empty/non-string");
         *acc = val_string(a.str.data + 1, a.str.len - 1); return 0;
     }
     if (strcmp(name, "hdstr") == 0) {
         Value a = va_pop(stack);
-        if (a.tag != VAL_STRING || a.str.len < 1) { fprintf(stderr, "runtime: hdstr on empty/non-string\n"); return -1; }
+        if (a.tag != VAL_STRING || a.str.len < 1) PRIM_TYPE_ERROR("hdstr on empty/non-string");
         *acc = val_string(a.str.data, 1); return 0;
     }
     if (strcmp(name, "pos") == 0) {
@@ -844,7 +857,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     /* --- Symbol ops --- */
     if (strcmp(name, "intern") == 0) {
         Value a = va_pop(stack);
-        if (a.tag != VAL_STRING) { fprintf(stderr, "runtime: intern on non-string\n"); return -1; }
+        if (a.tag != VAL_STRING) PRIM_TYPE_ERROR("intern on non-string");
         char buf[256]; int n = a.str.len < 255 ? a.str.len : 255;
         memcpy(buf, a.str.data, n); buf[n] = '\0';
         *acc = val_symbol(buf); return 0;
@@ -863,7 +876,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     /* --- Vector ops --- */
     if (strcmp(name, "absvector") == 0) {
         Value a = va_pop(stack);
-        if (a.tag != VAL_NUMBER || a.number < 0) { fprintf(stderr, "runtime: absvector bad size\n"); return -1; }
+        if (a.tag != VAL_NUMBER || a.number < 0) PRIM_TYPE_ERROR("absvector bad size");
         *acc = val_vector((int)a.number); return 0;
     }
     if (strcmp(name, "<-address") == 0) {
@@ -883,9 +896,9 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "address->") == 0) {
         Value vec = va_pop(stack), idx = va_pop(stack), val = va_pop(stack);
-        if (vec.tag != VAL_VECTOR || idx.tag != VAL_NUMBER) { fprintf(stderr, "runtime: address-> bad types\n"); return -1; }
+        if (vec.tag != VAL_VECTOR || idx.tag != VAL_NUMBER) PRIM_TYPE_ERROR("address-> bad types");
         int i = (int)idx.number;
-        if (i < 0 || i >= vec.vector.len) { fprintf(stderr, "runtime: address-> OOB\n"); return -1; }
+        if (i < 0 || i >= vec.vector.len) PRIM_TYPE_ERROR("address-> OOB");
         vec.vector.data[i] = val; *acc = vec; return 0;
     }
 
@@ -929,7 +942,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         /* RTL: (trap-error Body Handler) — Handler pushed first, then Body.
            Stack: [mark, Handler, Body] → pop Body first, then Handler. */
         Value body = va_pop(stack), handler = va_pop(stack);
-        if (handler.tag != VAL_LAMBDA) { fprintf(stderr, "runtime: trap-error handler not fn\n"); return -1; }
+        if (handler.tag != VAL_LAMBDA) PRIM_TYPE_ERROR("trap-error handler not fn");
         CatchFrame cf;
         cf.parent = vm_catch_chain;
         cf.in_trap_error = 0;   /* set to 1 inside body branch */
@@ -974,6 +987,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            For (open path dir): stack=[dir, path], path on top. */
         Value path = va_pop(stack), dir = va_pop(stack);
         if (path.tag != VAL_STRING || dir.tag != VAL_SYMBOL) {
+            if (vm_catch_chain && vm_catch_chain->in_trap_error)
+                vm_throw("open bad types");
             fprintf(stderr, "runtime: open bad types — path.tag=%d dir.tag=%d", path.tag, dir.tag);
             if (path.tag == VAL_SYMBOL) fprintf(stderr, " path='%s'", path.sym.name);
             if (path.tag == VAL_MARK) fprintf(stderr, " path=MARK");
@@ -1008,7 +1023,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "close") == 0) {
         Value s = va_pop(stack);
-        if (s.tag != VAL_STREAM) { fprintf(stderr, "runtime: close on non-stream\n"); return -1; }
+        if (s.tag != VAL_STREAM) PRIM_TYPE_ERROR("close on non-stream");
         if (s.stream.is_string) {
             int idx = (int)(intptr_t)s.stream.file - 1;
             if (idx < 0 || idx >= n_string_streams) { fprintf(stderr, "runtime: bad string stream idx\n"); return -1; }
@@ -1040,7 +1055,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "read-file-as-string") == 0 || strcmp(name, "vm.read-file") == 0) {
         Value path = va_pop(stack);
-        if (path.tag != VAL_STRING) { fprintf(stderr, "runtime: read-file-as-string on non-string\n"); return -1; }
+        if (path.tag != VAL_STRING) PRIM_TYPE_ERROR("read-file-as-string on non-string");
         char *p = strndup(path.str.data, path.str.len);
         FILE *f = fopen(p, "r");
         free(p);
@@ -1076,10 +1091,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "get-time") == 0) {
         Value mode = va_pop(stack);
-        if (mode.tag != VAL_SYMBOL) { fprintf(stderr, "runtime: get-time requires symbol\n"); return -1; }
+        if (mode.tag != VAL_SYMBOL) PRIM_TYPE_ERROR("get-time requires symbol");
         if (strcmp(mode.sym.name, "unix") == 0 || strcmp(mode.sym.name, "real") == 0)
             { *acc = val_number((long)time(NULL)); return 0; }
         if (strcmp(mode.sym.name, "run") == 0) { *acc = val_number((long)clock()); return 0; }
+        if (vm_catch_chain && vm_catch_chain->in_trap_error)
+            vm_throw("get-time unknown mode");
         fprintf(stderr, "runtime: unknown get-time mode '%s'\n", mode.sym.name); return -1;
     }
 
@@ -1100,7 +1117,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "set") == 0) {
         Value sym = va_pop(stack), v = va_pop(stack);
-        if (sym.tag != VAL_SYMBOL) { fprintf(stderr, "runtime: set requires symbol\n"); return -1; }
+        if (sym.tag != VAL_SYMBOL) PRIM_TYPE_ERROR("set requires symbol");
         global_set(sym.sym.name, v); *acc = v; return 0;
     }
     if (strcmp(name, "eval-kl") == 0) {
@@ -2532,6 +2549,10 @@ int main(int argc, char **argv) {
         "(mc(S[6:S]caughtv)"                           /* handler pushed FIRST */
         "c(mn[1:n]0n[1:n]0g[9:s]<-addresspv)"        /* body pushed LAST */
         "g[10:s]trap-errorp)", 1);
+    run_test("32b. trap-error catches + on non-numbers",
+        "(mc(S[6:S]caughtv)"                           /* handler pushed FIRST */
+        "c(mS[1:S]xn[1:n]1g[1:s]+pv)"                /* body: (+ 1 "x") */
+        "g[10:s]trap-errorp)", 1);
 
     /* === appterm ('t' opcode) tests ===
        Stack layout for appterm: [mark, argN..arg1, function]
@@ -2563,6 +2584,6 @@ int main(int argc, char **argv) {
        but no pushmark; arg gets collected, then stack empty → error    */
     run_test("38. appterm: missing mark", "(n[2:n]42c(a[1:n]0v)t)", 0);
 
-    printf("=== All 38 tests done ===\n");
+    printf("=== All 39 tests done ===\n");
     return 0;
 }
