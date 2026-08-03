@@ -191,7 +191,14 @@ static Value val_prim(const char *name) {
 }
 static Value val_error(const char *msg) {
     Value v; memset(&v, 0, sizeof(v));
-    v.tag = VAL_ERROR; v.error.message = strdup(msg); return v;
+    v.tag = VAL_ERROR;
+    /* GC-allocate so the message is reclaimed with the collector instead of
+       leaking via strdup on every raised error. */
+    int len = (int)strlen(msg);
+    char *buf = (char*)GC_MALLOC_ATOMIC(len + 1);
+    memcpy(buf, msg, len); buf[len] = '\0';
+    v.error.message = buf;
+    return v;
 }
 static Value val_vector(int size) {
     Value v; memset(&v, 0, sizeof(v));
@@ -366,10 +373,18 @@ static int error_jmp_sp = 0;  /* next free slot */
 static jmp_buf vm_error_jmp;
 
 static void te_push(void) {
+    if (error_jmp_sp >= ERROR_JMP_MAX) {
+        fprintf(stderr, "runtime: error_jmp_stack overflow (%d nested trap-errors)\n", ERROR_JMP_MAX);
+        abort();
+    }
     memcpy(&error_jmp_stack[error_jmp_sp], vm_error_jmp, sizeof(jmp_buf));
     error_jmp_sp++;
 }
 static void te_pop(void) {
+    if (error_jmp_sp <= 0) {
+        fprintf(stderr, "runtime: error_jmp_stack underflow\n");
+        abort();
+    }
     error_jmp_sp--;
     memcpy(vm_error_jmp, &error_jmp_stack[error_jmp_sp], sizeof(jmp_buf));
 }
@@ -935,6 +950,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         Value body = va_pop(stack), handler = va_pop(stack);
         if (handler.tag != VAL_LAMBDA) { fprintf(stderr, "runtime: trap-error handler not fn\n"); return -1; }
         vm_error_pending = 0;
+        /* Capture the enclosing vm_in_trap_error ONCE at entry so we can
+           restore it on every exit (normal and error/handler).  If read
+           only on the error path it would see the stale value the body left
+           set before longjmp, leaking vm_in_trap_error=1 forever. */
+        int saved_te = vm_in_trap_error;
         /* Push-then-setjmp: the stack remembers the enclosing jmp_buf. */
         te_push();
         if (setjmp(vm_error_jmp)) {
@@ -955,13 +975,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
                 memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
             henv[handler.lambda.env_len] = err;
             handler.lambda.env = henv; handler.lambda.env_len++;
-            int saved_te = vm_in_trap_error;
             vm_in_trap_error = 1;
             *acc = vm_exec_env(hc, hl, handler.lambda.env, handler.lambda.env_len);
             vm_in_trap_error = saved_te;
             return 0;
         } else {
-            int saved_te = vm_in_trap_error;
             vm_in_trap_error = 1;
             if (body.tag == VAL_LAMBDA) {
                 /* kmacros wraps the body in (lambda (newvar) B), so the
