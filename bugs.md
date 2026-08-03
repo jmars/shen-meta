@@ -1,42 +1,44 @@
 # Bugs & known issues
 
-## 1. Test 7e: runtime `.shen` load hangs during `kl->zinc` compilation of `defun`
+## 1. Test 7e / typed-define: `read-from-string` hangs on `{ }` type annotations
 
-**File:** `vm/zincvm.c:2294-2303` (commented out)  
-**Symptom:** Loading a `.shen` file containing `(defun ...)` at runtime via bundled `load` hangs. `(+ 1 2)` loads fine.
+**Symptom:** `read-from-string "(define id {A --> A} X -> X)"` hangs >10s. `read-from-string "(+ 1 2)"` works fine. The `read-from-string-unprocessed` path (parse only) is instant.
 
-**Root cause:** During `eval-kl` processing of the `defun` form, `kl->zinc` compiles the KLambda. This triggers `shen.store-arity` → `shen.sysfunc?` → `element?` → `get` in a tight loop (24K calls before timeout). `shen.app` is called 63K times as a symptom of this arity-checking loop.
+**Current understanding (2026-08-02):** With the jmp_buf stack fix (da55d9b), the `shen.app` ping-pong is eliminated. The remaining hang is in `process-sexprs`. The typed define triggers a property-vector lookup for the freshly-read symbol, which fails (no arity stored), and the error recovery doesn't terminate. Backtrace after the jmp_buf fix shows `str->bytes` being called repeatedly from `read-from-string` at pc=4.
 
-**Trace evidence:**
-- `shen.store-arity`/`shen.sysfunc?`/`element?`/`get`: 24,295 calls
-- `shen.app`: 63,586 calls  
-- `shen.for-each`: 47 calls (was 0 before stale-push fix)
-- Zero activity from: `shen.shen->kl-h`, `shen.record-and-evaluate`, `interp`, `toplevel-interp`, `kl->zinc`, `extract-kl` — the hang is in the C `eval-kl` primitive, not in metacircular execution
+**Root cause chain:** `find-arities → store-arity → arity(id) → get(property-vector, arity, id) → <-dict → error → get's handler → simple-error → arity's handler returns -1`. After this, `store-arity` should continue and `put` the arity, but something re-enters the chain.
 
 **Contributing factors fixed:**
-1. Stale `push` instructions in bundle (old `zinc.shen` pre-auto-push) — fixed by `make bundle`; restored `shen.for-each` execution
-2. `eval-kl` recursion guard returning identity — removed in `14b8d2d`; with Boehm GC deep recursion is safe
+1. Stale `push` instructions in bundle — fixed by `make bundle`
+2. `eval-kl` recursion guard — removed in `14b8d2d`
+3. Trap-error handler ping-pong — fixed in `da55d9b` (jmp_buf stack)
 
-**Remaining issue:** The arity-checking chain (`shen.store-arity` → `shen.sysfunc?` → `element?` → `get`) loops inside `kl->zinc` specifically when compiling `defun` KLambda forms. The trigger is somewhere in how the bundled Shen compiler processes `defun` forms through the `extract-kl` → `kl->zinc` → `toplevel-interp` pipeline inside the C `eval-kl` primitive.
+**Older trace evidence:**
+- `shen.store-arity`/`shen.sysfunc?`/`element?`/`get`: 24,295 calls
+- `shen.app`: 63,586 calls
 
 ## 2. `=` cons-vs-symbol HACK — REMOVED
 
-**Status:** Fixed. Removed in commit after `019a969`.  
+**Status:** Fixed.  
 **Was:** `zinc-c` generated flat `(= [number 42] "number")` instead of `(= hd(hd(Code)) "number")`.  
-**Resolution:** The zinc-c compiler now generates correct `hd`-wrapped comparisons. All 48 tests pass without any cons-vs-symbol special-casing in `=`. The hack was dead code.
+**Resolution:** The zinc-c compiler now generates correct `hd`-wrapped comparisons.
 
 ## 3. `eval_kl` error swallowing
 
-**File:** `vm/zincvm.c:1148-1151`  
-**Symptom:** On error, `eval_kl` restores the caller's `jmp_buf` and returns the error value without re-raising.  
-**Reason:** Shen's `load` doesn't wrap forms in `trap-error`, so a single failing form would abort the entire load.  
-**Status:** Swallowing is intentional but fragile — hides genuine errors. Should re-raise once the load path wraps forms in `trap-error`. Note: the recursion guard (eval_kl_depth) was removed in `14b8d2d` — nested eval-kl now executes instead of returning identity. The depth counter is retained for potential future diagnostics.
+**File:** `vm/zincvm.c`  
+**Symptom:** On error, `eval_kl` returns identity instead of re-raising.  
+**Reason:** Shen's `load` doesn't wrap forms in `trap-error`.  
+**Status:** Intentional but fragile. Now uses `te_push/te_pop` (da55d9b).
 
 ## 4. `str` primitive — FIXED
 
 **Status:** Fixed.  
-**Was:** Metacircular interp only handled `[symbol A]` and C VM returned `""` for booleans/cons/nil/etc.  
-**Fix:** 
-- Interp: specific rules for symbol, number, string, boolean; catch-all delegates to host `(str A)`
-- C VM: `str_value()` helper handles all types — cons (bracket notation with proper ` . ` dotted pairs), nil (`[]`), error (`<error msg>`), lambda (`<lambda>`), prim (`<prim name>`), vector/stream (`<vector N>`/`<stream>`)
-- Matches shen-scheme's `put-datum` behavior: full printed representation for every type, never `""`
+**Fix:** `str_value()` handles all types with full `put-datum` representation.
+
+## 5. Trap-error handler ping-pong — FIXED (da55d9b)
+
+**Symptom:** `get`'s handler's `simple-error` longjmp'd back to itself because `vm_error_jmp` wasn't restored.
+
+**Root cause:** Single `vm_error_jmp` + manual save/restore couldn't handle nested trap-errors where the inner handler calls `simple-error`.
+
+**Fix:** `error_jmp_stack[64]` + `te_push()`/`te_pop()`. `trap-error` pushes before `setjmp`. Handler pops FIRST so `simple-error` propagates outward. Also updated `eval-kl` and REPL code.

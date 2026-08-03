@@ -276,6 +276,17 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
 - This routes OOB access sentinels (tag=0,n=0 from empty-env vm_exec calls) through
   error handlers, letting `bound?` correctly return false for unbound symbols
 
+### jmp_buf stack (commit da55d9b)
+
+- `error_jmp_stack[64]` + `error_jmp_sp` + `te_push()`/`te_pop()`
+- All `setjmp(vm_error_jmp)` sites MUST use `te_push()` before and `te_pop()` after
+- `simple-error` always longjmps to current `vm_error_jmp` — no manual restore needed
+- trap-error handler path: `te_pop()` BEFORE executing handler so the handler's
+  `simple-error` propagates to the enclosing trap-error, not back to itself.
+  This prevents infinite ping-pong where an inner handler calls simple-error
+  and longjmps back to its own setjmp.
+- `eval-kl` and REPL code also use `te_push/te_pop` (not manual memcpy save/restore)
+
 ## ZINC calling convention (STANDARD — fully aligned)
 
 The VM now uses **standard ZINC** semantics: all value-producing opcodes push
