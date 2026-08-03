@@ -45,9 +45,14 @@ Consequence — call sites split into two kinds:
 
 `[global X]` → `safe.X` only fires on the dynamic path (a primitive used *as a
 value*, higher-order, or explicit `(function X)`). Normal direct calls use
-`[prim X]`. Because static sites are type-safe, the C primitives' own type checks
-are redundant there and are compiled out in release; they remain only as
-`ZINCVM_DEBUG` defense-in-depth for the raw `[prim X]`/`%%` paths.
+`[prim X]`. The C primitives' own type checks are therefore defense-in-depth and
+are `ZINCVM_DEBUG`-only (debug builds route them through `vm_throw`). In RELEASE
+they still run but just print `runtime: ...` + `return -1` (a hard, non-catchable
+error). NOTE: they are NOT compiled out in release — the `.kl` Shen OS kernel
+(`shen.initialise` etc.) has type-unsafe arithmetic calls (`+ - * /` on
+non-numbers) that reach raw `[prim X]` and rely on the C check returning `-1`;
+removing the checks causes a segfault during `shen.initialise`. Fully removing
+them would require the static path to also route through the safe wrappers.
 
 ## Self-hosting tests
 
