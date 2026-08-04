@@ -53,18 +53,14 @@
   \* Empty stack — no mark found, bytecode is malformed *\
   [] _ -> (simple-error "missing pushmark"))
 
-\* arity: count leading grab instructions in bytecode *\
-(define arity { (list zinc-instruction) --> number }
-  [grab | C] -> (+ 1 (arity C))
+(define zinc-arity { (list zinc-instruction) --> number }
+  [grab | C] -> (+ 1 (zinc-arity C))
   _ -> 0)
 
-\* count-args: count elements in an arg list *\
 (define count-args { (list zinc-value) --> number --> number }
   [] Acc -> Acc
   [_ | Args] Acc -> (count-args Args (+ 1 Acc)))
 
-\* drop-grabs: remove first N grab instructions from code
-   (those args are already bound in the partial closure's env) *\
 (define drop-grabs { number --> (list zinc-instruction) --> (list zinc-instruction) }
   N C -> C where (= N 0)
   N [grab | C] -> (drop-grabs (- N 1) C)
@@ -77,49 +73,42 @@
   [jmpf L | C] A E S R                                          -> (interp C A E S R)
   [jmp L | C] A E S R                                           -> (interp (interp-jmp C L) A E S R)
   [label L | C] A E S R                                         -> (interp C A E S R)
-  \* Apply: collect all args, check arity for partial application *\
   [apply | C] [lambda C1 E1] E S R ->
     (let Collected (collect-apply-args S 0)
       (let Args (hd Collected)
         (let Rest (hd (tl Collected))
-          (let A (arity C1)
+          (let A (zinc-arity C1)
             (let N (count-args Args 0)
               (if (= N A)
-                  \* Full application: all args provided, enter closure body *\
                   (interp C1 [lambda C1 E1] (append (reverse Args) E1) [] [[C E Rest] | R])
                   (if (< N A)
-                      \* Partial application: fewer args than arity —
-                         create new closure capturing provided args,
-                         with remaining grab instructions *\
                       (interp C [lambda (drop-grabs N C1) (append (reverse Args) E1)] E Rest R)
                       (simple-error "apply: too many args"))))))))
-  \* Appterm — tail call with return frame: check arity for partial application *\
+  \* Appterm — tail call with return frame: collect all args up to mark *\
   [appterm | C] [lambda C1 E1] E S [[C_call E_call _] | R] ->
     (let Collected (collect-apply-args S 0)
       (let Args (hd Collected)
         (if (empty? Args)
             (simple-error "appterm zero args")
             (let Rest (hd (tl Collected))
-              (let A (arity C1)
+              (let A (zinc-arity C1)
                 (let N (count-args Args 0)
                   (if (= N A)
                       (interp C1 [lambda C1 E1] (append (reverse Args) E1) [] [[C_call E_call Rest] | R])
                       (if (< N A)
-                          \* Partial appterm: return partial closure to caller *\
                           (interp C_call [lambda (drop-grabs N C1) (append (reverse Args) E1)] E_call Rest R)
-                          (simple-error "appterm: too many args"))))))))))
-  \* Appterm — tail call at top level: check arity for partial application *\
+                          (simple-error "appterm: too many args")))))))))
+  \* Appterm — tail call at top level: collect all args up to mark *\
   [appterm | C] [lambda C1 E1] E S [] ->
     (let Collected (collect-apply-args S 0)
       (let Args (hd Collected)
         (if (empty? Args)
             (simple-error "appterm zero args")
-            (let A (arity C1)
+            (let A (zinc-arity C1)
               (let N (count-args Args 0)
                 (if (= N A)
                     (interp C1 [lambda C1 E1] (append (reverse Args) E1) [] [])
                     (if (< N A)
-                        \* Partial appterm at top level: partial closure IS the result *\
                         [lambda (drop-grabs N C1) (append (reverse Args) E1)]
                         (simple-error "appterm: too many args"))))))))
   [push | C] A E S R                                            -> (interp C A E [A | S] R)
@@ -330,7 +319,7 @@
 (set-toplevel lookup lookup)
 (set-toplevel interp-jmp interp-jmp)
 (set-toplevel collect-apply-args collect-apply-args)
-(set-toplevel arity arity)
+(set-toplevel zinc-arity zinc-arity)
 (set-toplevel count-args count-args)
 (set-toplevel drop-grabs drop-grabs)
 (set-toplevel interp interp)
