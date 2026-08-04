@@ -21,6 +21,22 @@ make run-bundle  # run C VM with globals.csexp (self-hosting tests)
 Shen source → kmacros → normalize-term → debruijn → zinc-c → compile-zinc → nat->csexp → C VM
 ```
 
+## Partial application (metacircular interp only)
+
+The metacircular interpreter (`shen/interp.shen`) supports partial application:
+when a closure is called with fewer arguments than its arity, instead of entering
+the closure body, it creates a new closure capturing the provided arguments. This
+is implemented via the `arity`, `count-args`, and `drop-grabs` helpers in `interp.shen`,
+with arity checks in the `apply` and `appterm` rules.
+
+**The C VM does NOT support partial application** — it is intentionally simpler.
+The C VM runs only the subset of ZINC required for the meta-interpreter (the
+reduced self-contained bundle), where all call sites are proven full-arity.  If
+a bundled closure calls another with a short argument list, the metacircular
+interp (which runs ON the C VM) handles it — the C VM never sees partial
+application directly.  This split is intentional: the metacircular interp runs
+full KLambda; the C VM runs only the statically-proven subset.
+
 ## Design intent (why static sites skip safe wrappers)
 
 **The end goal:** the meta-circular interpreter (`interp` in `shen/interp.shen`) is
