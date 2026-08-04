@@ -75,7 +75,6 @@ typedef struct Value {
         struct {
             struct Instr *code;
             int code_len;
-            int arity;
             struct Value *env;
             int env_len;
         } lambda;
@@ -167,21 +166,6 @@ static Value val_nil(void) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_NIL; return v;
 }
-/* Scan bytecode from pc=0 before first OP_LET to find max ACCESS index.
-   Only valid for top-level closures (env_len==0). */
-static int compute_arity(Instr *code, int code_len) {
-    int max_access = 0;
-    for (int i = 0; i < code_len; i++) {
-        if (code[i].op == OP_LET) break;
-        if (code[i].op == OP_CUR) continue;  /* cur is 1 top-level instr */
-        if (code[i].op == OP_ACCESS) {
-            int n = (code[i].operand.tag == VAL_NUMBER) ? (int)code[i].operand.number : 0;
-            if (n > max_access) max_access = n;
-        }
-    }
-    return max_access + 1;
-}
-
 static Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
     /* env arrays are GC-allocated via gcalloc so GC traces captured
        Values when the closure is reachable (e.g. via global_table). */
@@ -192,11 +176,7 @@ static Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
         v.lambda.env = GC_VALUE_ARRAY(env_len);
         memcpy(v.lambda.env, env, env_len * sizeof(Value));
         v.lambda.env_len = env_len;
-        v.lambda.arity = 0;  /* partial closures inherit arity from caller */
-    } else {
-        v.lambda.env = NULL; v.lambda.env_len = 0;
-        v.lambda.arity = compute_arity(code, code_len);
-    }
+    } else { v.lambda.env = NULL; v.lambda.env_len = 0; }
     return v;
 }
 #define check_closure(cl, where) ((void)0)
@@ -368,32 +348,6 @@ static Value global_get(const char *name) {
     for (int i = 0; i < global_table_len; i++)
         if (strcmp(global_table[i].name, name) == 0)
             return global_table[i].closure;
-    
-    /* Not in C table — check Shen's global-table alist (set by
-       interp-eval at runtime).  The alist is stored under "global-table"
-       as a cons chain of [Name Closure] pairs. */
-    for (int i = 0; i < global_table_len; i++) {
-        if (strcmp(global_table[i].name, "global-table") == 0) {
-            Value alist = global_table[i].closure;
-            while (alist.tag == VAL_CONS) {
-                Value pair = *alist.cons.car;
-                if (pair.tag == VAL_CONS && pair.cons.car->tag == VAL_SYMBOL &&
-                    strcmp(pair.cons.car->sym.name, name) == 0) {
-                    /* pair = [Name . [[Closure . nil] . nil]]
-                       Extract Closure at pair.cdr->car->car */
-                    Value inner = *pair.cons.cdr;
-                    if (inner.tag == VAL_CONS) {
-                        Value inner2 = *inner.cons.car;
-                        if (inner2.tag == VAL_CONS)
-                            return *inner2.cons.car;
-                    }
-                }
-                alist = *alist.cons.cdr;
-            }
-            break;
-        }
-    }
-    
     /* Only return VAL_PRIM for known C primitives. Unknown names
        (e.g., *macros*, *stinput*) must be VAL_SYMBOL so that
        cons?, element?, and other list-traversal code can match them.
@@ -1645,24 +1599,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                     fprintf(stderr, "runtime: apply missing pushmark\n"); goto done;
                 }
                 va_pop(&stack);
-
-                /* Partial application: if insufficient args, create partial closure */
-                int total_args = acc.lambda.env_len + nargs;
-                if (acc.lambda.arity > 0 && total_args < acc.lambda.arity) {
-                    int saved_arity = acc.lambda.arity;
-                    int new_env_len = acc.lambda.env_len + nargs;
-                    Value *new_env = GC_VALUE_ARRAY(new_env_len);
-                    Value *lambda_env = acc.lambda.env;
-                    if (acc.lambda.env_len > 0 && lambda_env)
-                        memcpy(new_env, lambda_env, acc.lambda.env_len * sizeof(Value));
-                    for (int i = 0; i < nargs; i++)
-                        new_env[acc.lambda.env_len + i] = argbuf[i];
-                    acc = val_lambda(acc.lambda.code, acc.lambda.code_len, new_env, new_env_len);
-                    acc.lambda.arity = saved_arity;  /* preserve original arity */
-                    va_push(&stack, acc);
-                    pc++;
-                    break;
-                }
 
                 if (frames_sp >= CALL_STACK_DEPTH) { goto done; }
                 CallFrame *cf = &frame_stack[frames_sp++];

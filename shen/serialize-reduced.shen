@@ -69,17 +69,6 @@
 (set-toplevel interp-eval-safe interp-eval-safe)
 (tc +)
 
-\* Load compiler.kl — recompiles the interpreter's own compiler
-   functions through the metacircular interpreter pipeline.  The host-
-   compiled pipeline (loaded via interp.shen above) works on the host
-   (the host VM supports partial application), and the OUTPUT closures
-   from our zinc-c use multi-arg calls (no currying).  Loading here
-   (after all other .kl files) prepends the recompiled closures to the
-   global-table; dedupe-globals keeps the first occurrence — the
-   recompiled version. *\
-(tc -)
-(interp-load-raw "/home/arch/github/shen-meta/shen/compiler.kl")
-
 \* Add shen. prefix aliases for unprefixed closures. *\
 (tc -)
 (define shen.has-dot?
