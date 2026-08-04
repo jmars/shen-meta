@@ -6,8 +6,8 @@ and C VM gotchas.
 ## ZINC calling convention (STANDARD — fully aligned)
 
 The VM uses **standard ZINC** semantics: all value-producing opcodes push results
-to the stack AND set `acc`. The `zinc.shen` compiler no longer emits explicit
-`u` (PUSH) instructions — it was modified to rely on auto-push.
+to the stack AND set `acc`. There is no `push` opcode — the compiler relies on
+auto-push (see "Compiler changes" below).
 
 **Opcodes that push to stack:**
 - `OP_NUMBER`, `OP_STRING`, `OP_SYMBOL`, `OP_BOOLEAN` — push operand
@@ -18,16 +18,17 @@ to the stack AND set `acc`. The `zinc.shen` compiler no longer emits explicit
 - `OP_APPLY` (VAL_PRIM) — push primitive result
 - `OP_APPTERM` (VAL_PRIM) — push primitive result
 - `OP_RETURN` — push return value to caller's stack
-- `OP_PUSH` — kept for compatibility, duplicates acc to stack
 
 **Opcodes that pop from stack:**
 - `OP_JMPF` — pops condition from stack
 - `OP_LET` — pops value from stack (binds to env)
 - `OP_APPLY` / `OP_APPTERM` — pop function from stack top, then args up to mark
 
-**Compiler changes:** `shen/zinc.shen` (`zinc-c` and `zinc-t`) removed all
-`intersperse [push]` and explicit `[push]` emissions. Multi-arg primitives and
-function calls now emit bare operand sequences, relying on auto-push.
+**Compiler changes:** `shen/zinc.shen` (`zinc-c` and `zinc-t`) relies on
+auto-push — multi-arg primitives and function calls emit bare operand sequences,
+no `push` opcode. The `push` (`u`) opcode has been REMOVED from the C VM, the
+compiler pipeline, and the metacircular interp: the compiler never emits it, and
+the bundle/test bytecode contain no `u`. `pushmark` (`m`) remains.
 
 **Metacircular interp — auto-push:** The `interp` in `interp.shen` implements
 standard auto-push semantics. Only 7 value-instruction rules were changed — each
@@ -64,7 +65,8 @@ transformation is needed — the interp natively handles standard ZINC output.
 - `open` was the exception — had `dir`/`path` swapped, causing "open bad types"
   in bundled `load`. Fixed: pop `path` first, then `dir`.
 - **When writing bytecode by hand**, push args in right-to-left order:
-  `(s[2:s]in u S[8:S]Makefile u m g[8:s]raw.open p)` for `(open "Makefile" in)`.
+  `(s[2:s]in S[8:S]Makefile P[4:s]open)` for `(open "Makefile" in)` (inline
+  `OP_PRIM` `P[...]` dispatches directly, bypassing the global table).
 - **CRITICAL**: Hand-written bytecode MUST use RTL order. The VM pops top-first
   (leftmost arg). Writing LTR works for commutative ops (+, =, cons-as-pair) but
   silently produces wrong results for non-commutative ops (-, /, trap-error,
@@ -73,7 +75,7 @@ transformation is needed — the interp natively handles standard ZINC output.
 ## csexp atoms & flat bytecode
 
 - csexp atoms: `[len:type]value` — type is `s`/`n`/`S`/`b`.
-- Opcodes are single chars: `m` pushmark, `p` apply, `u` push, `r` grab, `v`
+- Opcodes are single chars: `m` pushmark, `p` apply, `r` grab, `v`
   return, etc.
 - ZINC bytecode for the interp family is FLAT: opcodes and operands are separate
   list elements. `[number 42]` = `cons('number, cons(42, nil))`, NOT

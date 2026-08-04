@@ -49,7 +49,6 @@
   [global G | C]   Labels -> [global G | (resolve-code C Labels)]
   [appterm | C]    Labels -> [appterm | (resolve-code C Labels)]
   [apply | C]      Labels -> [apply | (resolve-code C Labels)]
-  [push | C]       Labels -> [push | (resolve-code C Labels)]
   [pushmark | C]   Labels -> [pushmark | (resolve-code C Labels)]
   [grab | C]       Labels -> [grab | (resolve-code C Labels)]
   [return | C]     Labels -> [return | (resolve-code C Labels)]
@@ -98,7 +97,6 @@
   [] -> ")"
   [appterm | C]  -> (cn "t" (csexp-body C))
   [apply | C]    -> (cn "p" (csexp-body C))
-  [push | C]     -> (cn "u" (csexp-body C))
   [pushmark | C] -> (cn "m" (csexp-body C))
   [grab | C]     -> (cn "r" (csexp-body C))
   [return | C]   -> (cn "v" (csexp-body C))

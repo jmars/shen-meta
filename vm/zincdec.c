@@ -81,7 +81,7 @@ typedef struct Value {
 typedef enum {
     OP_ACCESS   = 'a', OP_GLOBAL   = 'g', OP_JMPF     = 'f',
     OP_JMP      = 'j', OP_APPTERM  = 't', OP_APPLY    = 'p',
-    OP_PUSH     = 'u', OP_PUSHMARK = 'm', OP_CUR      = 'c',
+    OP_PUSHMARK = 'm', OP_CUR      = 'c',
     OP_GRAB     = 'r', OP_RETURN   = 'v', OP_LET      = 'e',
     OP_ENDLET   = 'd', OP_NUMBER   = 'n', OP_STRING   = 'S',
     OP_SYMBOL   = 's', OP_BOOLEAN  = 'b', OP_PRIM     = 'P'
@@ -262,7 +262,6 @@ static int parse_body(ParseState *ps, Instr **out) {
         switch (c) {
         case 'm': instr.op = OP_PUSHMARK; ps->p++; break;
         case 'p': instr.op = OP_APPLY;    ps->p++; break;
-        case 'u': instr.op = OP_PUSH;     ps->p++; break;
         case 'r': instr.op = OP_GRAB;     ps->p++; break;
         case 'v': instr.op = OP_RETURN;   ps->p++; break;
         case 'e': instr.op = OP_LET;      ps->p++; break;
@@ -342,28 +341,12 @@ static void init_globals(void) {
         "eval-kl","absvector","<-address","address->",
         "n->string","string->n","str","tlstr","hdstr","pos",
         "intern","value","open","close","read-byte","write-byte",
-        "set","get-time","read-file-as-string","vm.read-file",
+        "set","get-time","read-file-as-string",
         "@p","fst","snd","gensym","variable?","newvar",
         "shen.fail!","fail",
         "stinput","stoutput", NULL
     };
     for (int i = 0; prims[i]; i++) global_set(prims[i], val_prim(prims[i]));
-
-    /* Register raw.X aliases for primitives that will be overwritten by
-       safe wrapper closures in parse_bundle.  Bytecode that needs the
-       unchecked C primitive uses raw.X; %% escapes inside safe wrappers
-       use OP_PRIM -> exec_primitive and bypass the global table. */
-    const char *raw_prims[] = {
-        "raw.+","raw.-","raw.*","raw./","raw.=","raw.<","raw.>","raw.>=","raw.<=",
-        "raw.cons","raw.hd","raw.tl","raw.cn",
-        "raw.symbol?","raw.boolean?","raw.number?","raw.string?","raw.cons?",
-        "raw.simple-error","raw.trap-error","raw.error-to-string",
-        "raw.eval-kl","raw.absvector","raw.<-address","raw.address->",
-        "raw.n->string","raw.string->n","raw.str","raw.tlstr","raw.hdstr","raw.pos",
-        "raw.intern","raw.value","raw.open","raw.close","raw.read-byte","raw.write-byte",
-        "raw.set","raw.get-time", NULL
-    };
-    for (int i = 0; raw_prims[i]; i++) global_set(raw_prims[i], val_prim(raw_prims[i]));
 }
 
 /* --- parse_bundle --- */
@@ -471,7 +454,6 @@ static void decompile_raw(Instr *code, int len, int indent) {
         switch (in->op) {
         case OP_PUSHMARK: printf("pushmark\n"); break;
         case OP_APPLY:    printf("apply\n"); break;
-        case OP_PUSH:     printf("push\n"); break;
         case OP_GRAB:     printf("grab\n"); break;
         case OP_RETURN:   printf("return\n"); break;
         case OP_LET:      printf("let\n"); break;
@@ -517,7 +499,6 @@ static void decompile_asm(Instr *code, int len, int base_addr, int indent) {
         switch (in->op) {
         case OP_PUSHMARK: printf("pushmark\n"); break;
         case OP_APPLY:    printf("apply\n"); break;
-        case OP_PUSH:     printf("push\n"); break;
         case OP_GRAB:     printf("grab\n"); break;
         case OP_RETURN:   printf("return\n"); break;
         case OP_LET:      printf("let\n"); break;
@@ -557,7 +538,6 @@ static void decompile_shen_instr(Instr *in, int indent) {
     switch (in->op) {
     case OP_PUSHMARK: printf("pushmark\n"); break;
     case OP_APPLY:    printf("apply\n"); break;
-    case OP_PUSH:     printf("push\n"); break;
     case OP_GRAB:     printf("grab\n"); break;
     case OP_RETURN:   printf("return\n"); break;
     case OP_LET:      printf("let\n"); break;
@@ -617,7 +597,6 @@ static void decompile_csexp_instr(Instr *in) {
     switch (in->op) {
     case OP_PUSHMARK: printf("m"); break;
     case OP_APPLY:    printf("p"); break;
-    case OP_PUSH:     printf("u"); break;
     case OP_GRAB:     printf("r"); break;
     case OP_RETURN:   printf("v"); break;
     case OP_LET:      printf("e"); break;

@@ -4,7 +4,7 @@
 
 **Shen evaluates Shen, compiles itself to native bytecode, runs on a native C VM with Boehm GC.** The full eval-kl chain is working: `(+ 1 2)` marshalled to tagged form, compiled through the metacircular pipeline, executed by the metacircular interpreter, demarshalled back to native — returns `3`. Pure self-hosting, no C bypass.
 
-The meta-circular evaluator is the core — the ZINC abstract machine implemented in ~100 lines of Shen pattern-matching rules, serialized to ~1.6MB of bytecode, and loaded by a ~2100-line C VM. The VM is self-contained: a working Shen runtime that doesn't depend on anything beyond a C compiler and Boehm GC.
+The meta-circular evaluator is the core — the ZINC abstract machine implemented in ~100 lines of Shen pattern-matching rules, serialized to ~0.5MB of bytecode, and loaded by a ~2600-line C VM. The VM is self-contained: a working Shen runtime that doesn't depend on anything beyond a C compiler and Boehm GC.
 
 This project is part of a larger architecture: sequent calculus provides the inference kernel (cut elimination as computation), LLMs handle pattern completion over the proof space, and Shen ties them together. But the VM itself is self-contained.
 
@@ -77,12 +77,12 @@ Trace execution of specific closures as they run:
 Output shows each instruction in raw format with PC numbers:
 
 ```
-[reverse]   0000  number 0
-[reverse]   0001  prim emptylist
-[reverse]   0002  push
+[reverse]   0000  pushmark
+[reverse]   0001  number 0
+[reverse]   0002  prim emptylist
 [reverse]   0003  access 0
-[reverse]   0005  global shen.reverse-help
-[reverse]   0006  appterm
+[reverse]   0004  global shen.reverse-help
+[reverse]   0005  appterm
 ```
 
 Traces only the named function — not functions it calls (unless you `--trace` them too).
@@ -92,28 +92,30 @@ Traces only the named function — not functions it calls (unless you `--trace` 
 Canonical s-expressions with `[len:type]value` atoms:
 
 - `s` — symbol, `n` — number, `S` — string, `b` — boolean
-- Single-char opcodes: `m` pushmark, `p` apply, `u` push, `r` grab, `v` return, `c` cur, `g` global, `a` access, `f` jmpf, `j` jmp, `e` let, `d` endlet, `t` appterm, `n` number, `S` string, `s` symbol, `b` boolean, `P` prim
+- Single-char opcodes: `m` pushmark, `p` apply, `r` grab, `v` return, `c` cur, `g` global, `a` access, `f` jmpf, `j` jmp, `e` let, `d` endlet, `t` appterm, `n` number, `S` string, `s` symbol, `b` boolean, `P` prim
 
-Example: `(+ 1 2)` → `(mn[1:n]2un[1:n]1ug[1:s]+p)`
+Example: `(+ 1 2)` → `(mn[1:n]2n[1:n]1g[1:s]+p)`
 
 **ZINC evaluates arguments right-to-left**: the rightmost arg is pushed first, the leftmost last (on top of stack). When writing bytecode by hand, push args in right-to-left order:
 
 ```
-(open "Makefile" in) → (s[2:s]inuS[8:S]Makefileumg[8:s]raw.openp)
+(open "Makefile" in) → (s[2:s]inS[8:S]MakefileP[4:s]open)
 ```
+
+There is no `push` (`u`) opcode — all value-producing instructions auto-push their result, and the compiler relies on this (see AGENTS.md). To call an unchecked C primitive that a safe wrapper shadows in the global table, use the inline `P[...]` opcode (`P[4:s]open`, `P[7:s]eval-kl`), which dispatches via `exec_primitive` and bypasses the global table.
 
 ## Self-hosting
 
-The C VM loads `globals.csexp` — a ~1.6MB bundle of **~1750 closures** compiled by the metacircular interpreter from all 24 Shen OS KLambda files. The full eval-kl chain is proven: native values marshalled to tagged forms, compiled through `extract-kl → kl→zinc → toplevel-interp`, and demarshalled back. Shen compiles Shen, which runs on Shen, on the C VM.
+The C VM loads `globals.csexp` — a ~0.5MB reduced self-contained bundle of **~786 closures** compiled by the metacircular interpreter from the type-safe `.kl` base (core, declarations, types, macros, load, toplevel, sys, dict, track, reader, writer, plus `overrides-pure.kl` and `shen/util.shen`). The full eval-kl chain is proven: native values marshalled to tagged forms, compiled through `extract-kl → kl→zinc → toplevel-interp`, and demarshalled back. Shen compiles Shen, which runs on Shen, on the C VM.
 
-**All 11 self-hosting tests pass:**
+**Self-hosting tests all pass:**
 
 | Test | What it proves | Status |
 |---|---|---|
 | 1 | `(+ 1 2)` via bundled + | ✅ 3 |
 | 2 | `(reverse [1 2 3])` via bundled reverse | ✅ [3 2 1] |
 | 3 | `(factorial 5)` via bundled factorial | ✅ 120 |
-| 4 | `(raw.open/close)` — raw I/O primitives | ✅ |
+| 4 | `(open/close)` — I/O via inline OP_PRIM | ✅ |
 | A | `toplevel-interp([])` → `[cons]` | ✅ |
 | B | `toplevel-interp([number 42])` → `[number 42]` | ✅ |
 | C | `interp [] [cons] [] [] []` → `[cons]` | ✅ |
@@ -132,9 +134,9 @@ The C VM loads `globals.csexp` — a ~1.6MB bundle of **~1750 closures** compile
 
 Non-moving conservative collector (libgc). Objects never move — stack-local Value pointers are always safe across allocations. `GC_MALLOC`/`GC_MALLOC_ATOMIC` via macros `GC_VALUE()`, `GC_STR()`, `GC_VALUE_ARRAY()`. No extra roots needed. The old Bartlett copying GC is archived at `vendor/bartlett-gc` branch `bartlett-mostly-copying`.
 
-### raw.X primitive namespace
+### Calling C primitives past safe wrappers
 
-`parse_bundle` overwrites C primitives with compiled safe wrapper closures. `%%` escapes use `OP_PRIM` → `exec_primitive` (bypasses global table). Bytecode that needs raw C primitives uses `raw.X` names (`raw.open`, `raw.+`, etc.). `exec_primitive` strips the `raw.` prefix.
+`parse_bundle` overwrites C primitives with compiled safe wrapper closures. `%%` escapes and the inline `P[...]` opcode both dispatch via `OP_PRIM` → `exec_primitive`, bypassing the global table. There is no `raw.X` namespace — bytecode reaches an unchecked C primitive directly through `P[...]`.
 
 ### Recursive eval-kl
 
@@ -142,12 +144,12 @@ Non-moving conservative collector (libgc). Objects never move — stack-local Va
 
 ## Status
 
-- [x] 32 built-in VM tests (arithmetic, types, closures, error handling, I/O, trap-error routing)
-- [x] ~1750 bundled closures loaded and executing (full Shen OS)
+- [x] 34 built-in VM tests (arithmetic, types, closures, error handling, I/O, trap-error routing)
+- [x] ~786 bundled closures loaded and executing (reduced self-contained bundle)
 - [x] **Self-hosting proven**: eval-kl chain returns `3` for `(+ 1 2)` — no C bypass
 - [x] Boehm GC (non-moving, no pointer staleness)
 - [x] `deep_equal` for cons==cons structural comparison
-- [x] `raw.X` namespace — bytecode calls C primitives directly
+- [x] `P[...]` inline OP_PRIM dispatch — bytecode calls C primitives directly
 - [x] Recursive `eval-kl` delegating to bundled closure
 - [x] Raw I/O from C VM
 - [x] KLambda primitives: `gensym`, `@p`, `fst`, `snd`, `variable?`

@@ -106,7 +106,7 @@ the C VM runs only the statically-proven subset.
 
 | Test | Description | Status |
 |---|---|---|
-| 1-4 | +, reverse, factorial, raw.open/close via bundled wrappers | Pass |
+| 1-4 | +, reverse, factorial, open/close via inline OP_PRIM | Pass |
 | A | toplevel-interp on `[]` → `[cons]` | Pass |
 | B | toplevel-interp on `[number 42]` → `[number 42]` | Pass |
 | C | interp `[] [cons] [] [] []` → `[cons]` | Pass |

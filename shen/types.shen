@@ -119,7 +119,7 @@
 
 (define bytecode? { symbol --> boolean }
   X -> (element? X [grab let appterm apply
-                    push pushmark return endlet]))
+                    pushmark return endlet]))
 
 (datatype zinc-code
   ___

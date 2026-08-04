@@ -111,7 +111,6 @@
                     (if (< N A)
                         [lambda (drop-grabs N C1) (append (reverse Args) E1)]
                         (simple-error "appterm: too many args"))))))))
-  [push | C] A E S R                                            -> (interp C A E [A | S] R)
   [pushmark | C] A E S R                                        -> (interp C A E [mark | S] R)
   [cur C1 | C] A E S R                                          -> (interp C [lambda C1 E] E [A | S] R)
   \* Grab: with stack isolation, args are already in env. Empty stack = no-op. *\

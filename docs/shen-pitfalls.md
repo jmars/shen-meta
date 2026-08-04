@@ -35,15 +35,12 @@ working on the Shen source and the C VM.
   primitives in global table since `parse_bundle` runs after `init_globals`.
 - `%%` escapes compile to `[prim X]` which calls `exec_primitive` directly,
   bypassing the global table — so safe wrapper internals still work.
-- **`raw.X` namespace**: All 37 primitives that get overwritten by safe wrappers
-  are also registered under `raw.X` names (e.g., `raw.open`, `raw.+`,
-  `raw.eval-kl`). `exec_primitive` strips the `raw.` prefix before dispatching.
-  Bytecode that needs the unchecked C primitive uses `raw.X` — this is how the
-  read-compile-eval round-trip can call I/O primitives directly.
+- Bytecode that needs an unchecked C primitive (bypassing safe-wrapper shadowing)
+  uses the inline `OP_PRIM` dispatch (`P[4:s]open`, `P[7:s]eval-kl`, etc.) — the
+  same path `%%` escapes use. There is NO `raw.X` namespace; the C primitives are
+  reached only via `OP_PRIM` (direct) or through a safe wrapper (global table).
 - `shen.repl`, `shen.read-evaluate-print`, `read`, `compile`, `eval-kl` are all
   in the bundle — the full Shen OS is available.
-- `raw.open` / `raw.close` / `raw.read-byte` / `raw.write-byte` enable I/O from
-  bytecode without hitting safe wrapper currying.
 - `gensym`, `@p`, `fst`, `snd`, `variable?` — KLambda primitives added to both
   `primitive?` (Shen side) and `exec_primitive` (C side).
 

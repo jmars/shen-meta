@@ -80,7 +80,7 @@ and `pos` out-of-bounds inside `trap-error` (semantic, needed for `strlen`/end-o
 
 | Test | Description | Status |
 |---|---|---|
-| 1-4 | +, reverse, factorial, raw.open/close via bundled wrappers | Pass |
+| 1-4 | +, reverse, factorial, open/close via inline OP_PRIM | Pass |
 | A | toplevel-interp on `[]` → `[cons]` | Pass |
 | B | toplevel-interp on `[number 42]` → `[number 42]` | Pass |
 | C | interp `[] [cons] [] [] []` → `[cons]` | Pass |
@@ -121,7 +121,7 @@ and `pos` out-of-bounds inside `trap-error` (semantic, needed for `strlen`/end-o
 - The old Bartlett copying GC is archived at `vendor/bartlett-gc` branch `bartlett-mostly-copying` (pinned-page implementation) — kept for reference/experimentation.
 
 - csexp atoms: `[len:type]value` — type is `s`/`n`/`S`/`b`
-- Opcodes are single chars: `m` pushmark, `p` apply, `u` push, `r` grab, `v` return, etc.
+- Opcodes are single chars: `m` pushmark, `p` apply, `r` grab, `v` return, etc.
 - `global` loads from table then falls back to `val_prim(name)`
 - Primitives dispatch via `exec_primitive()` — apply-mode pops mark + args from stack
 - Inline `OP_PRIM` (`P`) executes primitive with args from stack + accumulator (ZINC semantics)
@@ -193,8 +193,10 @@ and `pos` out-of-bounds inside `trap-error` (semantic, needed for `strlen`/end-o
 - Output goes to file via `open`/`pr`/`close` — `print` wraps long lines
   and `grep '^"'` truncates multi-line bundles
 - `pr` writes raw string to a stream; `(stoutput)` is stdout
-- ~1216 closures in bundle (~1.4MB; ~1.6MB with prefix aliases)
-- All 24 KLambda files loaded: core through shen-scheme-extensions + stlib + init
+- ~1216 closures in the FULL OS bundle (~1.4MB; ~1.6MB with prefix aliases) —
+  `make bundle-full` → `globals-full.csexp`. The canonical **reduced**
+  self-contained bundle (`make bundle` → `globals.csexp`) is ~786 closures / ~0.5MB.
+- All 24 KLambda files loaded (full bundle): core through shen-scheme-extensions + stlib + init
 
 ### Shen module system & package prefixing
 
@@ -243,7 +245,6 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
   using `read-file-as-string` + recursive descent with cached `strlen`
 - `interp-load-raw` wraps `read-file-raw` for files with reader macro issues
 - `read-file-as-string` C primitive added to zincvm.c for native file I/O from VM
-- `vm.read-file` registered as alias in case bundled KLambda version overwrites it
 
 ## Raw s-expression parser (`load.shen`)
 
@@ -281,15 +282,12 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
   C primitives in global table since `parse_bundle` runs after `init_globals`
 - `%%` escapes compile to `[prim X]` which calls `exec_primitive` directly,
   bypassing the global table — so safe wrapper internals still work
-- **`raw.X` namespace**: All 37 primitives that get overwritten by safe wrappers
-  are also registered under `raw.X` names (e.g., `raw.open`, `raw.+`, `raw.eval-kl`).
-  `exec_primitive` strips the `raw.` prefix before dispatching. Bytecode that
-  needs the unchecked C primitive uses `raw.X` — this is how the read-compile-eval
-  round-trip can call I/O primitives directly.
+- Bytecode that needs an unchecked C primitive (bypassing safe-wrapper shadowing)
+  uses the inline `OP_PRIM` dispatch (`P[4:s]open`, `P[7:s]eval-kl`, etc.) — the
+  same path `%%` escapes use. There is NO `raw.X` namespace; the C primitives are
+  reached only via `OP_PRIM` (direct) or through a safe wrapper (global table).
 - `shen.repl`, `shen.read-evaluate-print`, `read`, `compile`, `eval-kl` are
   all in the bundle — the full Shen OS is available
-- `raw.open` / `raw.close` / `raw.read-byte` / `raw.write-byte` enable I/O
-  from bytecode without hitting safe wrapper currying
 - `gensym`, `@p`, `fst`, `snd`, `variable?` — KLambda primitives added to
   both `primitive?` (Shen side) and `exec_primitive` (C side)
 
@@ -303,7 +301,8 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
 - `open` was the exception — had `dir`/`path` swapped, causing "open bad
   types" in bundled `load`. Fixed: pop `path` first, then `dir`
 - **When writing bytecode by hand**, push args in right-to-left order:
-  `(s[2:s]in u S[8:S]Makefile u m g[8:s]raw.open p)` for `(open "Makefile" in)`
+  `(s[2:s]in S[8:S]Makefile P[4:s]open)` for `(open "Makefile" in)`
+  (inline `OP_PRIM` `P[...]` dispatches directly, bypassing the global table)
 - **CRITICAL**: Hand-written bytecode MUST use RTL order. The VM pops
   top-first (leftmost arg). Writing LTR (natural reading order) works
   for commutative ops (+, =, cons-as-pair) but silently produces wrong
@@ -359,8 +358,8 @@ rescue `setjmp(vm_error_jmp)` at the top of `vm_exec_env`.
 ## ZINC calling convention (STANDARD — fully aligned)
 
 The VM now uses **standard ZINC** semantics: all value-producing opcodes push
-results to the stack AND set `acc`. The `zinc.shen` compiler no longer emits
-explicit `u` (PUSH) instructions — it was modified to rely on auto-push.
+results to the stack AND set `acc`. There is no `push` opcode — the compiler
+relies on auto-push (see "Compiler changes" below).
 
 **Opcodes that push to stack:**
 - `OP_NUMBER`, `OP_STRING`, `OP_SYMBOL`, `OP_BOOLEAN` — push operand
@@ -371,7 +370,6 @@ explicit `u` (PUSH) instructions — it was modified to rely on auto-push.
 - `OP_APPLY` (VAL_PRIM) — push primitive result
 - `OP_APPTERM` (VAL_PRIM) — push primitive result
 - `OP_RETURN` — push return value to caller's stack
-- `OP_PUSH` — kept for compatibility, duplicates acc to stack
 
 **Opcodes that pop from stack:**
 - `OP_JMPF` — pops condition from stack
@@ -379,9 +377,12 @@ explicit `u` (PUSH) instructions — it was modified to rely on auto-push.
 - `OP_APPLY` / `OP_APPTERM` — pop function from stack top, then args up to mark
 
 **Compiler changes:**
-- `shen/zinc.shen` (`zinc-c` and `zinc-t`): removed all `intersperse [push]`
-  and explicit `[push]` emissions. Multi-arg primitives and function calls
-  now emit bare operand sequences, relying on auto-push.
+- `shen/zinc.shen` (`zinc-c` and `zinc-t`): relies on auto-push. Multi-arg
+  primitives and function calls emit bare operand sequences — no `push` opcode.
+- The `push` (`u`) opcode has been REMOVED from the C VM, the compiler pipeline
+  (compile.shen/util.shen/types.shen), and the metacircular interp. It is dead:
+  the compiler never emits it, and the bundle/test bytecode contain no `u`.
+  `pushmark` (`m`) remains and is still emitted by `zinc-c`/`zinc-t`.
 
 **Bundle recompiled:** `globals.csexp` rebuilt with modified zinc.shen.
 All bundled closures now use push semantics natively.

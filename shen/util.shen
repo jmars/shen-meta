@@ -54,6 +54,6 @@
    These must NOT be wrapped with [function ...] by debruijn. *\
 (define instruction-keyword? { symbol --> boolean }
   X -> (element? X [access global grab let jmpf jmp label
-                    cons symbol prim push appterm number string boolean
+                    cons symbol prim appterm number string boolean
                     cur endlet pushmark apply mark
                     error lambda absvector stream in out]))

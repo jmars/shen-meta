@@ -14,8 +14,11 @@ raw s-expression parser, the bytecode decompiler, and the REPL.
 - Output goes to file via `open`/`pr`/`close` — `print` wraps long lines and
   `grep '^"'` truncates multi-line bundles.
 - `pr` writes raw string to a stream; `(stoutput)` is stdout.
-- ~1216 closures in bundle (~1.4MB; ~1.6MB with prefix aliases).
-- All 24 KLambda files loaded: core through shen-scheme-extensions + stlib + init.
+- ~1216 closures in the FULL OS bundle (~1.4MB; ~1.6MB with prefix aliases) —
+  `make bundle-full` → `globals-full.csexp`. The canonical **reduced**
+  self-contained bundle (`make bundle` → `globals.csexp`) is ~786 closures /
+  ~0.5MB.
+- All 24 KLambda files loaded (full bundle): core through shen-scheme-extensions + stlib + init.
 
 ### Module system & package prefixing
 
@@ -107,8 +110,7 @@ The old `./zincvm globals.csexp -d <name>` flag still works for quick inspection
 `read-file-raw` in `load.shen` parses `.kl` files without macro expansion using
 `read-file-as-string` + recursive descent with cached `strlen`. `interp-load-raw`
 wraps `read-file-raw` for files with reader macro issues. `read-file-as-string`
-C primitive added to zincvm.c for native file I/O from VM. `vm.read-file`
-registered as alias in case bundled KLambda version overwrites it.
+C primitive added to zincvm.c for native file I/O from VM.
 
 ## REPL
 

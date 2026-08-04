@@ -101,7 +101,7 @@ typedef struct Instr Instr;
 typedef enum {
     OP_ACCESS   = 'a', OP_GLOBAL   = 'g', OP_JMPF     = 'f',
     OP_JMP      = 'j', OP_APPTERM  = 't', OP_APPLY    = 'p',
-    OP_PUSH     = 'u', OP_PUSHMARK = 'm', OP_CUR      = 'c',
+    OP_PUSHMARK = 'm', OP_CUR      = 'c',
     OP_GRAB     = 'r', OP_RETURN   = 'v', OP_LET      = 'e',
     OP_ENDLET   = 'd', OP_NUMBER   = 'n', OP_STRING   = 'S',
     OP_SYMBOL   = 's', OP_BOOLEAN  = 'b', OP_PRIM     = 'P'
@@ -602,9 +602,8 @@ static void str_value(Value v, char *buf, int *pos, int bufsize, int depth) {
     }
 }
 
-/* Returns true if `name` (possibly with "raw." prefix) is a known C primitive. */
+/* Returns true if `name` is a known C primitive. */
 static int exec_primitive_valid(const char *name) {
-    if (strncmp(name, "raw.", 4) == 0) name += 4;
     static const char *prims[] = {
         "symbol?","boolean?","number?","string?","cons?",
         "error?","function?","stream?",
@@ -614,7 +613,7 @@ static int exec_primitive_valid(const char *name) {
         "eval-kl","absvector","<-address","address->",
         "n->string","string->n","str","tlstr","hdstr","pos",
         "intern","value","open","close","read-byte","write-byte",
-        "set","get-time","read-file-as-string","vm.read-file",
+        "set","get-time","read-file-as-string",
         "@p","fst","snd","gensym","variable?","newvar",
         "shen.fail!","fail",
         "stinput","stoutput",
@@ -627,10 +626,6 @@ static int exec_primitive_valid(const char *name) {
 }
 
 static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
-    /* Strip "raw." prefix so raw.open, raw.close etc. dispatch to the
-       C primitive even when the short name is shadowed by a safe wrapper
-       closure in the global table. */
-    if (strncmp(name, "raw.", 4) == 0) name += 4;
     /* --- Type predicates --- */
     if (strcmp(name, "symbol?") == 0) {
         Value a = va_pop(stack); *acc = val_boolean(a.tag == VAL_SYMBOL); return 0;
@@ -1089,7 +1084,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         }
         int c = fgetc(s.stream.file); *acc = val_number(c == EOF ? -1 : c); return 0;
     }
-    if (strcmp(name, "read-file-as-string") == 0 || strcmp(name, "vm.read-file") == 0) {
+    if (strcmp(name, "read-file-as-string") == 0) {
         Value path = va_pop(stack);
         if (path.tag != VAL_STRING) PRIM_TYPE_ERROR("read-file-as-string on non-string");
         char *p = strndup(path.str.data, path.str.len);
@@ -1310,7 +1305,6 @@ static int parse_body(ParseState *ps, Instr **out) {
         switch (c) {
         case 'm': instr.op = OP_PUSHMARK; ps->p++; break;
         case 'p': instr.op = OP_APPLY;    ps->p++; break;
-        case 'u': instr.op = OP_PUSH;     ps->p++; break;
         case 'r': instr.op = OP_GRAB;     ps->p++; break;
         case 'v': instr.op = OP_RETURN;   ps->p++; break;
         case 'e': instr.op = OP_LET;      ps->p++; break;
@@ -1364,7 +1358,6 @@ static void print_instr(Instr *code, int len, int indent) {
         switch (in->op) {
         case OP_PUSHMARK: printf("pushmark\n"); break;
         case OP_APPLY:    printf("apply\n"); break;
-        case OP_PUSH:     printf("push\n"); break;
         case OP_GRAB:     printf("grab\n"); break;
         case OP_RETURN:   printf("return\n"); break;
         case OP_LET:      printf("let\n"); break;
@@ -1412,7 +1405,6 @@ static void print_instr_one(Instr *in, int pc) {
     switch (in->op) {
     case OP_PUSHMARK: printf("pushmark\n"); break;
     case OP_APPLY:    printf("apply\n"); break;
-    case OP_PUSH:     printf("push\n"); break;
     case OP_GRAB:     printf("grab\n"); break;
     case OP_RETURN:   printf("return\n"); break;
     case OP_LET:      printf("let\n"); break;
@@ -1561,7 +1553,6 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
             break;
         }
         case OP_PUSHMARK: va_push(&stack, val_mark()); pc++; break;
-        case OP_PUSH: va_push(&stack, acc); pc++; break;
         case OP_GRAB: {
             if (stack.len > 0 && va_peek(&stack).tag == VAL_MARK) {
                 va_pop(&stack);
@@ -1835,28 +1826,12 @@ static void init_globals(void) {
         "eval-kl","absvector","<-address","address->",
         "n->string","string->n","str","tlstr","hdstr","pos",
         "intern","value","open","close","read-byte","write-byte",
-        "set","get-time","read-file-as-string","vm.read-file",
+        "set","get-time","read-file-as-string",
         "@p","fst","snd","gensym","variable?","newvar",
         "shen.fail!","fail",
         "stinput","stoutput", NULL
     };
     for (int i = 0; prims[i]; i++) global_set(prims[i], val_prim(prims[i]));
-
-    /* Register raw.X aliases for primitives that will be overwritten by
-       safe wrapper closures in parse_bundle.  Bytecode that needs the
-       unchecked C primitive uses raw.X; %% escapes inside safe wrappers
-       use OP_PRIM -> exec_primitive and bypass the global table. */
-    const char *raw_prims[] = {
-        "raw.+","raw.-","raw.*","raw./","raw.=","raw.<","raw.>","raw.>=","raw.<=",
-        "raw.cons","raw.hd","raw.tl","raw.cn",
-        "raw.symbol?","raw.boolean?","raw.number?","raw.string?","raw.cons?",
-        "raw.simple-error","raw.trap-error","raw.error-to-string",
-        "raw.eval-kl","raw.absvector","raw.<-address","raw.address->",
-        "raw.n->string","raw.string->n","raw.str","raw.tlstr","raw.hdstr","raw.pos",
-        "raw.intern","raw.value","raw.open","raw.close","raw.read-byte","raw.write-byte",
-        "raw.set","raw.get-time", NULL
-    };
-    for (int i = 0; raw_prims[i]; i++) global_set(raw_prims[i], val_prim(raw_prims[i]));
 }
 
 /* ------------------------------------------------------------------ */
@@ -2130,11 +2105,11 @@ int main(int argc, char **argv) {
                 run_test("factorial",
                          "(mn[1:n]5g[9:s]factorialp)", 0);
 
-                /* Test 4: raw.open / raw.close — prove raw primitives bypass
-                   safe wrapper shadowing, enabling read-compile-eval round-trip */
-                printf("--- Test 4: (raw.open \"Makefile\" in) -> (raw.close stream) ---\n");
-                run_test("raw-io",
-                         "(s[2:s]inS[8:S]Makefilemg[8:s]raw.openpmg[9:s]raw.closep)", 0);
+                /* Test 4: open / close via inline OP_PRIM — prove primitives
+                   bypass safe wrapper shadowing, enabling read-compile-eval round-trip */
+                printf("--- Test 4: (open \"Makefile\" in) -> (close stream) ---\n");
+                run_test("open-close",
+                         "(s[2:s]inS[8:S]MakefileP[4:s]openP[5:s]close)", 0);
 
                 /* Test 5: eval-kl [+ 1 2] through the marshal chain.
                    The C VM marshals the native Value to tagged form,
@@ -2152,7 +2127,7 @@ int main(int argc, char **argv) {
                 ev_list = val_cons(plus_sym, ev_list);             /* [+ 1 2] */
                 global_set("*ev1*", ev_list);
                 run_test("eval-kl-add",
-                         "(mg[5:s]*ev1*g[11:s]raw.eval-klp)", 0);
+                         "(g[5:s]*ev1*P[7:s]eval-kl)", 0);
 
                 /* Test 11: eval-kl [cons 1 2] → [cons 1 . 2].
                    Tests cons through the full marshal→eval→demarshal chain. */
@@ -2167,7 +2142,7 @@ int main(int argc, char **argv) {
                 }
                 printf("--- Test 11: eval-kl [cons 1 2] — expect [cons 1 . 2] ---\n");
                 run_test("eval-kl-cons",
-                         "(mg[5:s]*ev2*g[11:s]raw.eval-klp)", 0);
+                         "(g[5:s]*ev2*P[7:s]eval-kl)", 0);
 
                 /* Test 12: eval-kl [+ [* 2 3] 4] → 10.
                    Tests nested primitive evaluation. */
@@ -2190,7 +2165,7 @@ int main(int argc, char **argv) {
                 }
                 printf("--- Test 12: eval-kl [+ [* 2 3] 4] — expect 10 ---\n");
                 run_test("eval-kl-nested",
-                         "(mg[5:s]*ev3*g[11:s]raw.eval-klp)", 0);
+                         "(g[5:s]*ev3*P[7:s]eval-kl)", 0);
 
                 /* Test 13: eval-kl [cn "hello" "world"] → "helloworld".
                    Tests string concat (multi-arg primitive) through eval-kl. */
@@ -2210,7 +2185,7 @@ int main(int argc, char **argv) {
                 }
                 printf("--- Test 13: eval-kl [cn \"hello\" \"world\"] — expect \"helloworld\" ---\n");
                 run_test("eval-kl-cn",
-                         "(mg[5:s]*ev4*g[11:s]raw.eval-klp)", 0);
+                         "(g[5:s]*ev4*P[7:s]eval-kl)", 0);
 
                 /* Test 14: eval-kl error recovery: [hd 42] returns input.
                    hd on a non-cons triggers simple-error → identity. */
@@ -2225,7 +2200,7 @@ int main(int argc, char **argv) {
                 }
                 printf("--- Test 14: eval-kl [hd 42] — expect identity (error swallowed) ---\n");
                 run_test("eval-kl-error",
-                         "(mg[5:s]*ev5*g[11:s]raw.eval-klp)", 0);
+                         "(g[5:s]*ev5*P[7:s]eval-kl)", 0);
 
                 /* Test 14b: eval-kl [/ 1 0] — safe./ must intercept the zero
                    divisor and raise simple-error (swallowed by eval-kl →
@@ -2241,7 +2216,7 @@ int main(int argc, char **argv) {
                     global_set("*ev6*", body);
                 }
                 printf("--- Test 14b: eval-kl [/ 1 0] — expect identity, no SIGFPE (safe./ div-zero) ---\n");
-                run_test("eval-kl-trap-divzero", "(mg[5:s]*ev6*g[11:s]raw.eval-klp)", 0);
+                run_test("eval-kl-trap-divzero", "(g[5:s]*ev6*P[7:s]eval-kl)", 0);
 
                 /* Diagnostic: dump bytecode of toplevel-interp and interp */
                 printf("--- Bytecode Dump ---\n");
@@ -2481,7 +2456,7 @@ int main(int argc, char **argv) {
 
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");
-                printf("Raw primitive I/O works via raw.X namespace (bypasses safe wrappers).\n");
+                printf("Inline OP_PRIM dispatch works (open/close/eval-kl bypass safe wrappers).\n");
                 printf("eval-kl chain (marshal → extract-kl → kl->zinc → toplevel-interp → demarshal) works.\n");
                 printf("Bundled file I/O works — safe wrappers + P[4:s]open chain functional.\n");
 
