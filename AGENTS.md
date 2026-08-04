@@ -46,13 +46,19 @@ Consequence — call sites split into two kinds:
 `[global X]` → `safe.X` only fires on the dynamic path (a primitive used *as a
 value*, higher-order, or explicit `(function X)`). Normal direct calls use
 `[prim X]`. The C primitives' own type checks are therefore defense-in-depth and
-are `ZINCVM_DEBUG`-only (debug builds route them through `vm_throw`). In RELEASE
-they still run but just print `runtime: ...` + `return -1` (a hard, non-catchable
-error). NOTE: they are NOT compiled out in release — the `.kl` Shen OS kernel
-(`shen.initialise` etc.) has type-unsafe arithmetic calls (`+ - * /` on
-non-numbers) that reach raw `[prim X]` and rely on the C check returning `-1`;
-removing the checks causes a segfault during `shen.initialise`. Fully removing
-them would require the static path to also route through the safe wrappers.
+are `ZINCVM_DEBUG`-only. In RELEASE they are **compiled out entirely** — the
+`PRIM_TYPE_ERROR(msg)` macro expands to `((void)0)`, so GCC -O2 eliminates the
+enclosing `if (cond) PRIM_TYPE_ERROR(...)` (no comparison, no type check, no
+runtime cost). This is safe ONLY for a type-safe bundle: the canonical bundle
+(`make bundle` → `globals.csexp`) is the **reduced self-contained interpreter**
+(meta-interpreter + type-safe `.kl` base), which never passes bad types. The full
+Shen OS bundle (`make bundle-full` → `globals-full.csexp`) is type-unsafe
+(`shen.initialise` does `+ - * /` on non-numbers) and CANNOT run on the guard-free
+release VM — it segfaults; run it with `./zincvm-debug globals-full.csexp`.
+
+Always-on throw sites that are NOT type guards and stay in release: `simple-error`,
+`fail`, `apply`/`appterm` non-callable + too-many-args, `env_pop`, `eval-kl` catch,
+and `pos` out-of-bounds inside `trap-error` (semantic, needed for `strlen`/end-of-string).
 
 ## Self-hosting tests
 
@@ -322,12 +328,12 @@ rescue `setjmp(vm_error_jmp)` at the top of `vm_exec_env`.
   C-level type-error routing is DEFENSE-IN-DEPTH, compiled only in `ZINCVM_DEBUG`
   builds** (the `PRIM_TYPE_ERROR` macro + inline guards). Primary ownership is the
   Shen safe-wrapper layer (`shen/primitives.shen`): each `safe.X` validates args and
-  raises a catchable `simple-error` before the raw primitive is called, so in release
-  builds a primitive that still receives bad input prints `runtime: ...` + `return -1`
-  (hard, uncatchable — correct, since the wrapper never forwards bad input). The
-  always-on throw sites are those NOT protected by a safe wrapper: `simple-error`,
-  `fail`, `apply`/`appterm` non-callable + too-many-args, `env_pop`, and eval-kl's
-  catch. Debug-only tests 29-32b verify the C-primitive-level defense path.
+  raises a catchable `simple-error` before the raw primitive is called. In RELEASE
+  `PRIM_TYPE_ERROR` expands to `((void)0)` so the guards compile out entirely (see
+  "Design intent" above). The always-on throw sites are those NOT protected by a
+  safe wrapper and not type guards: `simple-error`, `fail`, `apply`/`appterm`
+  non-callable + too-many-args, `env_pop`, `pos` OOB inside `trap-error`, and
+  eval-kl's catch. Debug-only tests 29-32b verify the C-primitive-level defense path.
 - `val_error` GC-allocates its message (no `strdup` leak).
 - The `alarm_jmp` (test TIMEOUT) and `repl_exit_jmp` (REPL EOF) mechanisms are
   separate from the catch chain and unaffected.

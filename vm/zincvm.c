@@ -403,11 +403,14 @@ static void vm_throw(const char *msg) {
         return -1; \
     } while (0)
 #else
-#define PRIM_TYPE_ERROR(msg) \
-    do { \
-        fprintf(stderr, "runtime: %s\n", msg); \
-        return -1; \
-    } while (0)
+/* Release: the Shen safe-wrapper layer is the sole owner of argument
+   validation, and static call sites from the proven type-safe interpreter
+   never pass bad types.  Expanding to a bare ((void)0) makes GCC -O2
+   eliminate the enclosing `if (cond) PRIM_TYPE_ERROR(...)` entirely — no
+   comparison, no type check, no runtime cost.  Only the always-on throw
+   sites (simple-error, fail, apply/appterm non-callable, env_pop, eval-kl)
+   remain, since they are not primitive type guards. */
+#define PRIM_TYPE_ERROR(msg) ((void)0)
 #endif
 
 static jmp_buf alarm_jmp;
@@ -846,13 +849,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "pos") == 0) {
         Value a1 = va_pop(stack), a2 = va_pop(stack);
-        if (a1.tag != VAL_STRING || a2.tag != VAL_NUMBER) {
 #ifdef ZINCVM_DEBUG
+        if (a1.tag != VAL_STRING || a2.tag != VAL_NUMBER) {
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("pos on bad types");
-#endif
             fprintf(stderr, "runtime: pos on bad types\n"); return -1;
         }
+#endif
         /* Shen: (pos Str N) returns the single character at index N.
            Out of bounds → empty string. But when inside trap-error,
            OOB must trigger an error so that callers (e.g. shen.string->byte)
@@ -860,10 +863,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            loops forever writing NUL bytes. */
         int pl = (int)a2.number;
         if (pl < 0 || pl >= a1.str.len) {
-#ifdef ZINCVM_DEBUG
+            /* OOB is a semantic error (not a type error). Shen code relies on
+               trap-error catching this to detect end-of-string (e.g. strlen-acc).
+               Must throw unconditionally when inside trap-error, not just in debug. */
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("pos out of bounds");
-#endif
             *acc = val_string("", 0);
         } else *acc = val_string(a1.str.data + pl, 1);
         return 0;
@@ -879,14 +883,14 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "value") == 0) {
         Value a = va_pop(stack);
-        if (a.tag != VAL_SYMBOL) {
 #ifdef ZINCVM_DEBUG
+        if (a.tag != VAL_SYMBOL) {
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("value on non-symbol");
-#endif
             fprintf(stderr, "runtime: value on non-symbol\n");
             return -1;
         }
+#endif
         *acc = global_get(a.sym.name); return 0;
     }
 
@@ -898,21 +902,21 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "<-address") == 0) {
         Value vec = va_pop(stack), idx = va_pop(stack);
-        if (vec.tag != VAL_VECTOR || idx.tag != VAL_NUMBER) {
 #ifdef ZINCVM_DEBUG
+        if (vec.tag != VAL_VECTOR || idx.tag != VAL_NUMBER) {
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("<-address bad types");
-#endif
             fprintf(stderr, "runtime: <-address bad types\n"); return -1;
         }
+#endif
         int i = (int)idx.number;
-        if (i < 0 || i >= vec.vector.len) {
 #ifdef ZINCVM_DEBUG
+        if (i < 0 || i >= vec.vector.len) {
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("<-address OOB");
-#endif
             fprintf(stderr, "runtime: <-address OOB\n"); return -1;
         }
+#endif
         *acc = vec.vector.data[i]; return 0;
     }
     if (strcmp(name, "address->") == 0) {
@@ -1007,11 +1011,10 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            [rightmost, leftmost] with leftmost on top.
            For (open path dir): stack=[dir, path], path on top. */
         Value path = va_pop(stack), dir = va_pop(stack);
-        if (path.tag != VAL_STRING || dir.tag != VAL_SYMBOL) {
 #ifdef ZINCVM_DEBUG
+        if (path.tag != VAL_STRING || dir.tag != VAL_SYMBOL) {
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("open bad types");
-#endif
             fprintf(stderr, "runtime: open bad types — path.tag=%d dir.tag=%d", path.tag, dir.tag);
             if (path.tag == VAL_SYMBOL) fprintf(stderr, " path='%s'", path.sym.name);
             if (path.tag == VAL_MARK) fprintf(stderr, " path=MARK");
@@ -1025,6 +1028,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             }
             return -1;
         }
+#endif
         char pb[256]; int n = path.str.len < 255 ? path.str.len : 255;
         memcpy(pb, path.str.data, n); pb[n] = '\0';
         if (strcmp(dir.sym.name, "in") == 0) {
@@ -1048,8 +1052,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
 #ifdef ZINCVM_DEBUG
         if (vm_catch_chain && vm_catch_chain->in_trap_error)
             vm_throw("open invalid direction");
-#endif
         fprintf(stderr, "runtime: open direction must be in or out\n"); return -1;
+#endif
     }
     if (strcmp(name, "close") == 0) {
         Value s = va_pop(stack);
@@ -1066,13 +1070,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "read-byte") == 0) {
         Value s = va_pop(stack);
-        if (s.tag != VAL_STREAM || !s.stream.is_input) {
 #ifdef ZINCVM_DEBUG
+        if (s.tag != VAL_STREAM || !s.stream.is_input) {
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("read-byte on non-input");
-#endif
             fprintf(stderr, "runtime: read-byte on non-input\n"); return -1;
         }
+#endif
         if (s.stream.is_string) {
             int idx = (int)(intptr_t)s.stream.file - 1;
             if (idx < 0 || idx >= n_string_streams) { return -1; }
@@ -1107,20 +1111,18 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         /* RTL: (write-byte Byte Stream) — Stream pushed first (bottom), Byte last (top). */
         Value byte = va_pop(stack);
         Value s    = va_pop(stack);
-        if (s.tag != VAL_STREAM || s.stream.is_input) {
 #ifdef ZINCVM_DEBUG
+        if (s.tag != VAL_STREAM || s.stream.is_input) {
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("write-byte on non-output");
-#endif
             fprintf(stderr, "runtime: write-byte on non-output\n"); return -1;
         }
         if (byte.tag != VAL_NUMBER) {
-#ifdef ZINCVM_DEBUG
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("write-byte requires number");
-#endif
             fprintf(stderr, "runtime: write-byte requires number\n"); return -1;
         }
+#endif
         fputc((int)byte.number, s.stream.file);
         if (s.stream.file == stdout) fflush(stdout);
         *acc = val_number(byte.number); return 0;
@@ -1134,8 +1136,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
 #ifdef ZINCVM_DEBUG
         if (vm_catch_chain && vm_catch_chain->in_trap_error)
             vm_throw("get-time unknown mode");
-#endif
         fprintf(stderr, "runtime: unknown get-time mode '%s'\n", mode.sym.name); return -1;
+#endif
     }
 
     /* --- Meta --- */
@@ -2470,6 +2472,12 @@ int main(int argc, char **argv) {
                 printf("--- Test 10: call (instruction-keyword? push) from bundled util.shen ---\n");
                 run_test("ikw-from-util",
                          "(ms[4:s]pushg[20:s]instruction-keyword?p)", 0);
+
+                /* Close-the-loop (partial) — see bugs.md #6: the bundled
+                   meta-interpreter reads/parses .kl files at runtime via
+                   (read-file-raw), but full defun registration via
+                   (interp-load-raw) does not yet work (bundled kl->zinc
+                   non-primitive compile path fails). */
 
                 printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
                 printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");

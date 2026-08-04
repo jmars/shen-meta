@@ -1,4 +1,4 @@
-.PHONY: all vm test test-debug debug bundle pipeline interp setup clean
+.PHONY: all vm test test-debug debug bundle bundle-full pipeline interp setup clean
 
 SHEN   = ../shen-scheme/_build/bin/shen-scheme
 CFLAGS = -Wall -Wextra -O2
@@ -36,9 +36,17 @@ test-asan: zincvm-asan
 asan: zincvm-asan
 	ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 ./zincvm-asan globals.csexp
 
-bundle: shen/serialize.shen
-	$(SHEN) script shen/serialize.shen 2>/dev/null
+bundle: shen/serialize-reduced.shen
+	$(SHEN) script shen/serialize-reduced.shen 2>/dev/null
 	@echo "Bundle written to globals.csexp ($$(wc -c < globals.csexp) bytes)"
+
+# Full Shen OS bundle — type-unsafe, requires a guards-enabled (debug) VM.
+# Written to globals-full.csexp for testing the complete OS.  The release
+# C VM compiles out primitive type guards and CANNOT run this
+# (shen.initialise segfaults); use ./zincvm-debug globals-full.csexp.
+bundle-full: shen/serialize.shen
+	$(SHEN) script shen/serialize.shen 2>/dev/null
+	@echo "Full bundle written to globals-full.csexp ($$(wc -c < globals-full.csexp) bytes)"
 
 run-bundle: zincvm globals.csexp
 	./zincvm globals.csexp

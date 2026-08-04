@@ -1,4 +1,10 @@
 (tc -)
+\* FULL Shen OS bundle (type-unsafe; requires a guards-enabled build to run).
+   The guard-free release C VM CANNOT run this — shen.initialise segfaults
+   (see AGENTS.md).  The canonical guard-free bundle is built by
+   serialize-reduced.shen → globals.csexp.  This target writes
+   globals-full.csexp for debug/testing with the full OS. *\
+
 (load "shen/interp.shen")
 (tc -)
 (load "shen/compile.shen")
@@ -76,6 +82,6 @@
   _ -> "")
 
 (set *bundle* (cn (cn "(" (entries-str (dedupe-globals (value global-table)))) ")"))
-(set *out* (open "globals.csexp" out))
+(set *out* (open "globals-full.csexp" out))
 (pr (value *bundle*) (value *out*))
 (close (value *out*))

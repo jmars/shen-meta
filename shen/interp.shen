@@ -169,6 +169,7 @@
   [prim function? | C] A E S R                                  -> (interp C [boolean false] E S R)
   [prim - | C] [number A] E [[number A1] | S] R                 -> (interp C [number (- A A1)] E S R)
   [prim * | C] [number A] E [[number A1] | S] R                 -> (interp C [number (* A A1)] E S R)
+  [prim / | C] [number A] E [[number 0] | S] R                  -> (simple-error "division by zero")
   [prim / | C] [number A] E [[number A1] | S] R                 -> (interp C [number (/ A A1)] E S R)
   [prim + | C] [number A] E [[number A1] | S] R                 -> (interp C [number (+ A A1)] E S R)
   [prim address-> | C] [absvector A] E [[number A1] A2 | S] R   -> (interp C [absvector (address-> A A1 A2)] E S R)
@@ -273,6 +274,8 @@
 (set-toplevel map-debruijn map-debruijn)
 (set-toplevel intersperse intersperse)
 (set-toplevel fold-append fold-append)
+(set-toplevel index_h index_h)
+(set-toplevel idx idx)
 (set-toplevel primitive? primitive?)
 (set-toplevel instruction-keyword? instruction-keyword?)
 
