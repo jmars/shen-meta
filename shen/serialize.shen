@@ -23,33 +23,33 @@
    The 2 host primitives needed by the standard distribution
    (shen.char-stinput?, shen.char-stoutput?) are provided by
    overrides-pure.kl. *\
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/core.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/declarations.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/types.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/macros.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/load.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/toplevel.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/sys.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/dict.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/track.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/reader.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/writer.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/yacc.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/prolog.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/sequent.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/t-star.kl")
-(interp-load-raw "/home/arch/github/shen-meta/shen/overrides-pure.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/extension-expand-dynamic.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/extension-features.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/extension-launcher.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/extension-programmable-pattern-matching.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/stlib.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/init.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/core.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/declarations.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/types.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/macros.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/load.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/toplevel.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/sys.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/dict.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/track.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/reader.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/writer.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/yacc.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/prolog.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/sequent.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/t-star.kl")
+(interp-load-raw "shen/overrides-pure.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/extension-expand-dynamic.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/extension-features.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/extension-launcher.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/extension-programmable-pattern-matching.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/stlib.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/init.kl")
 
 \* Load shen/util.shen via interp-load-raw — bypasses process-sexprs/find-arities
    to avoid the { } type annotation handling bug in the bundled reader.
    Functions like id, newvar, defun->lambda, primitive? are needed by the pipeline. *\
-(interp-load-raw "/home/arch/github/shen-meta/shen/util.shen")
+(interp-load-raw "shen/util.shen")
 
 \* Add shen. prefix aliases for unprefixed closures.
    The Shen module system adds the package prefix during Shen->KLambda

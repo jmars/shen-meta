@@ -18,21 +18,21 @@
    "closing the loop" by compiling KL through the interpreter itself. *\
 
 \* Type-safe .kl base (no heavy OS). *\
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/core.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/declarations.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/types.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/macros.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/load.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/toplevel.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/sys.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/dict.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/track.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/reader.kl")
-(interp-load-raw "/home/arch/github/shen-scheme/ShenOSKernel-41.2/klambda/writer.kl")
-(interp-load-raw "/home/arch/github/shen-meta/shen/overrides-pure.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/core.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/declarations.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/types.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/macros.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/load.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/toplevel.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/sys.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/dict.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/track.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/reader.kl")
+(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/writer.kl")
+(interp-load-raw "shen/overrides-pure.kl")
 
 \* Load shen/util.shen via interp-load-raw (bypasses reader). *\
-(interp-load-raw "/home/arch/github/shen-meta/shen/util.shen")
+(interp-load-raw "shen/util.shen")
 
 \* Bundle the load/eval infrastructure so the interpreter can compile and
    load further .kl source at runtime (close the loop).  These are plain
