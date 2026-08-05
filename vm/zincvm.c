@@ -1482,7 +1482,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         env_len = init_env_len;
     }
     Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
-    CallFrame *frame_stack = (CallFrame*)gc_alloc(CALL_STACK_DEPTH * sizeof(CallFrame), GC_TYPE_CALLFRAME_ARRAY);
+    CallFrame *frame_stack = (CallFrame*)gc_alloc_oldgen(CALL_STACK_DEPTH * sizeof(CallFrame), GC_TYPE_CALLFRAME_ARRAY);
     if (!frame_stack) { va_free(&stack); return acc; }
     memset(frame_stack, 0, CALL_STACK_DEPTH * sizeof(CallFrame));
     int frames_sp = 0;

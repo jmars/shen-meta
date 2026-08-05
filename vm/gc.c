@@ -68,6 +68,12 @@ static uintptr_t  freepage;
  * allocation still goes exclusively through the old-gen path. */
 static uintptr_t  nursery_first, nursery_last;
 
+/* Nursery bump-allocator state (Phase 2 Step 2).
+ * nursery_cur advances forward; nursery_end is one past the last byte.
+ * Initialised in gc_init. */
+static char *nursery_cur;
+static char *nursery_end;
+
 /* page metadata (indexed by page number; allocated relative to firstheappage) */
 static uintptr_t *space;   /* 0=free, 1=semi-space-1, 2=semi-space-2 */
 static uintptr_t *gc_link;    /* Cheney queue links */
@@ -338,6 +344,23 @@ static void collect(void) {
 
     /* Restore the previous SIGALRM mask */
     sigprocmask(SIG_SETMASK, &old_sig_set, NULL);
+}
+
+/* ---- nursery collection (Phase 2 Step 2 stub) --------------------- */
+
+/* collect_nursery: in this step simply delegates to the existing full
+ * collect().  The nursery bump cursor is NOT reset here because collect()
+ * does not yet know how to evacuate nursery pages (Step 3).  Resetting
+ * the cursor would overwrite live nursery objects still referenced from
+ * the C stack / extra roots.  Instead, the nursery is a one-shot fast
+ * lane: once it fills, subsequent allocations fall through to old-gen.
+ *
+ * Future steps will teach collect() to scavenge nursery pages and
+ * promote survivors to old-gen, at which point this function becomes
+ * a real nursery scavenge and safely resets the cursor. */
+__attribute__((unused))
+static void collect_nursery(void) {
+    collect();
 }
 
 /* ---- internal allocator ------------------------------------------- */
@@ -658,6 +681,13 @@ void gc_init(uintptr_t heap_size, void *stack_base) {
     for (i = nursery_first; i <= nursery_last; i++)
         space[i] = NURSERY;
 
+    /* Initialise the nursery bump allocator.  nursery_cur points to the
+     * first byte of the nursery region; nursery_end is one past the last
+     * byte.  The nursery is a contiguous 2 MB region — all 4096 pages
+     * tagged NURSERY, no interleaving with old-gen pages. */
+    nursery_cur = (char *)PAGE_to_GCP(nursery_first);
+    nursery_end = (char *)PAGE_to_GCP(nursery_last + 1);
+
     stackbase = (uintptr_t *)stack_base;
 
     current_space = 1;
@@ -679,6 +709,36 @@ void gc_init(uintptr_t heap_size, void *stack_base) {
 
 __attribute__((noinline))
 void *gc_alloc(size_t bytes, int type_tag) {
+    /* ---- nursery fast path (Phase 2 Step 2) ---- */
+    /* Small objects (≤ NURSERY_BYTES/8 = 256 KB): try the nursery bump
+     * allocator first.  All Shen Value/Value[]/Instr[] objects qualify;
+     * only the ~5 MB frame_stack and similar large arrays bypass. */
+    if (bytes <= NURSERY_BYTES / 8) {
+        uintptr_t words = (bytes + WORDBYTES - 1) / WORDBYTES + 1;
+        size_t total = words * WORDBYTES;
+
+        if ((size_t)(nursery_end - nursery_cur) >= total) {
+            uintptr_t *header = (uintptr_t *)nursery_cur;
+            *header = MAKE_HEADER(words, type_tag);
+
+            /* Zero the body (matching gcalloc_internal semantics) */
+            memset(header + 1, 0, (words - 1) * WORDBYTES);
+
+            void *body = header + 1;
+            nursery_cur += total;
+            return body;
+        }
+
+        /* Nursery full.  Fall through to old-gen allocation.
+         * We do NOT call collect_nursery() + reset here because collect()
+         * does not yet evacuate nursery pages (Step 3); resetting the
+         * bump cursor would overwrite live nursery objects still
+         * referenced from the C stack and extra roots.  The nursery is
+         * a one-shot fast lane for this step — once full, all subsequent
+         * allocations go through old-gen. */
+    }
+
+    /* ---- old-gen path ---- */
     /* Trigger collection before allocation if the current semi-space
      * is getting full.  allocatepage() also triggers collect() as a
      * last resort, but pre-emptive collection here improves throughput
@@ -691,6 +751,17 @@ void *gc_alloc(size_t bytes, int type_tag) {
 
 void *gc_alloc_atomic(size_t bytes) {
     return gc_alloc(bytes, GC_TYPE_RAW);
+}
+
+__attribute__((noinline))
+void *gc_alloc_oldgen(size_t bytes, int type_tag) {
+    /* Force allocation through the old-gen path, bypassing the nursery
+     * entirely.  Used for large objects (frame_stack, big arrays) that
+     * would never fit in the nursery and would fragment it. */
+    if (allocatedpages > 0 && allocatedpages > heappages / 4)
+        collect();
+
+    return gcalloc_internal(bytes, type_tag);
 }
 
 __attribute__((noinline))

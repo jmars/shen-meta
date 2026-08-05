@@ -34,6 +34,11 @@ void  gc_init(uintptr_t heap_size, void *stack_base);
  * collection.  Marked noinline so callers' live registers spill to stack. */
 void *gc_alloc(size_t bytes, int type_tag);
 
+/* Allocate directly in old-gen, bypassing the nursery bump allocator.
+ * For large objects (frame_stack, big arrays) that would never fit in
+ * the nursery and whose allocation would waste nursery space. */
+void *gc_alloc_oldgen(size_t bytes, int type_tag);
+
 /* Shorthand for gc_alloc(bytes, GC_TYPE_RAW).  For char buffers, error
  * messages, and other blobs that contain no GC-managed pointers. */
 void *gc_alloc_atomic(size_t bytes);
