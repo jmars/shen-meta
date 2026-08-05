@@ -69,30 +69,72 @@ forwarding-pointer test.
       `gc_alloc`/`gc_alloc_atomic`; decide scanned-vs-atomic per site
       (`Instr[]` = scanned, `frame_stack` = scanned, string/symbol/prim data =
       atomic).
-- [ ] Root scanning: re-introduce Bartlett mostly-copying (conservative C-stack
-      scan with pinning of ambiguous roots) + precise scan of the registered
-      fixed roots. The archived `vendor/bartlett-gc` is the base.
+- [ ] Root scanning: conservative C-stack scan with pinning of ambiguous
+      roots + precise scan of the registered fixed roots.
 - [ ] Fix nested `val_cons` hazard (`vm/zincvm.c:161-163`): force stack spill
       of the in-progress `Value v` across the second `gc_alloc`, or allocate
       both cells then write.
 - [ ] Block SIGALRM during GC (`sigprocmask`); `volatile` after `longjmp`.
 
-### Phase 2 — Generational split + 2-site write barrier
+### Phase 2 — Generational split: nursery + 2-site write barrier
 Gate: generational stress (old-gen vector written with nursery values survives
-a scavenge) + global-table stress.
+a scavenge) + global-table stress + full existing suite.
 
-- [ ] Nursery: ~2MB contiguous semi-space; scavenge on full.
-- [ ] Old gen: mark-sweep with lazy sweeping (no compaction yet).
-- [ ] Barrier site 1 — `address->` (line 927):
-      `if (gc_in_old_gen(&vec) && gc_in_nursery(&val)) gc_remember_vector(&vec);`
-      Remembered set: growable dedup'd `Value*` array of dirtied vectors.
-- [ ] Barrier site 2 — `global_set` (line 334):
-      `if (gc_in_nursery(&v)) gc_remember_global(i);`
-      Remembered set: dedup'd bitset/array of dirtied global indices.
-- [ ] Remembered sets live in C heap (not GC-managed); cleared after each
-      nursery scavenge. Scavenge scans them for nursery pointers.
-- [ ] Startup `global_set` calls are barrier no-ops (no nursery objects exist
-      yet).
+**Design decision (approved):** Keep the existing full-copy `collect()` as the
+(rare) old-gen/full-heap collector, and add a **nursery fast lane** in front of
+it. Do NOT refactor old gen to mark-sweep for v1 — the existing pinning +
+Cheney-queue machinery is already ~90% of a nursery scavenge, and full collect
+compacts old gen for free. Mark-sweep needs a new mark bitmap (the header low
+bit is already `FORWARDED`) and accepts fragmentation; defer to Phase 3.
+
+**Nursery region:** fixed 2MB region at the start of the heap, pages marked
+`space==NURSERY` (3). `grow_heap` only grows old gen. `gc_in_nursery(p)` is a
+two-comparison range check on `GCP_to_PAGE(p)`. Large objects (> ~nursery/8)
+bypass the nursery via `gc_alloc_oldgen()` — `frame_stack`
+(65536 × `sizeof(CallFrame)`) MUST bypass.
+
+**Promotion:** first-survivor. A nursery object survives a scavenge via either
+pin-in-place (ambiguous/conservative root → page flipped to old-gen to-space)
+or evacuate-to-old-gen (copy via existing `move_internal`). All 5 `GC_TYPE_*`
+tags work because the drain dispatches on `HEADER_TYPE` identically. No survivor
+space / aging for v1.
+
+**Barrier site 1 — `address->` vector write (zincvm.c:912): REQUIRED for
+correctness.**
+```c
+vec.vector.data[i] = val;
+if (gc_in_oldgen(&vec_heap_obj) && gc_in_nursery(&val)) gc_remember_vector(&vec_heap_obj);
+```
+Old gen is NOT scanned during a nursery scavenge, so an old-gen vector holding a
+nursery pointer must be recorded or the nursery object dangles. `vec` at the
+primitive is a by-value pop — the barrier must record the *heap* vector's
+address (capture the stack slot before popping). Remembered set `dirty_vectors`:
+growable malloc'd `Value**`; the scavenge runs `gc_evacuate(&v->vector.data)` on
+each (the drain then scans the array's elements). Cleared at end of each nursery
+scavenge and at start of each full collect.
+
+**Barrier site 2 — `global_set` (zincvm.c:324): OPTIONAL / DEFERRED for v1.**
+Correctness is preserved because `global_table` is already conservatively pinned
+as an extra_root in every collect (including the nursery scavenge), so nursery
+pointers in globals survive without a barrier. The only cost is page-granular
+over-retention (one nursery cons pins a 512-byte page). Add a dirty-globals
+bitset only if profiling shows over-retention is a real problem.
+
+**Ordered steps (each gated by `make test && make test-debug && make run-bundle`):
+** 1) Add `NURSERY`+region+predicates (no behavior change); 2) route `gc_alloc`
+to the nursery bump + `gc_alloc_oldgen` for large; 3) teach `collect()` to
+evacuate nursery pages; 4) implement `collect_nursery()` (real scavenge, no
+barrier); 5) add the `address->` barrier + `dirty_vectors`; 6) add generational
+stress/retention tests; 7) separate pre-emptive triggers (nursery-full →
+scavenge; old-gen → full collect); 8) docs update.
+
+**Top risks:** (1) `scavenge_to_space` — a nursery scavenge doesn't flip old gen,
+so promoted pages go to the live old-gen space, not `next_space` (add an assert
+no nursery page remains in to-space after a scavenge); (2) `in_scavenge` re-entry
+guard so `allocatepage` doesn't recursively full-collect during a scavenge;
+(3) re-audit the 11+ allocate-then-read sites for the nursery-evacuation
+(non-pinned) case; (4) persistent pinned bitmap — clear only nursery bits across
+scavenges, all bits at full collect.
 
 ### Phase 3 — BiBOP old-gen + compaction (optional, v2)
 - [ ] Size classes: `Value` (40B), `Value[]`, `Instr[]`, `char[]`.

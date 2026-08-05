@@ -30,7 +30,15 @@ I traced every write to GC-managed memory in `vm/zincvm.c`:
 
 **BiBOP old-gen is over-engineered for v1.** BiBOP (Big Bag of Pages) size-class pages are excellent for workloads with many size classes and frequent old-gen allocation. Shen's old gen is populated almost entirely at startup (bundle load) and then stable. A simpler mark-sweep with lazy sweeping, or even a stop-the-world copying collector for the whole heap (no generations), would be easier to get correct first.
 
-**Recommendation:** Phase the work. Start with a **single-space stop-and-copy (Cheney) collector** — simplest moving collector, no remembered set, no barrier. Get it correct. Then add the nursery/old-gen split as an optimization. The 2-site write barrier is trivial to add later because the mutation surface is so small.
+**Recommendation (updated for Phase 2):** Phase 1 chose a single-space
+Cheney mostly-copying collector (done, in `vm/gc.c`). Phase 2 adds a **nursery
+fast lane + the existing full-copy `collect()` as the old-gen collector** — NOT
+mark-sweep. The existing pinning + Cheney-queue machinery extends naturally to a
+nursery scavenge, and full collect compacts old gen for free. Mark-sweep old gen
+(which needs a new mark bitmap and accepts fragmentation) is deferred to Phase 3.
+The 2-site write barrier is trivial because the mutation surface is so small; for
+v1 only the `address->` vector barrier is required (site 2 / `global_set` is
+redundant since `global_table` is conservatively pinned as an extra_root).
 
 ### 1.3 Correctness pitfalls with a moving collector — 5 CRITICAL hazards
 
@@ -170,7 +178,7 @@ See Hazard 3 above. The key risk is `Value` locals in callee-saved registers bei
   - **Pragmatic approach:** Use `__builtin_setjmp` / `__builtin_unwind_init()` to capture registers, then scan the register save area + stack conservatively. This is what Boehm does. For a MOVING collector, conservative scanning is dangerous (a non-pointer that looks like a GC pointer gets "evacuated" to a bogus location, corrupting the non-pointer).
   - **Better approach:** Register all `Value` locals explicitly as roots. This is invasive but correct. Use a `GC_ROOT(value)` macro that pushes the address of a `Value` local onto a thread-local root stack. The GC scans the root stack precisely (knows each entry is a `Value*`).
   - **Even better:** Use `setjmp` at the top of `vm_exec_env` to capture registers into a known buffer, then scan the buffer + stack conservatively but ONLY evacuate objects that are definitely GC-managed (address in `from_space` range). Non-pointers that happen to look like GC pointers will be "evacuated" but the original will be left in place — this is the "ambiguous root" problem. For a copying collector, ambiguous roots must PIN the object (not evacuate). So: conservative scan → pin found objects → precise scan of known roots → evacuate. This is the Bartlett "mostly copying" approach.
-  - **Recommendation:** Use the Bartlett approach (conservative stack scan with pinning) for v1. The existing Bartlett GC at `vendor/bartlett-gc` already does this. Re-introduce it as the base, then add precise scanning for `global_table`, `frame_stack`, and `vm_catch_chain` (which have known layouts).
+  - **Recommendation:** Use the Bartlett approach (conservative stack scan with pinning) for v1. The `vm/gc.c` collector implements this (conservative stack scan with pinning of ambiguous roots). Add precise scanning for `global_table`, `frame_stack`, and `vm_catch_chain` (which have known layouts).
 
 **Step 1.4: Handle the `val_cons` nested allocation hazard.**
 - After `v.cons.car = gc_alloc(...); *v.cons.car = car;`, the next `gc_alloc()` for `v.cons.cdr` may trigger a collection that moves `v.cons.car`.
@@ -197,56 +205,75 @@ See Hazard 3 above. The key risk is `Value` locals in callee-saved registers bei
 - Add a GC stress test: allocate 100K cons cells in a tight loop, verify no corruption.
 - Add a forwarding-pointer test: allocate, trigger GC, verify moved objects are accessible via old pointers (forwarding).
 
-### Phase 2: Generational split (nursery + old gen)
+### Phase 2: Generational split (nursery fast lane + full-copy old gen)
 
-**Goal:** Add a nursery semi-space and an old generation. Only collect the nursery on minor GCs.
+**Goal:** Add a nursery region and only scavenge it on minor GCs. Old-gen
+collection = the existing full-copy `collect()`, run rarely (it compacts old gen
+for free).
 
-**Step 2.1: Nursery.**
-- Small contiguous semi-space (e.g., 2MB). Bump allocation.
-- When full, scavenge: copy live nursery objects to the old gen (or to the survivor space, then promote to old gen).
-- Roots for nursery scavenge: C stack, `global_table`, `frame_stack`, `vm_catch_chain`, `traced_code`, AND the remembered set (old→young pointers).
+**Step 2.1: Nursery region.**
+- Fixed 2MB region at the start of the heap; pages marked `space==NURSERY` (3)
+  (the `space` array already encodes 0=free/1=semi-1/2=semi-2).
+- Bump allocation within the region. `gc_in_nursery(p)` = two-comparison range
+  check on `GCP_to_PAGE(p)`.
+- Large objects (> ~nursery/8) bypass the nursery via `gc_alloc_oldgen()` —
+  `frame_stack` (65536 × `sizeof(CallFrame)`) MUST bypass.
+- When the nursery is full → `collect_nursery()` (minor scavenge). Old-gen
+  `allocatedpages > heappages/4` → `collect()` (full).
 
 **Step 2.2: Old generation.**
-- For v1: mark-sweep with lazy sweeping (no compaction). Simpler than BiBOP.
-- For v2: BiBOP size-class pages with compaction (the proposed design).
-- Old-gen collection triggered when old gen is full or after N minor GCs.
+- For v1: the **existing full-copy `collect()`** (compacts old gen). NOT
+  mark-sweep (that would need a new mark bitmap and accept fragmentation).
+- For v2 (Phase 3): BiBOP size-class pages + compaction (the proposed design).
+- Roots for nursery scavenge: C stack, `global_table`, `frame_stack`,
+  `vm_catch_chain`, `traced_code`, AND the dirty-vector remembered set.
 
-**Step 2.3: Write barrier — 2 sites only.**
+**Step 2.3: Write barrier — site 1 required, site 2 deferred.**
 
-**Site 1: `address->` primitive (line 927).**
+**Site 1: `address->` primitive (zincvm.c:912) — REQUIRED for correctness.**
 ```c
 vec.vector.data[i] = val;
-// WRITE BARRIER:
-if (gc_in_old_gen(&vec) && gc_in_nursery(&val)) {
-    gc_remember_vector(&vec);  // add vec to dirty-vector remembered set
+// WRITE BARRIER (must record the HEAP vector object, not the by-value pop):
+if (gc_in_oldgen(&heap_vec) && gc_in_nursery(&val)) {
+    gc_remember_vector(&heap_vec);  // add vec to dirty-vector remembered set
 }
 ```
-- Remembered set: a set of vector objects that have been dirtied (old→young pointer written).
-- During nursery scavenge, scan the dirty vectors' data arrays for nursery pointers.
-- Clear the dirty set after each nursery scavenge.
+- Old gen is NOT scanned during a nursery scavenge → an unrecorded old-gen →
+  nursery pointer dangles. `vec` is a by-value pop; capture the stack slot
+  address before popping to get the heap vector object.
+- Remembered set: `dirty_vectors`, a growable `Value**` (malloc'd, not
+  GC-managed). During a nursery scavenge, run `gc_evacuate(&v->vector.data)` on
+  each (the drain then scans the array's elements). Clear after each scavenge
+  and at the start of each full collect.
 
-**Site 2: `set` primitive → `global_set` (line 334).**
+**Site 2: `set` primitive → `global_set` (zincvm.c:324) — DEFERRED for v1.**
 ```c
 global_table[i].closure = v;  // or new entry
-// WRITE BARRIER:
-if (gc_in_nursery(&v)) {
-    gc_remember_global(i);  // add global index to dirty-global remembered set
-}
+// OPTIONAL barrier (redundant for v1):
+if (gc_in_nursery(&v)) gc_remember_global(i);
 ```
-- Remembered set: a set of global table indices that have been dirtied with nursery pointers.
-- During nursery scavenge, scan the dirty globals' closure fields for nursery pointers.
-- Clear the dirty set after each nursery scavenge.
-- **Note:** Most `global_set` calls are at startup (before any nursery objects exist). The barrier is a no-op then. Only runtime `set` calls (line 1161) need the barrier.
+- **Redundant:** `global_table` is already conservatively pinned as an extra_root
+  in every collect (including the nursery scavenge), so nursery pointers in
+  globals survive without a barrier. Only cost = page-granular over-retention.
+- Add `dirty_globals` (bitset of indices) only if profiling shows over-retention
+  matters.
 
-**Step 2.4: Remembered set data structures.**
-- `dirty_vectors`: a growable array of `Value*` (pointers to vector objects in old gen). Deduplicated (a vector dirtied twice is scanned once).
-- `dirty_globals`: a bitset or growable array of `int` (global table indices). Deduplicated.
-- Both live in C heap (not GC-managed). Cleared after each nursery scavenge.
+**Step 2.4: Promotion policy.**
+- First-survivor: a nursery object survives a scavenge via either pin-in-place
+  (ambiguous/conservative root → page flipped to old-gen to-space) or
+  evacuate-to-old-gen (copy via `move_internal`). All 5 `GC_TYPE_*` tags work
+  because the drain dispatches on `HEADER_TYPE` identically. No survivor space /
+  aging for v1.
 
 **Step 2.5: Test.**
-- Same test suite as Phase 1.
-- Add a generational stress test: allocate a vector in old gen (force promotion), write nursery values into it via `address->`, trigger nursery GC, verify the values survive.
-- Add a global-table stress test: `set` a global to a nursery cons cell, trigger nursery GC, verify the cons survives.
+- Full existing suite (34 release + 39 debug + self-hosting + GC stress +
+  retention) after every step.
+- Add a generational stress test: allocate a vector, force it to old gen,
+  write nursery cons cells into it via `address->`, trigger a nursery scavenge,
+  verify the cells survived (proves the site-1 barrier).
+- Add a global-table stress test: `set` a global to a nursery cons, trigger a
+  scavenge, verify survival (tests the extra_root pinning path, no barrier
+  needed).
 
 ### Phase 3: BiBOP old-gen with compaction (optional, v2)
 
@@ -272,6 +299,11 @@ if (gc_in_nursery(&v)) {
 | Per-type scanning requirement | HIGH | `scan_value()` dispatch on tag |
 | Vector backing array compaction | MEDIUM | Evacuate data array separately (option b) |
 | Signal handler + GC interaction | MEDIUM | Block SIGALRM during GC |
+| Nursery evacuation of non-pinned objects | MEDIUM | Conservative roots pin; re-audit the 11+ allocate-then-read sites for the non-pinned case |
+| `scavenge_to_space` confusion | HIGH | Nursery scavenge doesn't flip old gen → promoted pages go to the live old-gen space, not `next_space`; assert no nursery page remains in to-space after a scavenge |
+| Recursive full-collect during a nursery scavenge | HIGH | `in_scavenge` re-entry guard: `allocatepage` suppresses pre-emptive `collect()` during a scavenge and falls through to `grow_heap` |
+| Persistent pinned bitmap across scavenges | MEDIUM | Clear only nursery bits across scavenges, all bits at full collect |
+| Remembered set overflow | LOW | Grow `dirty_vectors` with realloc |
 | BiBOP complexity | LOW (defer) | Phase 3, optional |
 
 ## 4. RECOMMENDATION
@@ -279,8 +311,8 @@ if (gc_in_nursery(&v)) {
 **Do NOT jump straight to Appel-style generational + BiBOP.** The 5 critical hazards above make a moving collector significantly harder than the current Boehm setup. The right path is:
 
 1. **Phase 0:** Make the code moving-GC-ready (volatile, scan_value, root registration). No collector change. All tests pass.
-2. **Phase 1:** Single-space Cheney stop-and-copy with Bartlett-style conservative stack scan (pin ambiguous roots). All tests pass.
-3. **Phase 2:** Add nursery/old-gen split with the 2-site write barrier. All tests pass.
+2. **Phase 1:** Single-space Cheney stop-and-copy with Bartlett-style conservative stack scan (pin ambiguous roots). All tests pass. **DONE.**
+3. **Phase 2:** Add nursery/old-gen split: nursery fast lane + the existing full-copy `collect()` as the old-gen collector, with the site-1 (`address->`) write barrier. All tests pass.
 4. **Phase 3:** BiBOP old-gen compaction (optional, only if old-gen fragmentation is a real problem).
 
 The 2-site write barrier is the design's strongest insight — it's correct and minimal. But it's the EASY part. The hard part is making a moving collector safe with the existing `setjmp`/`longjmp` error handling, nested allocations, and conservative stack scanning.
