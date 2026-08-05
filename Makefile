@@ -1,28 +1,43 @@
 .PHONY: all vm test test-debug debug bundle bundle-full pipeline interp setup clean
 
-SHEN   = ../shen-scheme/_build/bin/shen-scheme
-CFLAGS = -Wall -Wextra -O2
+SHEN   = vendor/shen-scheme/bin/shen-scheme
+CFLAGS = -Wall -Wextra -O2 -I vm
 # Debug build enables ZINCVM_DEBUG: C primitives route type-errors through
 # vm_throw as defense-in-depth (normally owned by the Shen safe wrappers).
-DCFLAGS = -Wall -Wextra -O0 -g -DZINCVM_DEBUG
-GC_LIB = -lgc
+DCFLAGS = -Wall -Wextra -O0 -g -DZINCVM_DEBUG -I vm
 
 all: zincvm zincdec
 
-zincvm: vm/zincvm.c
-	$(CC) $(CFLAGS) -o $@ vm/zincvm.c $(GC_LIB)
+# cosmocc produces a fat APE plus cross-build intermediates (.com.dbg,
+# .aarch64.elf) alongside the output.  Stage those in a temp dir so they never
+# land in the repo; only the native x86_64 ELF (.com.dbg) is copied out as the
+# final binary.  Leaves the working dir unpolluted by build products.
 
-zincvm-debug: vm/zincvm.c
-	$(CC) $(DCFLAGS) -o $@ vm/zincvm.c $(GC_LIB)
+# $1 = final binary path (zincvm / zincvm-debug / zincdec), $2 = extra CFLAGS
+define compile-vm
+	@T=$$(mktemp -d /tmp/$(notdir $(1)).build.XXXXXX) && \
+	cosmocc $(2) -o $$T/out.ape $(3) && \
+	cp $$T/out.ape.com.dbg $(1) && chmod 755 $(1); \
+	st=$$?; rm -rf $$T; exit $$st
+endef
+
+zincvm: vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h
+	$(call compile-vm,$@,$(CFLAGS),vm/zincvm.c vm/gc.c)
+
+zincvm-debug: vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h
+	$(call compile-vm,$@,$(DCFLAGS),vm/zincvm.c vm/gc.c)
 
 debug: zincvm-debug
 	@echo "Built ./zincvm-debug (ZINCVM_DEBUG: C-level type-error defense-in-depth active)"
 
-zincvm-asan: vm/zincvm.c
-	$(CC) $(CFLAGS) -O0 -g -fsanitize=address -o $@ vm/zincvm.c $(GC_LIB)
+zincvm-asan: vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h
+	$(call compile-vm,$@,$(CFLAGS) -O0 -g -fsanitize=address,vm/zincvm.c vm/gc.c)
 
 zincdec: vm/zincdec.c
-	$(CC) $(CFLAGS) -o $@ vm/zincdec.c $(GC_LIB)
+	$(call compile-vm,$@,$(CFLAGS),vm/zincdec.c)
+
+clean:
+	rm -f zincvm zincvm-debug zincdec zincvm-asan *.csexp globals.csexp globals-full.csexp
 
 test: zincvm
 	./zincvm
@@ -68,6 +83,3 @@ setup:
 		echo "shen-scheme already present"; \
 	fi
 	@$(MAKE) -C ../shen-scheme
-
-clean:
-	rm -f zincvm zincdec *.csexp globals.csexp

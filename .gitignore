@@ -6,3 +6,10 @@ zincdec
 /tmp/
 core.*
 zincvm-debug
+# cosmocc intermediate build products (Makefile extracts the .com.dbg ELF)
+*.ape
+*.ape.com.dbg
+*.ape.aarch64.elf
+*.com.dbg
+*.aarch64.elf
+*.aarch64
