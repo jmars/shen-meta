@@ -116,9 +116,8 @@ transformation is needed — the interp natively handles standard ZINC output.
   No gcinit, no extra roots, no pointer counts. Objects never move, so
   stack-local Value pointers are always safe across allocations. (See `docs/gc.md`
   for the plan to replace this with a moving generational collector.)
-- The old Bartlett copying GC is archived at `vendor/bartlett-gc` branch
-  `bartlett-mostly-copying` (pinned-page implementation) — kept for
-  reference/experimentation.
+- The old Bartlett copying GC has been removed; the current collector is the
+  single-space Cheney mostly-copying GC in `vm/gc.c` (see `docs/gc.md`).
 - `global` loads from table then falls back to `val_prim(name)`.
 - Primitives dispatch via `exec_primitive()` — apply-mode pops mark + args from
   stack. Inline `OP_PRIM` (`P`) executes primitive with args from stack +

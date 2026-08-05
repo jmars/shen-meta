@@ -316,10 +316,10 @@ _Static_assert(_Alignof(GlobalEntry) >= sizeof(uintptr_t),
 static GlobalEntry global_table[GLOBAL_TABLE_MAX];
 static int global_table_len = 0;
 
-/* GC-visible pointer to the active value stack.  The Bartlett GC's
-   conservative C-stack scan is unreliable (register allocation can
-   hide pointers).  By keeping the stack data pointer here (registered
-   as an extra root), the GC always traces Values on the VM stack. */
+/* GC-visible pointer to the active value stack.  A conservative C-stack
+   scan alone is unreliable (register allocation can hide pointers).  By
+   keeping the stack data pointer here (registered as an extra root), the
+   GC always traces Values on the VM stack. */
 
 static void global_set(const char *name, Value v) {
     for (int i = 0; i < global_table_len; i++) {
@@ -1595,8 +1595,8 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
                 int lambda_env_len = acc.lambda.env_len;
                 int new_env_len = lambda_env_len + nargs;
                 Value *ne = GC_VALUE_ARRAY(new_env_len);
-                /* Bartlett pinning keeps acc.lambda.env reachable via
-                 * conservative stack scan — safe to read after gcalloc. */
+                /* acc.lambda.env stays reachable via the conservative stack
+                 * scan — safe to read after gcalloc. */
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *lambda_env = acc.lambda.env;
                 if (lambda_env_len > 0 && lambda_env) {
