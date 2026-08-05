@@ -1,0 +1,68 @@
+/*
+ * gc.h — Cheney mostly-copying collector API (Phase 1: single-space)
+ *
+ * Objects carry a type tag in the header so the scavenger knows how to
+ * scan them.  The type tags are defined here; the scanning functions
+ * (gc_scan_value, gc_evacuate) are implemented in zincvm.c because they
+ * need the full Value/Instr/CallFrame type definitions.
+ */
+
+#ifndef ZINCVM_GC_H
+#define ZINCVM_GC_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+/* ---- type tags stored in the header's repurposed "ptrs" field ---- */
+enum {
+    GC_TYPE_RAW             = 0,  /* char[] string/error data — no scan */
+    GC_TYPE_VALUE           = 1,  /* single Value struct — scan by tag */
+    GC_TYPE_VALUE_ARRAY     = 2,  /* Value[] — scan each by tag */
+    GC_TYPE_INSTR_ARRAY     = 3,  /* Instr[] — scan operand + closure_code */
+    GC_TYPE_CALLFRAME_ARRAY = 4   /* CallFrame[] — scan env + stack.data */
+};
+
+/* ---- public API ---- */
+
+/* Initialise the collector.  heap_size is in bytes (must be a multiple of
+ * PAGEBYTES=512).  stack_base should be the address of a local variable in
+ * the outermost frame (typically main's &argc or similar). */
+void  gc_init(uintptr_t heap_size, void *stack_base);
+
+/* Allocate zeroed memory that may contain GC-managed pointers.  `type_tag`
+ * tells the collector how to scan the object's body.  May trigger a
+ * collection.  Marked noinline so callers' live registers spill to stack. */
+void *gc_alloc(size_t bytes, int type_tag);
+
+/* Shorthand for gc_alloc(bytes, GC_TYPE_RAW).  For char buffers, error
+ * messages, and other blobs that contain no GC-managed pointers. */
+void *gc_alloc_atomic(size_t bytes);
+
+/* Reallocate a previously-allocated object.  old_bytes must match the
+ * original allocation size.  type_tag is the same type tag as the original.
+ * The old object is NOT freed (the GC will reclaim it eventually); the
+ * returned pointer is a fresh allocation with old_bytes copied in. */
+void *gc_realloc(void *old, size_t old_bytes, size_t new_bytes, int type_tag);
+
+/* Register a memory range for conservative root scanning.  Every
+ * sizeof(uintptr_t)-aligned word in the range is checked as a potential
+ * heap pointer and the containing page is pinned (not moved). */
+void  gc_set_extra_roots(void *start, size_t size);
+
+/* ---- functions implemented in zincvm.c (need full type defs) ---- */
+
+#include "zinctypes.h"
+
+/* Evacuate a single pointer from from-space to to-space.
+ * Called from the scavenger for each pointer field. */
+void gc_evacuate(void **slot);
+
+/* Scan a Value and evacuate all GC-managed pointers it contains.
+ * Called from the scavenger for GC_TYPE_VALUE and GC_TYPE_VALUE_ARRAY. */
+void gc_scan_value(Value *v);
+
+/* Evacuate a from-space object to to-space.  Returns the new address.
+ * Used by gc_evacuate.  NOT called directly by user code. */
+void *gc_move(void *p);
+
+#endif /* ZINCVM_GC_H */

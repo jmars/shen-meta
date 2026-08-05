@@ -18,12 +18,13 @@
 #include <time.h>
 #include <unistd.h>
 #include <errno.h>
-
-#include <gc.h>
 #include <stdint.h>
+#include <stdbool.h>
 
-#define GC_VALUE()        ((Value*)GC_MALLOC(sizeof(Value)))
-#define GC_STR(len)       ((char*)GC_MALLOC_ATOMIC((len) + 1))
+/* zincdec is GC-free: plain calloc/malloc.  It only parses bundles,
+ * decompiles closures, and prints — no VM execution, no GC needed. */
+#define GC_VALUE()        ((Value*)calloc(1, sizeof(Value)))
+#define GC_STR(len)       ((char*)malloc((len) + 1))
 
 /* ------------------------------------------------------------------ */
 /*  Value types                                                        */
@@ -142,7 +143,7 @@ static Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
     v.tag = VAL_LAMBDA;
     v.lambda.code = code; v.lambda.code_len = code_len;
     if (env_len > 0) {
-        v.lambda.env = (Value*)GC_MALLOC(env_len * sizeof(Value));
+        v.lambda.env = (Value*)calloc(env_len, sizeof(Value));
         memset(v.lambda.env, 0, env_len * sizeof(Value));
         memcpy(v.lambda.env, env, env_len * sizeof(Value));
         v.lambda.env_len = env_len;
@@ -652,7 +653,6 @@ static void usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    GC_INIT();
     init_globals();
 
     if (argc < 3) { usage(argv[0]); return 1; }

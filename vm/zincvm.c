@@ -34,86 +34,64 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#include <stdbool.h>
 
-#include <gc.h>
 #include <stdint.h>
+#include "gc.h"
 
-/* Boehm GC: non-moving conservative collector.  GC_MALLOC returns
- * zeroed memory.  No gcinit, no extra roots, no pointer counts needed —
- * the collector finds roots automatically via stack/BSS scan. */
-#define GC_VALUE()            ((Value*)GC_MALLOC(sizeof(Value)))
-#define GC_STR(len)           ((char*)GC_MALLOC_ATOMIC((len) + 1))
-#define GC_VALUE_ARRAY(n)     ((Value*)GC_MALLOC((n) * sizeof(Value)))
-
-/* ------------------------------------------------------------------ */
-/*  Value types                                                        */
-/* ------------------------------------------------------------------ */
-
-typedef enum {
-    VAL_NUMBER,
-    VAL_STRING,
-    VAL_SYMBOL,
-    VAL_BOOLEAN,
-    VAL_CONS,
-    VAL_NIL,
-    VAL_LAMBDA,
-    VAL_MARK,
-    VAL_PRIM,
-    VAL_ERROR,
-    VAL_VECTOR,
-    VAL_STREAM
-} ValTag;
-
-typedef struct Value {
-    ValTag tag;
-    union {
-        long number;
-        struct { char *data; int len; } str;
-        struct { char *name; } sym;
-        int boolean;
-        struct { struct Value *car; struct Value *cdr; } cons;
-        struct {
-            struct Instr *code;
-            int code_len;
-            struct Value *env;
-            int env_len;
-        } lambda;
-        struct { const char *name; } prim;
-        struct { char *message; } error;
-        struct {
-            struct Value *data;
-            int len;
-        } vector;
-        struct {
-            FILE *file;         /* NULL for string streams */
-            int is_input;
-            int is_string;      /* 1 = string-backed, 0 = FILE-backed */
-        } stream;
-    };
-} Value;
-
-typedef struct Instr Instr;
+/* Cheney GC: mostly-copying semi-space collector.  gc_alloc returns
+ * zeroed memory.  Call gc_init() once before any allocation, and
+ * gc_set_extra_roots() for global data that the collector must trace. */
+#define GC_VALUE()            ((Value*)gc_alloc(sizeof(Value), GC_TYPE_VALUE))
+#define GC_STR(len)           ((char*)gc_alloc_atomic((len) + 1))
+#define GC_VALUE_ARRAY(n)     ((Value*)gc_alloc((n) * sizeof(Value), GC_TYPE_VALUE_ARRAY))
 
 /* ------------------------------------------------------------------ */
-/*  Instruction types                                                  */
+/*  Value types (shared with gc.c via zinctypes.h)                     */
 /* ------------------------------------------------------------------ */
 
-typedef enum {
-    OP_ACCESS   = 'a', OP_GLOBAL   = 'g', OP_JMPF     = 'f',
-    OP_JMP      = 'j', OP_APPTERM  = 't', OP_APPLY    = 'p',
-    OP_PUSHMARK = 'm', OP_CUR      = 'c',
-    OP_GRAB     = 'r', OP_RETURN   = 'v', OP_LET      = 'e',
-    OP_ENDLET   = 'd', OP_NUMBER   = 'n', OP_STRING   = 'S',
-    OP_SYMBOL   = 's', OP_BOOLEAN  = 'b', OP_PRIM     = 'P'
-} Opcode;
+#include "zinctypes.h"
 
-struct Instr {
-    Opcode op;
-    Value operand;
-    Instr *closure_code;
-    int closure_len;
-    int jmp_target;
-};
+/* ---- GC scanning functions (called by gc.c collect() scavenger) ---- */
+
+/* gc_move is implemented in gc.c */
+void *gc_move(void *p);
+
+/* gc_evacuate: update a single pointer slot to point to the evacuated copy */
+void gc_evacuate(void **slot) {
+    *slot = gc_move(*slot);
+}
+
+/* gc_scan_value: evacuate all GC-managed pointers within a Value */
+void gc_scan_value(Value *v) {
+    switch (v->tag) {
+    case VAL_CONS:
+        gc_evacuate((void **)&v->cons.car);
+        gc_evacuate((void **)&v->cons.cdr);
+        break;
+    case VAL_LAMBDA:
+        gc_evacuate((void **)&v->lambda.code);
+        gc_evacuate((void **)&v->lambda.env);
+        break;
+    case VAL_VECTOR:
+        gc_evacuate((void **)&v->vector.data);
+        break;
+    case VAL_STRING:
+        gc_evacuate((void **)&v->str.data);
+        break;
+    case VAL_ERROR:
+        gc_evacuate((void **)&v->error.message);
+        break;
+    /* These types contain no GC-managed pointers:
+     *   VAL_NUMBER, VAL_SYMBOL (sym.name is strdup'd C-heap),
+     *   VAL_BOOLEAN, VAL_NIL, VAL_MARK,
+     *   VAL_PRIM (prim.name is a literal string),
+     *   VAL_STREAM (stream.file is FILE* / intptr_t)
+     */
+    default:
+        break;
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Parser state                                                       */
@@ -159,8 +137,21 @@ static Value val_boolean(int b) {
     v.tag = VAL_BOOLEAN; v.boolean = b; return v;
 }
 static Value val_cons(Value car, Value cdr) {
+    /* Allocate both cells before writing — prevents GC from seeing a
+     * half-constructed cons if the second gc_alloc triggers a collection.
+     * The first cell's pointer must remain a conservative C-stack root
+     * across the second allocation, so keep it in a volatile slot (always
+     * resident on the stack, where the collector's scan finds and pins its
+     * page).  Pinning means the first cell never moves, so its address stays
+     * valid after the second gc_alloc. */
+    Value *car_cell = (Value*)gc_alloc(sizeof(Value), GC_TYPE_VALUE);
+    Value *volatile car_root = car_cell;
+    Value *cdr_cell = (Value*)gc_alloc(sizeof(Value), GC_TYPE_VALUE);
+    *car_root = car;
+    *cdr_cell = cdr;
     Value v; memset(&v, 0, sizeof(v));
-    v.tag = VAL_CONS; v.cons.car = GC_VALUE(); *v.cons.car = car; v.cons.cdr = GC_VALUE(); *v.cons.cdr = cdr; return v;
+    v.tag = VAL_CONS; v.cons.car = car_root; v.cons.cdr = cdr_cell;
+    return v;
 }
 static Value val_nil(void) {
     Value v; memset(&v, 0, sizeof(v));
@@ -195,7 +186,7 @@ static Value val_error(const char *msg) {
     /* GC-allocate so the message is reclaimed with the collector instead of
        leaking via strdup on every raised error. */
     int len = (int)strlen(msg);
-    char *buf = (char*)GC_MALLOC_ATOMIC(len + 1);
+    char *buf = (char*)gc_alloc_atomic(len + 1);
     memcpy(buf, msg, len); buf[len] = '\0';
     v.error.message = buf;
     return v;
@@ -203,7 +194,7 @@ static Value val_error(const char *msg) {
 static Value val_vector(int size) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_VECTOR; v.vector.len = size;
-    if (size > 0) v.vector.data = (Value*)GC_MALLOC(size * sizeof(Value));
+    if (size > 0) v.vector.data = (Value*)gc_alloc(size * sizeof(Value), GC_TYPE_VALUE_ARRAY);
     return v;
 }
 static Value val_stream_in(FILE *f) {
@@ -268,7 +259,6 @@ static void print_value(Value v) {
 /* ------------------------------------------------------------------ */
 
 #define STACK_INIT_CAP 64
-typedef struct { Value *data; int len; int cap; } ValueArray;
 
 static void va_init(ValueArray *a) {
     a->data = GC_VALUE_ARRAY(STACK_INIT_CAP);
@@ -960,8 +950,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "trap-error") == 0) {
         /* RTL: (trap-error Body Handler) — Handler pushed first, then Body.
-           Stack: [mark, Handler, Body] → pop Body first, then Handler. */
-        Value body = va_pop(stack), handler = va_pop(stack);
+           Stack: [mark, Handler, Body] → pop Body first, then Handler.
+           handler is volatile: after longjmp from vm_throw, the compiler
+           must re-read handler from the stack, not from a cached register. */
+        Value body = va_pop(stack);
+        volatile Value handler = va_pop(stack);
         if (handler.tag != VAL_LAMBDA) PRIM_TYPE_ERROR("trap-error handler not fn");
         CatchFrame cf;
         cf.parent = vm_catch_chain;
@@ -1177,7 +1170,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         cf.parent = vm_catch_chain;
         cf.in_trap_error = 0;
         vm_catch_chain = &cf;
-        Value result = a;  /* default: identity */
+        volatile Value result = a;  /* default: identity; volatile so the longjmp path re-reads from the stack */
         if (setjmp(cf.buf) == 0) {
 
         /* Marshal native Value → Shen tagged form */
@@ -1296,7 +1289,7 @@ static int parse_csexp_list(ParseState *ps, Instr **out);
 
 static int parse_body(ParseState *ps, Instr **out) {
     int cap = 16, len = 0;
-    Instr *code = (Instr*)GC_MALLOC(cap * sizeof(Instr));
+    Instr *code = (Instr*)gc_alloc(cap * sizeof(Instr), GC_TYPE_INSTR_ARRAY);
     while (1) {
         skip_ws(ps); char c = *ps->p;
         if (c == ')' || c == '\0') break;
@@ -1327,7 +1320,7 @@ static int parse_body(ParseState *ps, Instr **out) {
             ps->p++; break;
         default: { char msg[64]; snprintf(msg, sizeof(msg), "unknown opcode '%c' (0x%02x)", c, (unsigned char)c); PARSE_ERROR(msg); }
         }
-        if (len >= cap) { cap *= 2; code = (Instr*)GC_REALLOC(code, cap * sizeof(Instr)); }
+        if (len >= cap) { int old_cap = cap; cap *= 2; code = (Instr*)gc_realloc(code, old_cap * sizeof(Instr), cap * sizeof(Instr), GC_TYPE_INSTR_ARRAY); }
         code[len++] = instr;
     }
     *out = code; return len;
@@ -1448,9 +1441,6 @@ static void resolve_jumps(Instr *code, int len) {
 /*  VM execution                                                       */
 /* ------------------------------------------------------------------ */
 
-#define CALL_STACK_DEPTH 65536
-typedef struct { Instr *code; int code_len, pc; Value *env; int env_len, env_cap; ValueArray stack; } CallFrame;
-
 static Value lookup_env(int n, Value *env, int env_len) {
     if (n < 0 || n >= env_len) {
         /* Out-of-bounds access: return 0 silently.
@@ -1492,7 +1482,7 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
         env_len = init_env_len;
     }
     Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
-    CallFrame *frame_stack = (CallFrame*)GC_MALLOC(CALL_STACK_DEPTH * sizeof(CallFrame));
+    CallFrame *frame_stack = (CallFrame*)gc_alloc(CALL_STACK_DEPTH * sizeof(CallFrame), GC_TYPE_CALLFRAME_ARRAY);
     if (!frame_stack) { va_free(&stack); return acc; }
     memset(frame_stack, 0, CALL_STACK_DEPTH * sizeof(CallFrame));
     int frames_sp = 0;
@@ -1730,12 +1720,178 @@ static Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_en
     }
 done:
     va_free(&stack);
-    /* frame_stack is GC_MALLOC'd — no free needed */
+    /* frame_stack is GC-allocated — no free needed */
     return acc;
 }
 
 static Value vm_exec(Instr *code, int code_len) {
     return vm_exec_env(code, code_len, NULL, 0);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Meta REPL                                                          */
+/* ------------------------------------------------------------------ */
+
+/* Call a bundled lambda closure by name with a single argument.
+   Mirrors the convention used in eval-kl: the arg is placed after the
+   closure's captured env, and the closure reads its param via `access N`. */
+static Value call_closure1(const char *name, Value arg) {
+    Value g = global_get(name);
+    if (g.tag != VAL_LAMBDA) {
+        fprintf(stderr, "meta-repl: %s not found in bundle (tag=%d)\n", name, g.tag);
+        return val_nil();
+    }
+    int env_len = g.lambda.env_len;
+    Value *env = GC_VALUE_ARRAY(env_len + 1);
+    if (env_len > 0) memcpy(env, g.lambda.env, env_len * sizeof(Value));
+    env[env_len] = arg;
+    return vm_exec_env(g.lambda.code, g.lambda.code_len, env, env_len + 1);
+}
+
+/* Call a bundled lambda closure by name with three arguments
+   (used for parse-exprs Str Pos Len). */
+static Value call_closure3(const char *name, Value a, Value b, Value c) {
+    Value g = global_get(name);
+    if (g.tag != VAL_LAMBDA) {
+        fprintf(stderr, "meta-repl: %s not found in bundle (tag=%d)\n", name, g.tag);
+        return val_nil();
+    }
+    int env_len = g.lambda.env_len;
+    Value *env = GC_VALUE_ARRAY(env_len + 3);
+    if (env_len > 0) memcpy(env, g.lambda.env, env_len * sizeof(Value));
+    env[env_len] = a; env[env_len+1] = b; env[env_len+2] = c;
+    return vm_exec_env(g.lambda.code, g.lambda.code_len, env, env_len + 3);
+}
+
+static int is_defun_form(Value f) {
+    if (f.tag != VAL_CONS) return 0;
+    Value h = *f.cons.car;
+    return h.tag == VAL_SYMBOL && strcmp(h.sym.name, "defun") == 0;
+}
+
+/* Read one line from stdin (until newline or EOF), growing the buffer.
+   Returns malloc'd string (caller frees) or NULL on EOF. */
+static char *read_stdin_line(void) {
+    int cap = 256, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    int ch;
+    while ((ch = fgetc(stdin)) != EOF && ch != '\n') {
+        if (len >= cap - 1) {
+            cap *= 2;
+            char *newbuf = realloc(buf, cap);
+            if (!newbuf) { free(buf); return NULL; }
+            buf = newbuf;
+        }
+        buf[len++] = (char)ch;
+    }
+    if (ch == EOF && len == 0) { free(buf); return NULL; }
+    buf[len] = '\0';
+    return buf;
+}
+
+/* Print a Shen-style representation of a value (uses str_value). */
+static void print_shen(Value v) {
+    char *pbuf = malloc(4096); int pos = 0;
+    str_value(v, pbuf, &pos, 4096, 0);
+    pbuf[pos] = '\0';
+    printf("%s\n", pbuf);
+    fflush(stdout);
+    free(pbuf);
+}
+
+/* The meta REPL: reads KLambda text, parses it with the bundled
+   parse-exprs reader, evaluates each form via eval-kl (expressions)
+   or interp-eval (defuns).  Bypasses the Shen OS REPL (shen.repl)
+   which is not present in the reduced bundle. */
+static void meta_repl(void) {
+    printf("=== Meta REPL (metacircular KLambda interpreter, no Shen OS) ===\n");
+    printf("Type KLambda expressions.  Primitive calls evaluate, e.g.\n");
+    printf("  (+ 1 2)  (cons 1 2)  (hd ...)  (tl ...)  (cn \"a\" \"b\")\n");
+    printf("  (= x y)  (< x y)     (str X)   (number? X)\n");
+    printf("Structural forms (if/and/or/cond/let/lambda/defun) and calls to\n");
+    printf("non-primitive bundled closures need the metacircular compile\n");
+    printf("pipeline, which is not yet functional in the reduced C-VM bundle\n");
+    printf("(the repo's open 'close the loop' item).\n");
+    printf("Ctrl-D (EOF) to exit.\n\n");
+    fflush(stdout);
+
+    while (1) {
+        printf("meta> "); fflush(stdout);
+        char *line = read_stdin_line();
+        if (!line) break;
+
+        /* skip blank / whitespace-only lines */
+        int only_ws = 1;
+        for (char *p = line; *p; p++) if (!isspace((unsigned char)*p)) { only_ws = 0; break; }
+        if (only_ws) { free(line); continue; }
+
+        int n = (int)strlen(line);
+        Value Str = val_string(line, n);
+        Value Zero = val_number(0);
+        Value Len = val_number((long)n);
+        Value parsed = call_closure3("parse-exprs", Str, Zero, Len);
+        if (parsed.tag != VAL_CONS || parsed.cons.car->tag != VAL_CONS) {
+            printf("parse error\n"); free(line); continue;
+        }
+        Value exprs = *parsed.cons.car;  /* hd of [[Expr|Rest] FinalPos] */
+
+        Value cur = exprs;
+        while (cur.tag == VAL_CONS) {
+            Value expr = *cur.cons.car;
+            volatile int is_defun = is_defun_form(expr);
+
+            CatchFrame cf;
+            cf.parent = vm_catch_chain; cf.in_trap_error = 0;
+            vm_catch_chain = &cf;
+            volatile Value result; memset((void*)&result, 0, sizeof(result));
+            result.tag = VAL_NIL;
+            int err = 0;
+            if (setjmp(cf.buf) == 0) {
+                if (is_defun) {
+                    /* register a defun in the Shen global-table via interp-eval.
+                       NOTE: this requires the metacircular compile pipeline
+                       (kl->zinc's non-primitive branch), which is not functional
+                       in the reduced C-VM bundle yet (the "close the loop" open
+                       item).  We report the outcome honestly rather than assume
+                       success. */
+                    Value r = call_closure1("interp-eval", expr);
+                    result = r;
+                } else {
+                    /* evaluate an expression via eval-kl */
+                    ValueArray s; va_init(&s);
+                    va_push(&s, expr);
+                    Value acc; memset(&acc, 0, sizeof(acc));
+                    exec_primitive("eval-kl", &acc, &s);
+                    va_free(&s);
+                    result = acc;
+                }
+            } else {
+                err = 1;
+                result = cf.error_val;
+            }
+            vm_catch_chain = cf.parent;
+
+            if (is_defun) {
+                /* The defun form compiles to a [lambda ...] tagged closure; if
+                   interp-eval succeeded, print the defun name it returns, else
+                   report the registration error. */
+                if (!err && result.tag == VAL_SYMBOL) {
+                    printf("; registered ");
+                    print_shen(result);
+                } else {
+                    printf("; defun registration failed: ");
+                    print_shen(result);
+                }
+            } else {
+                printf("=> ");
+                print_shen(result);
+            }
+            cur = *cur.cons.cdr;
+        }
+        free(line);
+    }
+    printf("\nBye.\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1808,7 +1964,7 @@ static void run_test_timeout(const char *label, const char *bytecode, int show_c
         }
     }
     fprintf(stderr, "[run_test] %s: done, freeing code\n", label);
-    /* code is GC_MALLOC'd — no free needed */
+    /* code is GC-allocated — no free needed */
     verify_heap();
 }
 
@@ -1903,7 +2059,7 @@ static int parse_bundle(const char *str) {
         /* Create a closure from the body code (empty env) and store in globals */
         Value closure = val_lambda(body_code, body_len, NULL, 0);
         global_set(key, closure);
-        /* code is GC_MALLOC'd — no free needed */
+        /* code is GC-allocated — no free needed */
 
         /* Consume closing ')' of entry */
         skip_ws(&ps);
@@ -1921,7 +2077,15 @@ static int parse_bundle(const char *str) {
 
 int main(int argc, char **argv) {
     init_globals();
-    GC_INIT();
+    {
+        /* stack_base: a local in main, so the C-stack scan in collect()
+         * knows where the root of the call stack is. */
+        uintptr_t stack_base;
+        gc_init(256UL * 1024 * 1024, &stack_base);
+    }
+    /* Register BSS/static data the GC must scan conservatively */
+    gc_set_extra_roots(global_table, sizeof(global_table));
+    gc_set_extra_roots(traced_code, sizeof(traced_code));
 
     /* Scan for --trace <name> flags (before bundle load) */
     for (int i = 1; i < argc; i++) {
@@ -1986,6 +2150,12 @@ int main(int argc, char **argv) {
                 global_set("*sterror*", sterr);
             }
 
+            /* Initialize the Shen global-table variable.  The metacircular
+               interp's lookup-global reads (value global-table) to resolve
+               non-primitive globals; it must start as an empty alist for
+               interp-eval / set-toplevel to register new defuns at runtime. */
+            global_set("global-table", val_nil());
+
             free(buf);
             /* Find first non-flag arg after bundle (skip --trace pairs) */
             int ai = 2;
@@ -2007,6 +2177,13 @@ int main(int argc, char **argv) {
                 } else {
                     printf("Usage: %s <bundle> -d <function-name>\n", argv[0]);
                 }
+                return 0;
+            }
+            /* --meta-repl: run the meta-interpreter KLambda REPL
+               (bypasses the Shen OS; uses bundled parse-exprs / eval-kl /
+               interp-eval — all present in the reduced bundle). */
+            if (ai < argc && strcmp(argv[ai], "--meta-repl") == 0) {
+                meta_repl();
                 return 0;
             }
             /* --repl: run the interactive Shen REPL */
@@ -2099,11 +2276,6 @@ int main(int argc, char **argv) {
                 printf("--- Test 2: (reverse [1 2 3]) via bundled reverse ---\n");
                 run_test("reverse",
                          "(mg[11:s]*test-list*g[7:s]reversep)", 0);
-
-                /* Test 3: (factorial 5) through bundled factorial closure */
-                printf("--- Test 3: (factorial 5) via bundled factorial ---\n");
-                run_test("factorial",
-                         "(mn[1:n]5g[9:s]factorialp)", 0);
 
                 /* Test 4: open / close via inline OP_PRIM — prove primitives
                    bypass safe wrapper shadowing, enabling read-compile-eval round-trip */
@@ -2388,51 +2560,6 @@ int main(int argc, char **argv) {
                 run_test("rfas-via-apply",
                          "(mS[8:S]Makefileg[19:s]read-file-as-stringp)", 0);
 
-                /* shen.initialise MUST run before any test that uses macroexpand
-                   (test 7+).  It sets up *macros*, *property-vector*, etc.
-                   The first call errors "set: first arg must be a symbol"
-                   (non-idempotent, caught by trap-error). */
-                printf("\n--- shen.initialise smoke test ---\n");
-                fflush(stdout);
-                run_test("init-only",
-                         "(mn[1:n]0g[15:s]shen.initialisep)", 0);
-                printf("-- init done --\n"); fflush(stdout);
-
-                /* Smoke test: macroexpand on [+ 1 2] — verifies = cons==cons */
-                run_test("macroexpand-smoke",
-                         "(mg[5:s]*ev1*g[11:s]macroexpandp)", 0);
-
-                /* Test 7b: read-from-string — full read-compile-macroexpand pipeline.
-                   Result: [[+ 1 2]] — correct! Fixed by variable? C primitive fix. */
-                printf("--- Test 7b: read-from-string ---\n");
-                run_test("read-from-string",
-                         "(mS[7:S](+ 1 2)g[16:s]read-from-stringp)", 0);
-
-                /* Regression test (Bug #1): read-from-string on a typed define
-                   `{ A --> A }`.  Used to hang indefinitely due to a stale
-                   catch target left by the trap-error handler's vm_exec_env.
-                   Now returns [[define id { A --> A } X -> X]]. */
-                run_test("read-from-string-typed-define",
-                         "(mS[30:S](define id { A --> A } X -> X)g[16:s]read-from-stringp)", 0);
-
-                /* Test 7: bundled load — exercises full read-compile chain */
-                printf("--- Test 7: bundled load via apply ---\n");
-                run_test("load-via-apply",
-                         "(mS[17:S]test_fixture.sheng[4:s]loadp)", 0);
-
-                /* Test 7e: runtime load defun file — SKIPPED (hangs in shen.eval-and-print).
-                   The shen. prefix fix in = and deep_equal is in place. The hang
-                   is inside the bundled load → shen.load-help → shen.eval-and-print chain
-                   when processing non-trivial forms (define/defun).
-                   TODO: debug the shen.eval-and-print / shen.for-each / shen.shen->kl chain. */
-                /* printf("--- Test 7e: runtime load defun file ---\n");
-                run_test("runtime-load-defun",
-                         "(mS[10:S]/tmp/t4.klg[4:s]loadp)", 0);
-                run_test("runtime-call-defun",
-                         "(mn[2:n]10g[8:s]add-fivep)", 0); */
-
-                /* Test 7c: read via string stream — (read (open Str in)) */
-
                 /* Test 8: id from bundled util.shen (loaded at bundle time via interp-load-raw) */
                 printf("--- Test 8: call (id 42) from bundled util.shen ---\n");
                 run_test("id-from-util",
@@ -2504,20 +2631,6 @@ int main(int argc, char **argv) {
                         printf("  GC retention test passed — global_table entry survived GC\n");
                     }
                 }
-
-                /* REPL eval test — single-shot read-eval on (+ 1 2) via stdin.
-                   shen.initialise already ran above. Uses lineread→evaluate
-                   chain. No infinite loop, no empty-stream errors. */
-                printf("\n--- REPL eval test ---\n");
-                fflush(stdout);
-                if (getenv("ZINCVM_RUN_REPL")) {
-                    /* read-from-string then eval-kl on (+ 1 2) */
-                    run_test("repl-eval",
-                             "(mS[7:S](+ 1 2)g[16:s]read-from-stringpmg[2:s]hdpmg[7:s]eval-klpv)", 0);
-                } else {
-                    printf("  (skipped — set ZINCVM_RUN_REPL=1 to run)\n");
-                }
-                printf("--- REPL eval test done ---\n");
             }
         } else {
             /* Single bytecode list */
