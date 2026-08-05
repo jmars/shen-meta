@@ -1,11 +1,11 @@
 /*
  * gc.c — Cheney mostly-copying collector (Phase 1: single-space)
  *
- * Adapted from vendor/bartlett-gc/gc.c — replaces the uniform pointer-count
- * scan with a type-tag dispatch so the scavenger calls typed scanning
- * functions (gc_scan_value / gc_evacuate) provided by zincvm.c.
+ * Replaces the uniform pointer-count scan of a Bartlett-style collector with
+ * a type-tag dispatch so the scavenger calls typed scanning functions
+ * (gc_scan_value / gc_evacuate) provided by zincvm.c.
  *
- * Key differences from Bartlett:
+ * Design notes:
  * - HEADER_PTRS repurposed as HEADER_TYPE (0-4, see gc.h)
  * - gc_alloc zeros the entire object body (not just pointer slots)
  * - No grow/shrink — fixed heap; OOM prints diagnostic and exits
@@ -41,6 +41,14 @@
 #define OBJECT    0
 #define CONTINUED 1
 
+/* Nursery: a fixed 2 MB region at the start of the heap reserved for
+ * generational collection (Phase 2).  Pages are tagged space==NURSERY
+ * and are never selected by allocatepage's free-page scan.  Allocation
+ * still goes exclusively through the old-gen path. */
+#define NURSERY         3
+#define NURSERY_BYTES   (2 * 1024 * 1024)
+#define NURSERY_PAGES   (NURSERY_BYTES / PAGEBYTES)
+
 #define STACKINC  sizeof(uintptr_t)
 
 /* ---- static state ------------------------------------------------- */
@@ -55,6 +63,10 @@ static uintptr_t  freewords;
 static uintptr_t *freep;
 static uintptr_t  allocatedpages;
 static uintptr_t  freepage;
+
+/* Nursery region bounds (page indices).  Reserved in gc_init;
+ * allocation still goes exclusively through the old-gen path. */
+static uintptr_t  nursery_first, nursery_last;
 
 /* page metadata (indexed by page number; allocated relative to firstheappage) */
 static uintptr_t *space;   /* 0=free, 1=semi-space-1, 2=semi-space-2 */
@@ -95,6 +107,21 @@ static void page_set_pinned(uintptr_t page) {
 static void pinned_clear_all(void) {
     if (pinned_bits)
         memset(pinned_bits, 0, pinned_bits_words * sizeof(uint64_t));
+}
+
+/* ---- nursery / old-gen predicates --------------------------------- */
+
+int gc_in_nursery(void *p) {
+    uintptr_t page = GCP_to_PAGE(p);
+    return (page >= nursery_first && page <= nursery_last);
+}
+
+/* gc_in_oldgen: true iff p is in the old-generation region
+ * (past the nursery) AND its page is in current_space. */
+static inline int gc_in_oldgen(void *p) {
+    uintptr_t page = GCP_to_PAGE(p);
+    return (page > nursery_last && page <= lastheappage &&
+            space[page] == current_space);
 }
 
 /* ---- extra roots -------------------------------------------------- */
@@ -363,7 +390,7 @@ static void *gcalloc_internal(size_t bytes, int type_tag) {
 /* ---- dynamic heap growth / shrinkage (within the VAS reservation) -- */
 
 /* Grow the logical heap by doubling.  Requires the mmap reservation in
- * gc_init to be large enough (Bartlett reserves 4GB of VAS so growth is a
+ * gc_init to be large enough (4GB of VAS is reserved so growth is a
  * pure bookkeeping step, no mremap).  Creates fresh space==0 pages that
  * the collector can use during a scavenge. */
 static int grow_heap(uintptr_t pages_needed) {
@@ -442,10 +469,12 @@ retry:
     allpages = heappages;
 
     /* Scan cyclically from freepage looking for `pages` consecutive
-     * free (not in current_space, not in next_space, not pinned) pages. */
+     * free (not in current_space, not in next_space, not nursery,
+     * not pinned) pages. */
     while (allpages--) {
         if (space[freepage] != current_space &&
             space[freepage] != next_space &&
+            space[freepage] != NURSERY &&
             !page_is_pinned(freepage))
         {
             if (free++ == 0)
@@ -604,7 +633,7 @@ void gc_init(uintptr_t heap_size, void *stack_base) {
         exit(1);
     }
 
-    /* Index them relative to firstheappage (Bartlett's trick) */
+    /* Index them relative to firstheappage */
     space      = space_ptr - firstheappage;
     gc_link    = link_ptr  - firstheappage;
     type_page  = type_ptr  - firstheappage;
@@ -619,11 +648,21 @@ void gc_init(uintptr_t heap_size, void *stack_base) {
         type_page[i] = 0;
     }
 
+    /* Carve out the nursery region at the start of the heap.
+     * Pages are tagged NURSERY and are never selected by
+     * allocatepage's free-page scan.  Allocation still goes
+     * exclusively through the old-gen path — the nursery is
+     * reserved but not yet used for bump allocation. */
+    nursery_first = firstheappage;
+    nursery_last  = firstheappage + NURSERY_PAGES - 1;
+    for (i = nursery_first; i <= nursery_last; i++)
+        space[i] = NURSERY;
+
     stackbase = (uintptr_t *)stack_base;
 
     current_space = 1;
     next_space    = 1;
-    freepage      = firstheappage;
+    freepage      = firstheappage + NURSERY_PAGES;   /* start after nursery */
     allocatedpages = 0;
     queue_head     = 0;
 

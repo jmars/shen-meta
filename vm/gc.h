@@ -65,4 +65,9 @@ void gc_scan_value(Value *v);
  * Used by gc_evacuate.  NOT called directly by user code. */
 void *gc_move(void *p);
 
+/* Nursery predicate: true iff p points into the nursery region.
+ * Used by the write barrier (future step) to detect old→nursery
+ * pointer stores. */
+int gc_in_nursery(void *p);
+
 #endif /* ZINCVM_GC_H */
