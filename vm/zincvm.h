@@ -78,6 +78,7 @@ extern Instr *traced_code[MAX_TRACED];
 
 Value val_number(long n);
 Value val_string(const char *data, int len);
+Value val_string_from(Value *src_slot, int off, int len);
 Value val_symbol(const char *name);
 Value val_boolean(int b);
 Value val_cons(Value car, Value cdr);

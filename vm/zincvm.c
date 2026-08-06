@@ -139,6 +139,19 @@ Value val_string(const char *data, int len) {
     v.str.data[len] = '\0';
     v.str.len = len; return v;
 }
+Value val_string_from(Value *src_slot, int off, int len) {
+    /* Pins src_slot so its str.data survives the GC_STR alloc.
+       For string/error primitives that read a popped Value's interior
+       pointer across a gc_alloc_atomic call. */
+    gc_root_push_value(src_slot);
+    char *dst = (char*)gc_alloc_atomic(len + 1);
+    memcpy(dst, src_slot->str.data + off, len);
+    dst[len] = '\0';
+    gc_root_pop();
+    Value v; memset(&v, 0, sizeof(v));
+    v.tag = VAL_STRING; v.str.data = dst; v.str.len = len;
+    return v;
+}
 Value val_symbol(const char *name) {
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_SYMBOL; v.sym.name = strdup(name); return v;
@@ -148,18 +161,19 @@ Value val_boolean(int b) {
     v.tag = VAL_BOOLEAN; v.boolean = b; return v;
 }
 Value val_cons(Value car, Value cdr) {
-    /* Allocate both cells before writing — prevents GC from seeing a
-     * half-constructed cons if the second gc_alloc triggers a collection.
-     * The first cell's pointer must remain a conservative C-stack root
-     * across the second allocation, so keep it in a volatile slot (always
-     * resident on the stack, where the collector's scan finds and pins its
-     * page).  Pinning means the first cell never moves, so its address stays
-     * valid after the second gc_alloc. */
+    /* Pin car and cdr so their interior pointers survive the two gc_alloc
+     * calls below.  The existing volatile car_root mechanism is still needed
+     * for the conservative scan to find car_cell across the second alloc;
+     * the precise-root pins are additive and cover the by-value args. */
+    gc_root_push_value(&car);
+    gc_root_push_value(&cdr);
     Value *car_cell = (Value*)gc_alloc(sizeof(Value), GC_TYPE_VALUE);
     Value *volatile car_root = car_cell;
     Value *cdr_cell = (Value*)gc_alloc(sizeof(Value), GC_TYPE_VALUE);
     *car_root = car;
     *cdr_cell = cdr;
+    gc_root_pop();
+    gc_root_pop();
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_CONS; v.cons.car = car_root; v.cons.cdr = cdr_cell;
     return v;
@@ -810,12 +824,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     if (strcmp(name, "tlstr") == 0) {
         Value a = va_pop(stack);
         if (a.tag != VAL_STRING || a.str.len < 1) PRIM_TYPE_ERROR("tlstr on empty/non-string");
-        *acc = val_string(a.str.data + 1, a.str.len - 1); return 0;
+        *acc = val_string_from(&a, 1, a.str.len - 1); return 0;
     }
     if (strcmp(name, "hdstr") == 0) {
         Value a = va_pop(stack);
         if (a.tag != VAL_STRING || a.str.len < 1) PRIM_TYPE_ERROR("hdstr on empty/non-string");
-        *acc = val_string(a.str.data, 1); return 0;
+        *acc = val_string_from(&a, 0, 1); return 0;
     }
     if (strcmp(name, "pos") == 0) {
         Value a1 = va_pop(stack), a2 = va_pop(stack);
@@ -839,7 +853,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             if (vm_catch_chain && vm_catch_chain->in_trap_error)
                 vm_throw("pos out of bounds");
             *acc = val_string("", 0);
-        } else *acc = val_string(a1.str.data + pl, 1);
+        } else *acc = val_string_from(&a1, pl, 1);
         return 0;
     }
 
@@ -939,9 +953,13 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     }
     if (strcmp(name, "error-to-string") == 0) {
         Value a = va_pop(stack);
+        /* Pin a so a.error.message survives the GC_STR alloc inside
+           val_string (4a precise-root site). */
+        gc_root_push_value(&a);
         if (a.tag == VAL_ERROR) *acc = val_string(a.error.message, strlen(a.error.message));
         else if (a.tag == VAL_STRING) *acc = a;
         else *acc = val_string("unknown error", 13);
+        gc_root_pop();
         return 0;
     }
     if (strcmp(name, "trap-error") == 0) {
@@ -951,6 +969,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            must re-read handler from the stack, not from a cached register. */
         volatile Value body = va_pop(stack);
         volatile Value handler = va_pop(stack);
+        /* Pin body and handler so their interior pointers (lambda.env,
+           lambda.code) survive the GC_VALUE_ARRAY calls below (4a precise-root).
+           Cast away volatile — the shadow stack only reads, never writes. */
+        gc_root_push_value((Value*)&body);
+        gc_root_push_value((Value*)&handler);
         if (handler.tag != VAL_LAMBDA) PRIM_TYPE_ERROR("trap-error handler not fn");
         CatchFrame cf;
         cf.parent = vm_catch_chain;
@@ -972,6 +995,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             }
             else *acc = body;
             vm_catch_chain = cf.parent;
+            gc_root_pop();  /* handler */
+            gc_root_pop();  /* body */
             return 0;
         } else {
             /* Error path: unlink FIRST so handler's simple-error propagates
@@ -985,6 +1010,8 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             henv[handler.lambda.env_len] = err;
             handler.lambda.env = henv; handler.lambda.env_len++;
             *acc = vm_exec_env(hc, hl, handler.lambda.env, handler.lambda.env_len);
+            gc_root_pop();  /* handler */
+            gc_root_pop();  /* body */
             return 0;
         }
     }
@@ -1167,13 +1194,18 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         cf.in_trap_error = 0;
         vm_catch_chain = &cf;
         volatile Value result = a;  /* default: identity; volatile so the longjmp path re-reads from the stack */
+        /* Watermark for longjmp unwind: any roots pushed inside the setjmp==0
+           block must be truncated on the error path (4a precise-root). */
+        volatile size_t eval_kl_wm = gc_root_watermark();
         if (setjmp(cf.buf) == 0) {
 
         /* Marshal native Value → Shen tagged form */
         Value tagged = marshal_to_tagged(a);
+        gc_root_push_value(&tagged);
 
         /* Step 1: extract-kl — tagged form → raw KLambda */
         Value extkl = global_get("extract-kl");
+        gc_root_push_value(&extkl);
         if (extkl.tag != VAL_LAMBDA) {
             fprintf(stderr, "runtime: eval-kl: extract-kl not found in bundle\n");
             goto done;
@@ -1184,9 +1216,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         env1[extkl.lambda.env_len] = tagged;
         Value klambda = vm_exec_env(extkl.lambda.code, extkl.lambda.code_len,
                                      env1, extkl.lambda.env_len + 1);
+        gc_root_push_value(&klambda);
 
         /* Step 2: kl->zinc — raw KLambda → ZINC bytecode */
         Value klzinc = global_get("kl->zinc");
+        gc_root_push_value(&klzinc);
         if (klzinc.tag != VAL_LAMBDA) {
             fprintf(stderr, "runtime: eval-kl: kl->zinc not found in bundle\n");
             goto done;
@@ -1197,9 +1231,11 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         env2[klzinc.lambda.env_len] = klambda;
         Value zinc_code = vm_exec_env(klzinc.lambda.code, klzinc.lambda.code_len,
                                        env2, klzinc.lambda.env_len + 1);
+        gc_root_push_value(&zinc_code);
 
         /* Step 3: toplevel-interp — ZINC bytecode → tagged result */
         Value tli = global_get("toplevel-interp");
+        gc_root_push_value(&tli);
         if (tli.tag != VAL_LAMBDA) {
             fprintf(stderr, "runtime: eval-kl: toplevel-interp not found in bundle\n");
             goto done;
@@ -1210,16 +1246,19 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         env3[tli.lambda.env_len] = zinc_code;
         Value tagged_result = vm_exec_env(tli.lambda.code, tli.lambda.code_len,
                                            env3, tli.lambda.env_len + 1);
+        gc_root_push_value(&tagged_result);
 
         /* Step 4: demarshal tagged result → native Value */
         result = demarshal_from_tagged(tagged_result);
 
         done:
+        gc_root_pop_to(eval_kl_wm);
         vm_catch_chain = cf.parent;
         *acc = result;
         return 0;
         } /* end setjmp == 0 block */
-        /* Error path: unlink, return identity. */
+        /* Error path: unlink, truncate any roots pushed before longjmp. */
+        gc_root_pop_to(eval_kl_wm);
         vm_catch_chain = cf.parent;
         *acc = result;
         return 0;
