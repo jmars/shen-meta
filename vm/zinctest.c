@@ -439,6 +439,130 @@ static int gc_nursery_tests(void) {
     return failed;
 }
 
+/* ---- GC Phase 4a churn test: precise-root missed-root detector ----
+ * A deep cons tree is built through the NORMAL nursery path (real
+ * val_cons) and held ONLY by a precise root (gc_root_push_value).  After
+ * the eventual flip (conservative C-stack scan removed), this root is the
+ * sole reason the tree survives.  Repeated transient nursery allocations
+ * + forced scavenges/full collects must never reclaim a reachable node.
+ * Deterministic (fixed LCG seed).  This is the crux detector for missed
+ * roots under precise-authoritative collection. */
+static unsigned long churn_lcg = 0xDEADBEEFUL;
+static unsigned long churn_lcg_next(void) {
+    churn_lcg = churn_lcg * 1103515245UL + 12345UL;
+    return churn_lcg & 0x7FFFFFFFUL;
+}
+
+static int gc_root_churn_test(void) {
+    int failed = 0;
+    const int node_count = 5000;
+    printf("\n=== GC Phase 4a churn test: %d-node nursery-allocated cons tree, 200K iters ===\n",
+           node_count);
+    fflush(stdout);
+
+    /* Build the persistent tree bottom-up through the nursery (real val_cons),
+     * head held only on the precise-root shadow stack. */
+    Value root = val_nil();
+    gc_root_push_value(&root);
+    for (int i = node_count - 1; i >= 0; i--)
+        root = val_cons(val_number(i), root);
+
+    /* Verify the freshly-built tree before churn. */
+    {
+        int count = 0; Value cur = root;
+        while (cur.tag == VAL_CONS) {
+            if (cur.cons.car->tag != VAL_NUMBER || cur.cons.car->number != count) {
+                fprintf(stderr, "[churn] initial tree corrupt at node %d (tag=%d num=%ld)\n",
+                        count, cur.cons.car ? (int)cur.cons.car->tag : -1,
+                        cur.cons.car ? (long)cur.cons.car->number : -1);
+                gc_root_pop();
+                return 1;
+            }
+            cur = *cur.cons.cdr; count++;
+        }
+        if (count != node_count) {
+            printf("  gc_root_churn_test: initial count mismatch: %d vs %d\n", count, node_count);
+            gc_root_pop();
+            return 1;
+        }
+        printf("  initial tree verified: %d nodes\n", count);
+    }
+
+    long sv0 = gc_nursery_scavenge_count;
+    long fc0 = gc_full_collect_count;
+
+    for (int iter = 0; iter < 200000; iter++) {
+        /* Transient nursery garbage: ~3 dead cons cells per iteration. */
+        Value g1 = val_cons(val_number(churn_lcg_next()), val_nil());
+        Value g2 = val_cons(val_number(churn_lcg_next()), g1);
+        Value g3 = val_cons(val_number(churn_lcg_next()), g2);
+        (void)g3;
+
+        /* Force a nursery scavenge every ~2000 iterations. */
+        if (iter % 2000 == 0) {
+            long cap = 5000;
+            while (gc_nursery_scavenge_count < sv0 + 1 + iter/2000 && cap-- > 0) {
+                char *p = (char *)gc_alloc_atomic(64);
+                (void)p;
+            }
+        }
+
+        /* Force a full collect occasionally (semi-space swap survival). */
+        if (iter % 100000 == 0 && iter > 0) {
+            const size_t CHUNK = 4UL * 1024 * 1024;
+            for (int fi = 0; fi < 2; fi++) {
+                char *blob = (char *)gc_alloc_oldgen(CHUNK, GC_TYPE_RAW);
+                (void)blob;
+            }
+        }
+
+        /* Walk + verify the whole tree every 10000 iterations. */
+        if (iter % 10000 == 0 && iter > 0) {
+            int count = 0; Value cur = root;
+            while (cur.tag == VAL_CONS) {
+                if (cur.cons.car->tag != VAL_NUMBER || cur.cons.car->number != count) {
+                    printf("  gc_root_churn_test: tree corrupt at iter %d, node %d "
+                           "(expected %d, tag=%d)\n", iter, count, count,
+                           cur.cons.car ? (int)cur.cons.car->tag : -1);
+                    failed = 1; goto done;
+                }
+                cur = *cur.cons.cdr; count++;
+            }
+            if (count != node_count) {
+                printf("  gc_root_churn_test: tree truncated at iter %d, got %d nodes\n",
+                       iter, count);
+                failed = 1; goto done;
+            }
+        }
+    }
+
+done:
+    /* Final verification. */
+    if (!failed) {
+        int count = 0; Value cur = root;
+        while (cur.tag == VAL_CONS) {
+            if (cur.cons.car->tag != VAL_NUMBER || cur.cons.car->number != count) {
+                printf("  gc_root_churn_test: final verification failed at node %d\n", count);
+                failed = 1; break;
+            }
+            cur = *cur.cons.cdr; count++;
+        }
+        if (!failed && count != node_count) {
+            printf("  gc_root_churn_test: final count mismatch: %d vs %d\n", count, node_count);
+            failed = 1;
+        }
+    }
+
+    long total_collections = (gc_nursery_scavenge_count - sv0)
+                           + (gc_full_collect_count - fc0);
+    gc_root_pop();  /* root */
+
+    printf(failed ? "  gc_root_churn_test FAILED\n"
+                  : "  gc_root_churn_test PASSED — tree intact after 200K iters, %ld collections\n",
+           total_collections);
+    return failed;
+}
+
 /* ------------------------------------------------------------------ */
 /*  main — test driver                                                 */
 /* ------------------------------------------------------------------ */
@@ -843,6 +967,12 @@ int main(int argc, char **argv) {
 
     /* No args: built-in bytecode tests */
     printf("=== ZINC Bytecode VM with 37 Primitives ===\n\n");
+
+    /* GC Phase 4a: precise-root missed-root churn detector (nursery path).
+       Runs here on a FRESH nursery (before the built-in tests allocate), so
+       the persistent tree is built through the nursery bump allocator — the
+       path the flip depends on. */
+    gc_root_churn_test();
 
     /* CONVENTION: Hand-written bytecode MUST push args in RTL order
        (rightmost Shen arg pushed first, leftmost arg pushed last/on top).
