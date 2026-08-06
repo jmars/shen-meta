@@ -2121,6 +2121,8 @@ int main(int argc, char **argv) {
     /* Register BSS/static data the GC must scan conservatively */
     gc_set_extra_roots(global_table, sizeof(global_table));
     gc_set_extra_roots(traced_code, sizeof(traced_code));
+    gc_register_global_table(global_table, &global_table_len);
+    gc_register_traced_code(traced_code, &num_traced);
 
     /* Scan for --trace <name> flags (before bundle load) */
     for (int i = 1; i < argc; i++) {
