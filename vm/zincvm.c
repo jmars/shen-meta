@@ -1592,8 +1592,10 @@ int trace_counter = -1;
 int trace_limit = 0;
 
 Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) {
+    gc_root_push_ptr((void**)&code);      /* root code across va_init/GC_VALUE_ARRAY allocs */
     ValueArray stack; va_init(&stack);
     Value *env = NULL; int env_len = 0, env_cap = 0;
+    gc_root_push_ptr((void**)&init_env);  /* root init_env across GC_VALUE_ARRAY below */
     if (init_env_len > 0 && init_env) {
         env_cap = init_env_len;
         env = GC_VALUE_ARRAY(env_cap);
@@ -1602,7 +1604,10 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
     }
     Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
     CallFrame *frame_stack = (CallFrame*)gc_alloc_oldgen(CALL_STACK_DEPTH * sizeof(CallFrame), GC_TYPE_CALLFRAME_ARRAY);
-    if (!frame_stack) { va_free(&stack); return acc; }
+    if (!frame_stack) {
+        gc_root_pop(); gc_root_pop();      /* init_env, code */
+        va_free(&stack); return acc;
+    }
     memset(frame_stack, 0, CALL_STACK_DEPTH * sizeof(CallFrame));
     int frames_sp = 0;
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
@@ -1847,7 +1852,9 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
         }
     }
 done:
+    /* 7 pops: code + init_env + acc + env + stack.data + cur_code + frame_stack */
     gc_root_pop(); gc_root_pop(); gc_root_pop(); gc_root_pop(); gc_root_pop();
+    gc_root_pop(); gc_root_pop();
     va_free(&stack);
     /* frame_stack is GC-allocated — no free needed */
     return acc;
