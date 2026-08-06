@@ -42,13 +42,13 @@ static void run_test_timeout(const char *label, const char *bytecode, int show_c
     fprintf(stderr, "[run_test] %s: parsing...\n", label);
     printf("--- %s ---\n", label); fflush(stdout);
     printf("Bytecode: %s\n", bytecode); fflush(stdout);
-    Instr *code = NULL;
-    int len = parse_bytecode(bytecode, &code);
+    volatile Instr *code = NULL;
+    int len = parse_bytecode(bytecode, (Instr **)&code);
     if (len <= 0 || code == NULL) { printf("PARSE FAILED\n\n"); fflush(stdout); return; }
     printf("Parsed %d instructions:\n", len); fflush(stdout);
-    if (show_code) print_instr(code, len, 0);
+    if (show_code) print_instr((Instr *)code, len, 0);
     printf("\n"); fflush(stdout);
-    resolve_jumps(code, len);
+    resolve_jumps((Instr *)code, len);
     fprintf(stderr, "[run_test] %s: executing...\n", label);
     if (timeout_sec > 0) {
         signal(SIGALRM, alarm_handler);
@@ -68,7 +68,7 @@ static void run_test_timeout(const char *label, const char *bytecode, int show_c
             alarm(0);
             printf("ERROR CAUGHT: "); print_value(cf.error_val); printf("\n\n"); fflush(stdout);
         } else {
-            Value result = vm_exec(code, len);
+            Value result = vm_exec((Instr *)code, len);
             vm_catch_chain = cf.parent;
             alarm(0);
             printf("Result: "); print_value(result); printf("\n\n"); fflush(stdout);

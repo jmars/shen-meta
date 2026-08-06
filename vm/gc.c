@@ -383,6 +383,26 @@ static void collect(void) {
         }
     }
 
+#ifdef GC_ROOTS_DIFF
+    /* ---- conservative-diff instrumentation ----
+     * Count pinned pages (P_cons) after the conservative root scan.
+     * In later phases (4a.3-4a.6) this will be compared against the
+     * set of pages reachable from precise roots (P_prec) to assert
+     * P_cons ⊆ P_prec — i.e., the precise roots cover everything
+     * the conservative scan found. */
+    {
+        uintptr_t pinned_count = 0;
+        if (pinned_bits) {
+            for (size_t bi = 0; bi < pinned_bits_words; bi++) {
+                uint64_t w = pinned_bits[bi];
+                while (w) { pinned_count += (w & 1); w >>= 1; }
+            }
+        }
+        fprintf(stderr, "GC_ROOTS_DIFF: collect(): conservative pinned pages = %zu\n",
+                (size_t)pinned_count);
+    }
+#endif
+
     /* ---- Cheney scavenge ---- */
 
     while (queue_head != 0) {
@@ -1188,3 +1208,14 @@ void *gc_realloc(void *old, size_t old_bytes, size_t new_bytes, int type_tag) {
     }
     return newp;
 }
+
+/* ---- precise-root API stubs (Phase 3/4 — implemented in 4a.1) ----- */
+
+void gc_root_push_ptr(void **slot)           { (void)slot; /* TODO: 4a.1 */ }
+void gc_root_push_value(Value *vslot)        { (void)vslot; /* TODO: 4a.1 */ }
+void gc_root_push_value_array(Value *base, int *np) { (void)base; (void)np; /* TODO: 4a.1 */ }
+void gc_root_pop(void)                       { /* TODO: 4a.1 */ }
+void gc_root_pop_to(size_t watermark)        { (void)watermark; /* TODO: 4a.1 */ }
+size_t gc_root_watermark(void)               { return 0; /* TODO: 4a.1 */ }
+void gc_register_global_table(void *table, int *len_p) { (void)table; (void)len_p; /* TODO: 4a.1 */ }
+void gc_register_traced_code(Instr **arr, int *np) { (void)arr; (void)np; /* TODO: 4a.1 */ }
