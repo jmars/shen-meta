@@ -201,11 +201,68 @@ guard so `allocatepage` doesn't recursively full-collect during a scavenge;
 (non-pinned) case; (4) persistent pinned bitmap — clear only nursery bits across
 scavenges, all bits at full collect.
 
-### Phase 3 — BiBOP old-gen + compaction (optional, v2)
-- [ ] Size classes: `Value` (40B), `Value[]`, `Instr[]`, `char[]`.
-- [ ] Page-per-size-class, free-list per page, sliding compaction.
-- [ ] Full-heap pointer update via `scan_value`.
-Defer until Phases 1-2 are stable.
+### Phase 3/4 — Precise roots → compaction → BiBOP (multi-phase)
+
+**Decision (2026-08-06):** Phase 3's full BiBOP + sliding compaction is NOT
+sound under the conservative, handle-free root model. `pin_page` exists because
+the mutator holds raw `Value*` C pointers with no indirection the collector can
+rewrite — a sliding compactor that moves a page reachable from an ambiguous
+stack word would "correct" a random word into garbage. So the correct path is to
+**convert the root set from conservative to precise first** (Phase 4a), then
+compaction becomes possible (4b), then BiBOP size-class pages pay off (4c).
+
+**Phase 4a — precise roots (DONE, committed).** The whole mutator root surface
+is converted to a typed shadow stack, so the conservative C-stack scan can be
+deleted without losing any root:
+
+- **Shadow stack** (`gc.c`): process-global growable `malloc`'d array of
+  `GcRoot { RootKind kind; void *slot; int *np; }`. `ROOT_PTR` (a single
+  pointer slot), `ROOT_VALUE` (a by-value `Value`, interior pointers rewritten),
+  `ROOT_VALUE_ARRAY` (N by-value `Value`s). O(1) `gc_root_push_*`/`pop`, plus
+  `gc_root_watermark`/`gc_root_pop_to` for longjmp unwind. Lives in C heap, never
+  GC-scanned.
+- **Rooted call sites**: `vm_exec_env` (5-entry frame block — `acc`,
+  `env`, `stack.data`, `cur_code`, `frame_stack` — pushed once at entry, popped
+  at `done:`; `argbuf` transient around each apply/appterm); `exec_primitive`
+  (`val_cons` car+cdr, `trap-error` body+handler, `eval-kl` 7 intermediates +
+  watermark, `error-to-string`, new `val_string_from` helper for tlstr/hdstr/pos);
+  load/init (`call_closure1/3`, `--repl`, self-hosting tests).
+- **Typed walkers** replace the 2 conservative `extra_roots`: `global_table`
+  scans only `.closure` (skips the strdup'd `.name`), `traced_code` scans each
+  `Instr*`. Registered via `gc_register_global_table`/`gc_register_traced_code`.
+- **`parse_body` rewritten** to eliminate the `gc_realloc` hazard: it now parses
+  into a C-heap scratch buffer (VAL_STRING operands `malloc`'d in scratch mode)
+  and does ONE final `gc_alloc(GC_TYPE_INSTR_ARRAY)` + bulk copy + re-wrap
+  strings to `GC_STR`. `gc_realloc` on a GC-allocated Instr array reads `old` BY
+  VALUE after an internal collect — stale interior pointers once objects move.
+- **Sanitizer**: ASan cannot link under cosmocc/Cosmopolitan (no `libasan`);
+  the sanitizer gate is **UBSan** (`-fsanitize=undefined`), which caught a real
+  `env_push` NULL→memcpy bug.
+- **Gate** (all pass): 34 release + 39 debug + 34 UBSan + reduced bundle
+  (821 closures, nursery 7/7, stress 50k, retention) + full OS bundle
+  (1643 closures, debug VM). Conservative scan is STILL the authoritative root
+  set during 4a (precise roots are additive-pinning, never evacuate); the flip
+  to precise-authoritative is the deferred 4a.6.
+- **Instrumentation**: `GC_ROOTS_DIFF` (debug build flag) reports conservative
+  pinned pages + precise root count + typed-walker sizes. `verify_heap` no-op.
+
+**Phase 4a.6 — flip (PENDING).** Delete the conservative C-stack scan in
+`collect()`/`collect_nursery()`; make `gc_scan_roots` + typed walkers the sole
+authoritative root set. Gate: `GC_ROOTS_DIFF` must show `P_cons ⊆ P_prec` (empty
+diff) across the whole gate before this lands. This is the highest-risk step.
+
+**Phase 4b — copy instead of pin = sliding compaction (PENDING).** Once roots
+are precise, `collect()` evacuates root-reachable objects instead of pinning
+them; compaction falls out of `move_internal`'s bump-into-`next_space` for free.
+`collect_nursery()` copies survivors to old-gen instead of pin-in-place, which
+deletes `pin_nursery_page`, the `other_space` scan, and the one-shot nursery
+degradation. `dirty_vectors` stay correct via the existing clear-on-flip.
+
+**Phase 4c — BiBOP size-class pages (PENDING, optional).** Size classes
+`Value`=40B, `Instr`=64B, `CallFrame`=48B (build-verified `_Static_assert`s in
+`zinctypes.h`); page-per-size-class + free-lists. Only worth it after 4b is
+stable and profiling shows old-gen churn (the bundle is ~821 immortal closures
+loaded once, so BiBOP's churning-old-gen premise may not apply).
 
 ## Key hazards (from validation)
 
