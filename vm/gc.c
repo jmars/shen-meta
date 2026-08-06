@@ -1406,6 +1406,29 @@ void *gc_alloc(size_t bytes, int type_tag) {
             nursery_cur = (char *)PAGE_to_GCP(pg + 1);
         }
 
+        /* No-straddle guard: if this allocation would cross a nursery page
+         * boundary, bump the cursor to the next page start and re-skip
+         * (the next page may be a false-positive-pinned promoted page).
+         * A straddling object's tail body lands at offset 0 of the next
+         * page; when a later fresh object also starts there
+         * (type_page=OBJECT), the scavenge drain scans it from offset 0,
+         * misreads the tail body as a header -- a VAL_NUMBER's zero
+         * padding => HEADER_WORDS==0 => the `if (hw == 0) break;` guard
+         * (gc.c:907) aborts the page scan immediately, skipping every real
+         * object on the page, truncating the Cheney trace and reclaiming
+         * still-live nursery cells.  Page-aligning single-page objects
+         * eliminates the straddle.  Objects larger than a page are left to
+         * straddle (multi-page CONTINUED, scanned from their OBJECT head,
+         * which always begins with a real header). */
+        if (total <= (size_t)PAGEBYTES && nursery_cur < nursery_end) {
+            uintptr_t s_addr = (uintptr_t)nursery_cur;
+            uintptr_t e_addr = s_addr + total;
+            if (GCP_to_PAGE(e_addr - 1) != GCP_to_PAGE(s_addr)) {
+                nursery_cur = (char *)PAGE_to_GCP(GCP_to_PAGE(s_addr) + 1);
+                goto nursery_retry;
+            }
+        }
+
         if ((size_t)(nursery_end - nursery_cur) >= total) {
             uintptr_t *header = (uintptr_t *)nursery_cur;
             *header = MAKE_HEADER(words, type_tag);
