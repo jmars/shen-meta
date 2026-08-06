@@ -75,4 +75,12 @@ void *gc_move(void *p);
  * pointer stores. */
 int gc_in_nursery(void *p);
 
+/* Instrumentation counters (GC Phase 2 Step 4 stress tests in zincvm.c).
+ * gc_nursery_scavenge_count increments once per real scavenge (excludes
+ * the exhausted-nursery short-circuit return).  gc_nursery_pages_reclaimed
+ * accumulates the number of pages reset back to the free boundary each
+ * time the bump cursor is rewound. */
+extern long gc_nursery_scavenge_count;
+extern long gc_nursery_pages_reclaimed;
+
 #endif /* ZINCVM_GC_H */

@@ -85,6 +85,11 @@ static int        in_scavenge = 0;   /* guard against recursive collection */
 static uintptr_t  current_space;
 static uintptr_t  next_space;
 
+/* Instrumentation counters (GC Phase 2 Step 4 stress tests in zincvm.c).
+ * Non-static so zincvm.c can read them via gc.h. */
+long gc_nursery_scavenge_count = 0;
+long gc_nursery_pages_reclaimed = 0;
+
 /* raw pointers to malloc'd metadata for eventual teardown */
 static char      *raw_heap_start;
 static uintptr_t *raw_space_ptr;
@@ -469,6 +474,9 @@ static void collect_nursery(void) {
         return;
     }
 
+    /* Count this as a real scavenge (past the exhausted-nursery short-circuit). */
+    gc_nursery_scavenge_count++;
+
     /* Clear only the nursery portion of the pinned bitmap */
     pinned_clear_nursery();
 
@@ -590,10 +598,17 @@ static void collect_nursery(void) {
     /* ---- reset nursery bump cursor ---- */
     {
         uintptr_t pg = first_free_nursery_page();
+        char *new_cur;
         if (pg <= nursery_last)
-            nursery_cur = (char *)PAGE_to_GCP(pg);
+            new_cur = (char *)PAGE_to_GCP(pg);
         else
-            nursery_cur = nursery_end;
+            new_cur = nursery_end;
+        /* Pages freed by rewinding the cursor back to the first free page.
+         * The cursor only ever moves backward here (to the first page that is
+         * still NURSERY), so reclaimed = old cursor - new cursor. */
+        if (new_cur < nursery_cur)
+            gc_nursery_pages_reclaimed += (long)((nursery_cur - new_cur) / PAGEBYTES);
+        nursery_cur = new_cur;
     }
 
     /* ---- assertions ---- */

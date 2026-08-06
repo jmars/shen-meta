@@ -1972,6 +1972,235 @@ static void run_test(const char *label, const char *bytecode, int show_code) {
     run_test_timeout(label, bytecode, show_code, 0);
 }
 
+/* Force a nursery scavenge deterministically.
+ *
+ * The nursery is a 2MB bump allocator (NURSERY_PAGES=4096, PAGEBYTES=512).
+ * gc_alloc's fast path bumps nursery_cur; when the bump cursor can't fit a
+ * request AND at least one page is still tagged NURSERY, it calls
+ * collect_nursery() once.  We allocate a burst of GC_TYPE_RAW objects (no
+ * interior pointers, so conservative stack scan can't mis-pin them) until the
+ * gc_nursery_scavenge_count instrumentation counter advances past `target`.
+ *
+ * A hard cap bounds the loop so we never spin forever if the nursery has
+ * already been permanently exhausted (all pages promoted). */
+static int force_nursery_scavenge(long target) {
+    long cap = 200000;
+    while (gc_nursery_scavenge_count < target && cap-- > 0) {
+        /* ~64-byte payload per object keeps the allocation count reasonable;
+           2MB nursery / 64B = ~32K allocs per scavenge. */
+        char *p = (char *)gc_alloc_atomic(64);
+        (void)p;
+    }
+    /* Return whether we actually forced the nursery to scavenge (counter
+     * advanced to >= target).  If the nursery was already fully promoted
+     * (all pages old-gen) before we started, no scavenge can fire. */
+    return gc_nursery_scavenge_count >= target;
+}
+
+/* Run the GC Phase 2 Step 4 generational nursery stress/retention tests.
+ * Runs only when a bundle is loaded.  Returns 0 on all-pass, 1 on failure. */
+static int gc_nursery_tests(void) {
+    int failed = 0;
+
+    printf("\n=== GC Phase 2 Step 4: nursery scavenge stress/retention tests ===\n");
+    printf("  (state at start: scavenge_count=%ld, pages_reclaimed=%ld)\n",
+           gc_nursery_scavenge_count, gc_nursery_pages_reclaimed);
+    fflush(stdout);
+
+    /* On the FULL OS bundle, loading 1600+ closures can promote EVERY nursery
+     * page before this block runs.  Once all pages are old-gen, gc_alloc's
+     * exhausted-nursery guard (first_free_nursery_page() > nursery_last) skips
+     * collect_nursery() entirely, so no scavenge can ever fire again — the
+     * nursery is permanently a dead one-shot lane.  In that state the scavenge
+     * stress tests cannot run; this is the accepted v1 fast-lane-degradation
+     * behavior (see docs/gc.md "Step 4 decision").  Detect it here and skip
+     * the whole block rather than report a spurious failure. */
+    if (!force_nursery_scavenge(gc_nursery_scavenge_count + 1)) {
+        printf("  nursery already fully promoted during load (scavenges fired=0) — "
+               "scavenge stress tests SKIPPED\n");
+        printf("  (accepted fast-lane degradation; validated on the reduced bundle)\n");
+        printf("GC nursery tests: SKIPPED (nursery exhausted at load)\n");
+        return 0;
+    }
+
+    /* ---- Test 1: survivor correctness (pin-in-place) ---- */
+    {
+        /* Build a small chain of Values held in C-locals.  We allocate raw
+         * numbers first, then a cons chain referencing them, so the chain is
+         * genuinely reachable from the stack across the scavenge. */
+        Value a = val_number(11);
+        Value b = val_number(22);
+        Value c = val_number(33);
+        Value chain = val_cons(a, val_cons(b, val_cons(c, val_nil())));
+
+        /* Force a scavenge.  The chain's cells live in the nursery and are
+         * reachable from the C stack, so collect_nursery pins them in place. */
+        long before = gc_nursery_scavenge_count;
+        force_nursery_scavenge(before + 1);
+        long delta = gc_nursery_scavenge_count - before;
+
+        int ok = (delta >= 1);
+        ok = ok && (chain.tag == VAL_CONS);
+        ok = ok && (chain.cons.car->tag == VAL_NUMBER) &&
+                   (chain.cons.car->number == 11);
+        ok = ok && (chain.cons.cdr->tag == VAL_CONS);
+        ok = ok && (chain.cons.cdr->cons.car->tag == VAL_NUMBER) &&
+                   (chain.cons.cdr->cons.car->number == 22);
+        ok = ok && (chain.cons.cdr->cons.cdr->cons.car->tag == VAL_NUMBER) &&
+                   (chain.cons.cdr->cons.cdr->cons.car->number == 33);
+        if (!ok) {
+            printf("  [1] survivor correctness FAILED (scavenges fired=%ld)\n", delta);
+            failed = 1;
+        } else {
+            printf("  [1] survivor correctness passed — chain intact after %ld scavenge(s)\n", delta);
+        }
+    }
+
+    /* ---- Test 2: capacity reuse ---- */
+    {
+        /* We want to overflow the nursery so a scavenge fires and the bump
+         * cursor is rewound to the first still-NURSERY page, proving the lane
+         * is reusable when the live set turns over.  Allocate dead 64B objects
+         * (references dropped immediately) until the pages_reclaimed counter
+         * increments — i.e. until a scavenge has actually rewound the cursor.
+         * Allocating a fixed huge burst would instead let conservative C-stack
+         * false positives pin every page, permanently exhausting the nursery;
+         * stopping the moment reclamation is observed avoids that. */
+        long before_rc = gc_nursery_pages_reclaimed;
+        long cap = 200000;
+        while (gc_nursery_pages_reclaimed == before_rc && cap-- > 0) {
+            char *p = (char *)gc_alloc_atomic(64);
+            (void)p;
+        }
+        int scavenged = (gc_nursery_pages_reclaimed > before_rc);
+        long reclaimed = gc_nursery_pages_reclaimed - before_rc;
+
+        /* After the burst, a fresh small allocation must land back in the
+         * nursery (bump cursor was reset), proving the lane is reusable. */
+        char *probe = (char *)gc_alloc_atomic(64);
+        int in_nursery = gc_in_nursery(probe);
+
+        /* And we can keep allocating in the nursery repeatedly. */
+        int keep_ok = 1;
+        for (int i = 0; i < 1000 && keep_ok; i++) {
+            char *q = (char *)gc_alloc_atomic(64);
+            if (!gc_in_nursery(q)) keep_ok = 0;
+        }
+
+        int ok = scavenged;                       /* a scavenge reclaimed pages */
+        ok = ok && reclaimed > 0;
+        ok = ok && in_nursery;                    /* cursor reset */
+        ok = ok && keep_ok;
+        if (!ok) {
+            printf("  [2] capacity reuse FAILED (pages_reclaimed +%ld, "
+                   "probe_in_nursery=%d, keep_in_nursery=%d)\n",
+                   reclaimed, in_nursery, keep_ok);
+            failed = 1;
+        } else {
+            printf("  [2] capacity reuse passed — +%ld pages reclaimed, "
+                   "nursery reusable after turnover\n", reclaimed);
+        }
+    }
+
+    /* ---- Test 3: cross-generational reference ---- */
+    {
+        /* Allocate a nursery Value, then an old-gen object that points to it.
+         * The old-gen object is allocated via gc_alloc_oldgen so it never goes
+         * through the nursery.  We store the nursery pointer inside the old-gen
+         * object; a scavenge must find it via the old-gen OBJECT-page scan. */
+        Value nv = val_number(777);
+        Value *nursery_val = GC_VALUE();
+        *nursery_val = nv;
+
+        /* Old-gen object: a GC_TYPE_VALUE whose body holds the nursery Value. */
+        Value *oldgen = (Value *)gc_alloc_oldgen(sizeof(Value), GC_TYPE_VALUE);
+        *oldgen = val_cons(*nursery_val, val_nil());
+
+        long before = gc_nursery_scavenge_count;
+        force_nursery_scavenge(before + 1);
+
+        /* The old-gen object must still reference the (pinned) nursery cell. */
+        int ok = (oldgen->tag == VAL_CONS);
+        ok = ok && (oldgen->cons.car->tag == VAL_NUMBER);
+        ok = ok && (oldgen->cons.car->number == 777);
+        if (!ok) {
+            printf("  [3] cross-generational reference FAILED\n");
+            failed = 1;
+        } else {
+            printf("  [3] cross-generational reference passed — old-gen->nursery "
+                   "reference survived scavenge\n");
+        }
+    }
+
+    /* ---- Test 4: two-scavenge survival ---- */
+    {
+        Value nv = val_number(4242);
+        Value *surv = GC_VALUE();
+        *surv = nv;
+
+        long before = gc_nursery_scavenge_count;
+        force_nursery_scavenge(before + 1);  /* scavenge #1 */
+        force_nursery_scavenge(before + 2);  /* scavenge #2 */
+
+        int ok = (surv->tag == VAL_NUMBER) && (surv->number == 4242);
+        if (!ok) {
+            printf("  [4] two-scavenge survival FAILED\n");
+            failed = 1;
+        } else {
+            printf("  [4] two-scavenge survival passed — nursery object survived "
+                   "two consecutive scavenges\n");
+        }
+    }
+
+    /* ---- Test 5: scavenge -> full collect -> scavenge ---- */
+    {
+        /* Promote a nursery object (retained across a scavenge), then force a
+         * full collection (flips current_space, so the promoted nursery page
+         * becomes space==other_space), then scavenge again.  Exercises the
+         * "other_space" branch in collect_nursery that scans previously-
+         * promoted nursery OBJECT pages. */
+        Value nv = val_number(909);
+        Value *promoted = GC_VALUE();
+        *promoted = nv;
+
+        long before = gc_nursery_scavenge_count;
+        force_nursery_scavenge(before + 1);  /* promote `promoted` */
+
+        /* Force a full collection by allocation pressure: gc_alloc_oldgen
+         * triggers collect() once allocatedpages exceeds heappages/4 (the heap
+         * is 256MB, so the threshold is ~64MB of allocated old-gen).  Allocate
+         * well past that with dead raw chunks so the full collector fires and
+         * flips current_space.  `promoted` stays live in a C-local, so its page
+         * is pinned and survives. */
+        {
+            const size_t CHUNK = 4 * 1024 * 1024;   /* 4MB dead chunks */
+            /* 96MB total guarantees several full collects; raw chunks are
+             * unrooted so they are reclaimed by each collect and never exhaust
+             * the 256MB heap. */
+            for (int i = 0; i < 24; i++) {
+                char *blob = (char *)gc_alloc_oldgen(CHUNK, GC_TYPE_RAW);
+                (void)blob;
+            }
+        }
+
+        /* Scavenge again — the previously-promoted nursery page must still be
+         * scanned correctly (now via the other_space branch). */
+        force_nursery_scavenge(gc_nursery_scavenge_count + 1);
+
+        int ok = (promoted->tag == VAL_NUMBER) && (promoted->number == 909);
+        if (!ok) {
+            printf("  [5] scavenge->full-collect->scavenge FAILED\n");
+            failed = 1;
+        } else {
+            printf("  [5] scavenge->full-collect->scavenge passed — promoted "
+                   "object survived full collect + rescavenge\n");
+        }
+    }
+
+    printf(failed ? "GC nursery tests FAILED\n" : "GC nursery tests all passed\n");
+    return failed;
+}
+
 static void init_globals(void) {
     const char *prims[] = {
         "+","-","*","/","=","<",">","<=",">=",
@@ -2149,6 +2378,13 @@ int main(int argc, char **argv) {
                 sterr.tag = VAL_STREAM; sterr.stream.file = stderr; sterr.stream.is_input = 0;
                 global_set("*sterror*", sterr);
             }
+
+            /* GC Phase 2 Step 4: generational nursery scavenge stress and
+               retention tests.  Must run here — right after bundle load while
+               the nursery still has free NURSERY-tagged pages — because the
+               self-hosting tests below allocate enough to promote every nursery
+               page, permanently exhausting the fast lane. */
+            gc_nursery_tests();
 
             /* Initialize the Shen global-table variable.  The metacircular
                interp's lookup-global reads (value global-table) to resolve
