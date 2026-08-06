@@ -93,11 +93,36 @@ two-comparison range check on `GCP_to_PAGE(p)`. Large objects (> ~nursery/8)
 bypass the nursery via `gc_alloc_oldgen()` — `frame_stack`
 (65536 × `sizeof(CallFrame)`) MUST bypass.
 
-**Promotion:** first-survivor. A nursery object survives a scavenge via either
-pin-in-place (ambiguous/conservative root → page flipped to old-gen to-space)
-or evacuate-to-old-gen (copy via existing `move_internal`). All 5 `GC_TYPE_*`
-tags work because the drain dispatches on `HEADER_TYPE` identically. No survivor
-space / aging for v1.
+**Promotion:** first-survivor. The ACTUAL implementation uses ONLY pin-in-place
+for first-survivor promotion: `gc_move` pins nursery pages in place (page
+flipped to old-gen) and never copies them. The evacuate-to-old-gen option (copy
+via existing `move_internal`) was considered and rejected — see "Step 4
+decision" below. All 5 `GC_TYPE_*` tags work because the drain dispatches on
+`HEADER_TYPE` identically. No survivor space / aging for v1.
+
+**Step 4 decision — pin-in-place, no copying scavenge:** Keep the no-flip
+pin-in-place nursery scavenge; do NOT implement a copying/flip nursery
+scavenge. Rationale: the root model is CONSERVATIVE and handle-free — the
+mutator holds Values as raw C pointers on the stack and in `extra_roots`, with
+no indirection the collector can rewrite. Any nursery object reachable from a
+live conservative root CANNOT be moved (the mutator's pointer must stay valid).
+This is why even the full `collect()` pins root-reachable pages rather than
+copying them. A copying/flip scavenge would need precise roots (handles / typed
+root stack) — a Phase 3+ mutator/GC interface change, out of scope for Step 4.
+
+A "pin root-reachable, copy the rest" hybrid is near-dead code: the nursery is
+a bump allocator and the just-allocated top page is always pinned by
+conservative false positives, so almost every live page ends up pinned;
+compaction of old gen is already provided by the full `collect()` semi-space
+flip.
+
+Accepted trade-off: pin-in-place can only reclaim nursery pages that are
+ENTIRELY dead, so under a retention-heavy workload the nursery can fully promote
+and degrade to a one-shot fast lane (small allocs then fall through to old-gen).
+This is inherent to conservative + pin-in-place and is ACCEPTED for v1; it is
+NOT fixed by the Step 5 write barrier (the barrier only removes the O(heap) full
+old-gen scan cost per scavenge, not pinning behavior). Levers if it matters
+later: larger nursery, Step 5 barrier, precise roots.
 
 **Barrier site 1 — `address->` vector write (zincvm.c:912): REQUIRED for
 correctness.**
@@ -121,16 +146,20 @@ over-retention (one nursery cons pins a 512-byte page). Add a dirty-globals
 bitset only if profiling shows over-retention is a real problem.
 
 **Ordered steps (each gated by `make test && make test-debug && make run-bundle`):
-** 1) Add `NURSERY`+region+predicates (no behavior change); 2) route `gc_alloc`
-to the nursery bump + `gc_alloc_oldgen` for large; 3) teach `collect()` to
-evacuate nursery pages; 4) implement `collect_nursery()` (real scavenge, no
-barrier); 5) add the `address->` barrier + `dirty_vectors`; 6) add generational
-stress/retention tests; 7) separate pre-emptive triggers (nursery-full →
-scavenge; old-gen → full collect); 8) docs update.
+** 1) [DONE] Add `NURSERY`+region+predicates (no behavior change); 2) [DONE] route
+`gc_alloc` to the nursery bump + `gc_alloc_oldgen` for large; 3) [DONE] teach
+`collect()` to evacuate nursery pages; 4) [DONE via Step 3] implement
+`collect_nursery()` (real scavenge, no barrier) — delivered by Step 3's
+pin-in-place approach, so Step 4's remaining content is docs + generational
+stress/retention tests (item 6); 5) [PENDING] add the `address->` barrier +
+`dirty_vectors`; 6) add generational stress/retention tests; 7) [PENDING]
+separate pre-emptive triggers (nursery-full → scavenge; old-gen → full collect);
+8) docs update.
 
-**Top risks:** (1) `scavenge_to_space` — a nursery scavenge doesn't flip old gen,
-so promoted pages go to the live old-gen space, not `next_space` (add an assert
-no nursery page remains in to-space after a scavenge); (2) `in_scavenge` re-entry
+**Top risks:** (1) `scavenge_to_space` — handled by the no-flip pin-in-place
+design: promoted pages go to the live old-gen `current_space`, never
+`next_space` (asserted by the two invariants at the end of `collect_nursery`);
+(2) `in_scavenge` re-entry
 guard so `allocatepage` doesn't recursively full-collect during a scavenge;
 (3) re-audit the 11+ allocate-then-read sites for the nursery-evacuation
 (non-pinned) case; (4) persistent pinned bitmap — clear only nursery bits across
