@@ -3,16 +3,22 @@
 ## Build & test
 
 ```sh
-make          # build C VM (release; links Boehm GC via -lgc)
-make test     # run 34 built-in tests (release)
+make          # build C VM, zincdec, and zinctest (release; links Boehm GC via -lgc)
+make test     # build+run zinctest — 34 built-in bytecode tests (release)
 make debug    # build C VM with -DZINCVM_DEBUG (C-level type-error defense active)
-make test-debug # run 39 built-in tests (adds debug-only trap-error tests 29-32b)
+make test-debug # build+run zinctest-debug — 39 built-in tests (adds debug-only trap-error tests 29-32b)
 make pipeline # compile (+ 1 2) through full pipeline
 make bundle   # serialize all safe wrappers → globals.csexp
-make run-bundle  # run C VM with globals.csexp (self-hosting tests)
+make run-bundle  # run zinctest with globals.csexp (self-hosting + GC stress tests)
+                # ./zinctest globals.csexp  is equivalent
 
 # Trace execution of specific closures:
 ./zincvm globals.csexp --trace + --trace reverse
+
+# ./zincvm with no args prints usage (tests moved to ./zinctest)
+./zincvm                         # prints usage
+./zinctest                        # runs 34/39 built-in bytecode tests
+./zinctest globals.csexp          # runs self-hosting + GC nursery + stress tests
 ```
 
 ## Architecture

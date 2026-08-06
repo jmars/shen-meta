@@ -2,10 +2,13 @@
 *.o
 zincvm
 zincdec
+zinctest
 *.csexp
 /tmp/
 core.*
 zincvm-debug
+zinctest-debug
+zinctest-asan
 # cosmocc intermediate build products (Makefile extracts the .com.dbg ELF)
 *.ape
 *.ape.com.dbg

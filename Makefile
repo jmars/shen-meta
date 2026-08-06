@@ -6,7 +6,7 @@ CFLAGS = -Wall -Wextra -O2 -I vm
 # vm_throw as defense-in-depth (normally owned by the Shen safe wrappers).
 DCFLAGS = -Wall -Wextra -O0 -g -DZINCVM_DEBUG -I vm
 
-all: zincvm zincdec
+all: zincvm zincdec zinctest
 
 # cosmocc produces a fat APE plus cross-build intermediates (.com.dbg,
 # .aarch64.elf) alongside the output.  Stage those in a temp dir so they never
@@ -21,35 +21,44 @@ define compile-vm
 	st=$$?; rm -rf $$T; exit $$st
 endef
 
-zincvm: vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h
+zincvm: vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h vm/zincvm.h
 	$(call compile-vm,$@,$(CFLAGS),vm/zincvm.c vm/gc.c)
 
-zincvm-debug: vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h
+zincvm-debug: vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h vm/zincvm.h
 	$(call compile-vm,$@,$(DCFLAGS),vm/zincvm.c vm/gc.c)
 
 debug: zincvm-debug
 	@echo "Built ./zincvm-debug (ZINCVM_DEBUG: C-level type-error defense-in-depth active)"
 
-zincvm-asan: vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h
+zincvm-asan: vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h vm/zincvm.h
 	$(call compile-vm,$@,$(CFLAGS) -O0 -g -fsanitize=address,vm/zincvm.c vm/gc.c)
 
 zincdec: vm/zincdec.c
 	$(call compile-vm,$@,$(CFLAGS),vm/zincdec.c)
 
+zinctest: vm/zinctest.c vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h vm/zincvm.h
+	$(call compile-vm,$@,$(CFLAGS) -DZINCTEST,vm/zinctest.c vm/zincvm.c vm/gc.c)
+
+zinctest-debug: vm/zinctest.c vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h vm/zincvm.h
+	$(call compile-vm,$@,$(DCFLAGS) -DZINCTEST,vm/zinctest.c vm/zincvm.c vm/gc.c)
+
+zinctest-asan: vm/zinctest.c vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h vm/zincvm.h
+	$(call compile-vm,$@,$(CFLAGS) -O0 -g -fsanitize=address -DZINCTEST,vm/zinctest.c vm/zincvm.c vm/gc.c)
+
 clean:
-	rm -f zincvm zincvm-debug zincdec zincvm-asan *.csexp globals.csexp globals-full.csexp
+	rm -f zincvm zincvm-debug zincdec zincvm-asan zinctest zinctest-debug zinctest-asan *.csexp globals.csexp globals-full.csexp
 
-test: zincvm
-	./zincvm
+test: zinctest
+	./zinctest
 
-test-debug: zincvm-debug
-	./zincvm-debug
+test-debug: zinctest-debug
+	./zinctest-debug
 
-test-asan: zincvm-asan
-	ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 ./zincvm-asan
+test-asan: zinctest-asan
+	ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 ./zinctest-asan
 
-asan: zincvm-asan
-	ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 ./zincvm-asan globals.csexp
+asan: zinctest-asan
+	ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 ./zinctest-asan globals.csexp
 
 bundle: shen/serialize-reduced.shen
 	$(SHEN) script shen/serialize-reduced.shen 2>/dev/null
@@ -63,8 +72,8 @@ bundle-full: shen/serialize.shen
 	$(SHEN) script shen/serialize.shen 2>/dev/null
 	@echo "Full bundle written to globals-full.csexp ($$(wc -c < globals-full.csexp) bytes)"
 
-run-bundle: zincvm globals.csexp
-	./zincvm globals.csexp
+run-bundle: zinctest globals.csexp
+	./zinctest globals.csexp
 
 pipeline: zincvm
 	@$(SHEN) eval -e '(tc -)' \
