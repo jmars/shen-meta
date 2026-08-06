@@ -111,6 +111,9 @@ static int value_references_nursery(Value *v) {
 typedef struct {
     const char *p;
     const char *start;
+    int scratch;         /* 1 = produce C-heap operand strings for scratch buffer */
+    Instr *scratch_buf;  /* current scratch buffer (to free on PARSE_ERROR) */
+    int scratch_len;     /* number of valid Instr entries in scratch_buf */
 } ParseState;
 
 static jmp_buf parse_err_jmp;
@@ -1314,7 +1317,19 @@ static Value parse_csexp_atom(ParseState *ps) {
     switch (type) {
     case 's': v = val_symbol(buf); break;
     case 'n': v = val_number(atol(buf)); break;
-    case 'S': v = val_string(buf, len); break;
+    case 'S':
+        if (ps->scratch) {
+            /* scratch mode: use malloc (C-heap, non-moving) so operand
+             * strings survive any collection triggered during parsing */
+            v.tag = VAL_STRING;
+            v.str.data = malloc(len + 1);
+            memcpy(v.str.data, buf, len);
+            v.str.data[len] = '\0';
+            v.str.len = len;
+        } else {
+            v = val_string(buf, len);
+        }
+        break;
     case 'b': v = val_boolean(strcmp(buf, "true") == 0); break;
     default: free(buf); { char msg[64]; snprintf(msg, sizeof(msg), "unknown csexp type '%c'", type); PARSE_ERROR(msg); }
     }
@@ -1324,7 +1339,16 @@ static int parse_csexp_list(ParseState *ps, Instr **out);
 
 static int parse_body(ParseState *ps, Instr **out) {
     int cap = 16, len = 0;
-    Instr *code = (Instr*)gc_alloc(cap * sizeof(Instr), GC_TYPE_INSTR_ARRAY);
+    Instr *scratch = (Instr*)malloc(cap * sizeof(Instr));
+
+    /* Save caller's scratch state; set ours for nested parsing */
+    int saved_scratch = ps->scratch;
+    Instr *saved_scratch_buf = ps->scratch_buf;
+    int saved_scratch_len = ps->scratch_len;
+    ps->scratch = 1;
+    ps->scratch_buf = scratch;
+    ps->scratch_len = 0;  /* updated as we add entries below */
+
     while (1) {
         skip_ws(ps); char c = *ps->p;
         if (c == ')' || c == '\0') break;
@@ -1350,14 +1374,47 @@ static int parse_body(ParseState *ps, Instr **out) {
         case 'c':
             instr.op = OP_CUR; ps->p++; skip_ws(ps);
             if (*ps->p != '(') PARSE_ERROR("expected '(' after 'c'");
-            ps->p++; instr.closure_len = parse_body(ps, &instr.closure_code);
+            ps->p++;
+            /* Recursive parse produces final GC-managed Instr array
+             * with GC-managed operand strings — store directly */
+            instr.closure_len = parse_body(ps, &instr.closure_code);
             if (*ps->p != ')') PARSE_ERROR("expected ')' after cur body");
             ps->p++; break;
         default: { char msg[64]; snprintf(msg, sizeof(msg), "unknown opcode '%c' (0x%02x)", c, (unsigned char)c); PARSE_ERROR(msg); }
         }
-        if (len >= cap) { int old_cap = cap; cap *= 2; code = (Instr*)gc_realloc(code, old_cap * sizeof(Instr), cap * sizeof(Instr), GC_TYPE_INSTR_ARRAY); }
-        code[len++] = instr;
+        if (len >= cap) { cap *= 2; scratch = (Instr*)realloc(scratch, cap * sizeof(Instr)); }
+        scratch[len++] = instr;
+        ps->scratch_len = len;  /* keep ParseState current for error cleanup */
+        ps->scratch_buf = scratch;
     }
+
+    /* Restore caller's scratch state */
+    ps->scratch     = saved_scratch;
+    ps->scratch_buf = saved_scratch_buf;
+    ps->scratch_len = saved_scratch_len;
+
+    /* Allocate final GC-managed Instr array and bulk-copy */
+    Instr *code = (Instr*)gc_alloc(len * sizeof(Instr), GC_TYPE_INSTR_ARRAY);
+    memcpy(code, scratch, len * sizeof(Instr));
+
+    /* Re-wrap VAL_STRING operand strings: malloc → GC_STR (GC-managed) */
+    for (int i = 0; i < len; i++) {
+        if (code[i].operand.tag == VAL_STRING) {
+            char *old_data = code[i].operand.str.data;
+            int slen = code[i].operand.str.len;
+            /* GC_STR may trigger a collection; old_data is still valid
+             * C-heap memory at this point so gc_scan_value passes it
+             * through unchanged */
+            code[i].operand.str.data = GC_STR(slen);
+            memcpy(code[i].operand.str.data, old_data, slen);
+            code[i].operand.str.data[slen] = '\0';
+            free(old_data);
+        }
+        /* VAL_SYMBOL sym.name is strdup'd (C-heap) — stays as-is.
+         * VAL_NUMBER / VAL_BOOLEAN have no pointers. */
+    }
+
+    free(scratch);
     *out = code; return len;
 }
 static int parse_csexp_list(ParseState *ps, Instr **out) {
@@ -1370,9 +1427,17 @@ static int parse_csexp_list(ParseState *ps, Instr **out) {
     return len;
 }
 int parse_bytecode(const char *str, Instr **out) {
-    ParseState ps; ps.p = str; ps.start = str;
+    ParseState ps = {0}; ps.p = str; ps.start = str;
     volatile size_t parse_wm = gc_root_watermark();
     if (setjmp(parse_err_jmp)) {
+        /* Free scratch buffer + C-heap operand strings from parse_body */
+        if (ps.scratch_buf) {
+            for (int i = 0; i < ps.scratch_len; i++) {
+                if (ps.scratch_buf[i].operand.tag == VAL_STRING)
+                    free(ps.scratch_buf[i].operand.str.data);
+            }
+            free(ps.scratch_buf);
+        }
         gc_root_pop_to(parse_wm);
         fprintf(stderr, "%s\n", parse_err_msg); *out = NULL; return 0;
     }
@@ -1999,11 +2064,19 @@ void init_globals(void) {
  * Returns number of entries loaded (0 on error).
  */
 int parse_bundle(const char *str) {
-    ParseState ps;
+    ParseState ps = {0};
     ps.p = str; ps.start = str;
 
     volatile size_t parse_wm = gc_root_watermark();
     if (setjmp(parse_err_jmp)) {
+        /* Free scratch buffer + C-heap operand strings from parse_body */
+        if (ps.scratch_buf) {
+            for (int i = 0; i < ps.scratch_len; i++) {
+                if (ps.scratch_buf[i].operand.tag == VAL_STRING)
+                    free(ps.scratch_buf[i].operand.str.data);
+            }
+            free(ps.scratch_buf);
+        }
         gc_root_pop_to(parse_wm);
         fprintf(stderr, "%s\n", parse_err_msg);
         return 0;
