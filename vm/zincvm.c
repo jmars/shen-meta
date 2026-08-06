@@ -1484,6 +1484,11 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
     int frames_sp = 0;
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
     int instr_count = 0;
+    gc_root_push_value(&acc);              /* ROOT_VALUE */
+    gc_root_push_ptr((void**)&env);         /* ROOT_PTR — Value** */
+    gc_root_push_ptr((void**)&stack.data);  /* ROOT_PTR — Value** */
+    gc_root_push_ptr((void**)&cur_code);    /* ROOT_PTR — Instr** */
+    gc_root_push_ptr((void**)&frame_stack); /* ROOT_PTR — CallFrame** */
     #define INSTR_HARD_LIMIT 500000000
 
     while (1) {
@@ -1590,6 +1595,7 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
 
                 int lambda_env_len = acc.lambda.env_len;
                 int new_env_len = lambda_env_len + nargs;
+                gc_root_push_value_array(argbuf, &nargs);
                 Value *ne = GC_VALUE_ARRAY(new_env_len);
                 /* acc.lambda.env stays reachable via the conservative stack
                  * scan — safe to read after gcalloc. */
@@ -1601,6 +1607,7 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
                 for (int i = 0; i < nargs; i++)
                     ne[lambda_env_len + i] = argbuf[i];
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
+                gc_root_pop();
                 pc = 0;
             } else if (acc.tag == VAL_PRIM) {
                 /* Function already popped; pop mark before args if present */
@@ -1688,6 +1695,7 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
 
                 int lambda_env_len = acc.lambda.env_len;
                 int new_env_len = lambda_env_len + nargs;
+                gc_root_push_value_array(argbuf, &nargs);
                 Value *ne = GC_VALUE_ARRAY(new_env_len);
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *lambda_env = acc.lambda.env;
@@ -1697,6 +1705,7 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
                 for (int i = 0; i < nargs; i++)
                     ne[lambda_env_len + i] = argbuf[i];
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
+                gc_root_pop();
                 pc = 0; break;
             } else if (acc.tag == VAL_PRIM) {
                 /* Function already popped; pop mark before args if present */
@@ -1715,6 +1724,7 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
         }
     }
 done:
+    gc_root_pop(); gc_root_pop(); gc_root_pop(); gc_root_pop(); gc_root_pop();
     va_free(&stack);
     /* frame_stack is GC-allocated — no free needed */
     return acc;
