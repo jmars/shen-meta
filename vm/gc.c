@@ -23,6 +23,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include "zincvm.h"
 
 /* ---- constants ---------------------------------------------------- */
 
@@ -105,6 +106,21 @@ static uintptr_t *raw_space_ptr;
 static uintptr_t *raw_link_ptr;
 static uintptr_t *raw_type_ptr;
 static size_t     heap_mmap_size;   /* actual mmap size of the heap */
+
+/* ---- precise-root shadow stack (Phase 4a) ------------------------- */
+
+typedef struct { RootKind kind; void *slot; int *np; } GcRoot;
+
+static GcRoot *shadow_stack = NULL;
+static size_t  shadow_len   = 0;
+static size_t  shadow_cap   = 0;
+
+/* ---- typed walker registrations (Phase 4a) ------------------------ */
+
+static void   *reg_global_table     = NULL;
+static int    *reg_global_table_len = NULL;
+static Instr **reg_traced_code      = NULL;
+static int    *reg_traced_code_len  = NULL;
 
 /* ---- pinned-page bitmap ------------------------------------------- */
 
@@ -238,6 +254,7 @@ static void  collect_nursery(void);
 static void  allocatepage(uintptr_t pages);
 static void *gcalloc_internal(size_t bytes, int type_tag);
 static void *move_internal(uintptr_t *cp, int type_tag);
+static void  gc_scan_roots(int use_nursery);
 
 /* ---- Cheney queue ------------------------------------------------- */
 
@@ -383,6 +400,9 @@ static void collect(void) {
         }
     }
 
+    /* 3. Precise roots (additive pinning — 4a invariant) */
+    gc_scan_roots(0);
+
 #ifdef GC_ROOTS_DIFF
     /* ---- conservative-diff instrumentation ----
      * Count pinned pages (P_cons) after the conservative root scan.
@@ -398,8 +418,12 @@ static void collect(void) {
                 while (w) { pinned_count += (w & 1); w >>= 1; }
             }
         }
-        fprintf(stderr, "GC_ROOTS_DIFF: collect(): conservative pinned pages = %zu\n",
-                (size_t)pinned_count);
+        fprintf(stderr, "GC_ROOTS_DIFF: collect(): conservative pinned pages = %zu, "
+                "precise roots = %zu, "
+                "global_table_len = %d, num_traced = %d\n",
+                (size_t)pinned_count, shadow_len,
+                reg_global_table_len ? *reg_global_table_len : 0,
+                reg_traced_code_len ? *reg_traced_code_len : 0);
     }
 #endif
 
@@ -502,6 +526,108 @@ static void nursery_root_pin(uintptr_t page) {
     }
 }
 
+/* gc_pin_value: pin all GC-managed pages reachable from a Value's
+ * interior pointers.  Mirrors gc_scan_value's field list exactly.
+ * use_nursery=1 → nursery_root_pin; use_nursery=0 → pin_page.
+ * ADDITIVE only — never evacuates (4a invariant). */
+static void gc_pin_value(Value *v, int use_nursery) {
+    switch (v->tag) {
+    case VAL_CONS:
+        if (v->cons.car) {
+            uintptr_t pg = GCP_to_PAGE(v->cons.car);
+            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
+        }
+        if (v->cons.cdr) {
+            uintptr_t pg = GCP_to_PAGE(v->cons.cdr);
+            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
+        }
+        break;
+    case VAL_LAMBDA:
+        if (v->lambda.code) {
+            uintptr_t pg = GCP_to_PAGE(v->lambda.code);
+            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
+        }
+        if (v->lambda.env) {
+            uintptr_t pg = GCP_to_PAGE(v->lambda.env);
+            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
+        }
+        break;
+    case VAL_VECTOR:
+        if (v->vector.data) {
+            uintptr_t pg = GCP_to_PAGE(v->vector.data);
+            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
+        }
+        break;
+    case VAL_STRING:
+        if (v->str.data) {
+            uintptr_t pg = GCP_to_PAGE(v->str.data);
+            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
+        }
+        break;
+    case VAL_ERROR:
+        if (v->error.message) {
+            uintptr_t pg = GCP_to_PAGE(v->error.message);
+            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
+        }
+        break;
+    /* VAL_NUMBER, VAL_SYMBOL, VAL_BOOLEAN, VAL_NIL, VAL_MARK,
+     * VAL_PRIM, VAL_STREAM contain no GC-managed pointers */
+    default:
+        break;
+    }
+}
+
+/* gc_scan_roots: walk the precise-root shadow stack + typed walkers,
+ * pinning all referenced pages.  ADDITIVE only — never evacuates
+ * (4a invariant).  Called AFTER the conservative scan.
+ * use_nursery=1 → nursery_root_pin (for collect_nursery);
+ * use_nursery=0 → pin_page (for collect). */
+static void gc_scan_roots(int use_nursery) {
+    /* 1. Shadow stack entries */
+    for (size_t i = 0; i < shadow_len; i++) {
+        GcRoot *r = &shadow_stack[i];
+        switch (r->kind) {
+        case ROOT_PTR: {
+            void *p = *(void **)r->slot;
+            if (p) {
+                uintptr_t pg = GCP_to_PAGE(p);
+                if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
+            }
+            break;
+        }
+        case ROOT_VALUE:
+            gc_pin_value((Value *)r->slot, use_nursery);
+            break;
+        case ROOT_VALUE_ARRAY: {
+            Value *base = (Value *)r->slot;
+            int n = *(r->np);
+            for (int j = 0; j < n; j++)
+                gc_pin_value(&base[j], use_nursery);
+            break;
+        }
+        }
+    }
+
+    /* 2. Typed walker: global_table closures */
+    if (reg_global_table && reg_global_table_len) {
+        GlobalEntry *gt = (GlobalEntry *)reg_global_table;
+        int n = *reg_global_table_len;
+        for (int i = 0; i < n; i++)
+            gc_pin_value(&gt[i].closure, use_nursery);
+    }
+
+    /* 3. Typed walker: traced_code Instr arrays */
+    if (reg_traced_code && reg_traced_code_len) {
+        int n = *reg_traced_code_len;
+        for (int i = 0; i < n; i++) {
+            if (reg_traced_code[i]) {
+                uintptr_t pg = GCP_to_PAGE(reg_traced_code[i]);
+                if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
+            }
+        }
+    }
+}
+
 /* collect_nursery: no-flip pin-in-place nursery scavenge.
  *
  * Does NOT swap semi-spaces, does NOT reset allocatedpages, does NOT
@@ -583,6 +709,9 @@ static void collect_nursery(void) {
             nursery_root_pin(GCP_to_PAGE(*p));
         }
     }
+
+    /* 3. Precise roots (additive pinning — 4a invariant) */
+    gc_scan_roots(1);
 
     /* ---- scan dirty old-gen vectors (write-barrier remembered set) ---- */
     if (dirty_vectors_overflow) {
@@ -1209,13 +1338,62 @@ void *gc_realloc(void *old, size_t old_bytes, size_t new_bytes, int type_tag) {
     return newp;
 }
 
-/* ---- precise-root API stubs (Phase 3/4 — implemented in 4a.1) ----- */
+/* ---- precise-root API (Phase 4a) --------------------------------- */
 
-void gc_root_push_ptr(void **slot)           { (void)slot; /* TODO: 4a.1 */ }
-void gc_root_push_value(Value *vslot)        { (void)vslot; /* TODO: 4a.1 */ }
-void gc_root_push_value_array(Value *base, int *np) { (void)base; (void)np; /* TODO: 4a.1 */ }
-void gc_root_pop(void)                       { /* TODO: 4a.1 */ }
-void gc_root_pop_to(size_t watermark)        { (void)watermark; /* TODO: 4a.1 */ }
-size_t gc_root_watermark(void)               { return 0; /* TODO: 4a.1 */ }
-void gc_register_global_table(void *table, int *len_p) { (void)table; (void)len_p; /* TODO: 4a.1 */ }
-void gc_register_traced_code(Instr **arr, int *np) { (void)arr; (void)np; /* TODO: 4a.1 */ }
+/* Push/pop on the process-global shadow stack.  The stack is malloc'd
+ * (C heap, not GC heap — never scanned/evacuated by the collector). */
+
+#define SHADOW_STACK_INIT_CAP 64
+
+static void shadow_stack_grow(void) {
+    size_t nc = shadow_cap ? shadow_cap * 2 : SHADOW_STACK_INIT_CAP;
+    GcRoot *np = (GcRoot *)realloc(shadow_stack, nc * sizeof(GcRoot));
+    if (!np) { fprintf(stderr, "gc_root_push: realloc failed\n"); exit(1); }
+    shadow_stack = np; shadow_cap = nc;
+}
+
+void gc_root_push_ptr(void **slot) {
+    if (shadow_len >= shadow_cap) shadow_stack_grow();
+    shadow_stack[shadow_len].kind = ROOT_PTR;
+    shadow_stack[shadow_len].slot = slot;
+    shadow_stack[shadow_len].np   = NULL;
+    shadow_len++;
+}
+
+void gc_root_push_value(Value *vslot) {
+    if (shadow_len >= shadow_cap) shadow_stack_grow();
+    shadow_stack[shadow_len].kind = ROOT_VALUE;
+    shadow_stack[shadow_len].slot = vslot;
+    shadow_stack[shadow_len].np   = NULL;
+    shadow_len++;
+}
+
+void gc_root_push_value_array(Value *base, int *np) {
+    if (shadow_len >= shadow_cap) shadow_stack_grow();
+    shadow_stack[shadow_len].kind = ROOT_VALUE_ARRAY;
+    shadow_stack[shadow_len].slot = base;
+    shadow_stack[shadow_len].np   = np;
+    shadow_len++;
+}
+
+void gc_root_pop(void) {
+    if (shadow_len) shadow_len--;
+}
+
+void gc_root_pop_to(size_t watermark) {
+    shadow_len = watermark;  /* truncate — for longjmp unwind */
+}
+
+size_t gc_root_watermark(void) {
+    return shadow_len;
+}
+
+void gc_register_global_table(void *table, int *len_p) {
+    reg_global_table     = table;
+    reg_global_table_len = len_p;
+}
+
+void gc_register_traced_code(Instr **arr, int *np) {
+    reg_traced_code     = arr;
+    reg_traced_code_len = np;
+}
