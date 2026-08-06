@@ -124,19 +124,28 @@ NOT fixed by the Step 5 write barrier (the barrier only removes the O(heap) full
 old-gen scan cost per scavenge, not pinning behavior). Levers if it matters
 later: larger nursery, Step 5 barrier, precise roots.
 
-**Barrier site 1 — `address->` vector write (zincvm.c:912): REQUIRED for
-correctness.**
+**Barrier site 1 — `address->` vector write (zincvm.c:912): DONE (Step 5).**
 ```c
 vec.vector.data[i] = val;
-if (gc_in_oldgen(&vec_heap_obj) && gc_in_nursery(&val)) gc_remember_vector(&vec_heap_obj);
+if (vec.vector.data &&
+    gc_in_oldgen(vec.vector.data) &&
+    value_references_nursery(&val)) gc_dirty_vectors_add(vec.vector.data);
 ```
 Old gen is NOT scanned during a nursery scavenge, so an old-gen vector holding a
-nursery pointer must be recorded or the nursery object dangles. `vec` at the
-primitive is a by-value pop — the barrier must record the *heap* vector's
-address (capture the stack slot before popping). Remembered set `dirty_vectors`:
-growable malloc'd `Value**`; the scavenge runs `gc_evacuate(&v->vector.data)` on
-each (the drain then scans the array's elements). Cleared at end of each nursery
-scavenge and at start of each full collect.
+nursery pointer must be recorded or the nursery object dangles. The barrier
+records the **heap element-array base** `vec.vector.data` (a by-value pop, but
+`.vector.data` is the real heap array pointer — sufficient, since the scavenge
+scans the array's element slots). Remembered set `dirty_vectors`: growable
+dedup'd malloc'd `Value**` (`DIRTY_VECTORS_MAX=8192`, with an overflow capacity
+valve that falls back to the full old-gen OBJECT-page scan). Cleared at end of
+each nursery scavenge and at start of each full collect.
+
+**KEY CORRECTNESS POINT — `gc_in_oldgen` tests the space tag, not the address
+range:** under pin-in-place, a nursery page promoted by a scavenge keeps its
+nursery-range ADDRESS but its `space` flips to `current_space`. An address-range
+test (`page > nursery_last`) silently misses these promoted-in-place arrays —
+exactly the case the barrier must cover. `gc_in_oldgen` therefore returns
+`space[page] == current_space`. (Diagnosed via gc_nursery_tests Test 6.)
 
 **Barrier site 2 — `global_set` (zincvm.c:324): OPTIONAL / DEFERRED for v1.**
 Correctness is preserved because `global_table` is already conservatively pinned
@@ -151,10 +160,11 @@ bitset only if profiling shows over-retention is a real problem.
 `collect()` to evacuate nursery pages; 4) [DONE via Step 3] implement
 `collect_nursery()` (real scavenge, no barrier) — delivered by Step 3's
 pin-in-place approach, so Step 4's remaining content is docs + generational
-stress/retention tests (item 6); 5) [PENDING] add the `address->` barrier +
-`dirty_vectors`; 6) add generational stress/retention tests; 7) [PENDING]
+stress/retention tests (item 6); 5) [DONE] add the `address->` barrier +
+`dirty_vectors`; 6) [DONE] add generational stress/retention tests (Step 4,
+incl. write-barrier Test 6 in Step 5); 7) [PENDING]
 separate pre-emptive triggers (nursery-full → scavenge; old-gen → full collect);
-8) docs update.
+8) [DONE] docs update.
 
 **Top risks:** (1) `scavenge_to_space` — handled by the no-flip pin-in-place
 design: promoted pages go to the live old-gen `current_space`, never
