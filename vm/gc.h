@@ -71,9 +71,25 @@ void gc_scan_value(Value *v);
 void *gc_move(void *p);
 
 /* Nursery predicate: true iff p points into the nursery region.
- * Used by the write barrier (future step) to detect old→nursery
- * pointer stores. */
+ * Used by the write barrier to detect old→nursery pointer stores. */
 int gc_in_nursery(void *p);
+
+/* Old-gen predicate: true iff p's page is in the live old-gen semi-space
+ * (space == current_space).  Note this tests the space tag, not the address
+ * range: under pin-in-place a promoted nursery page keeps its nursery-range
+ * address but its space becomes current_space.  Used by the write barrier. */
+int gc_in_oldgen(void *p);
+
+/* Write-barrier remembered set: records old-gen vector element arrays
+ * that may now contain nursery pointers after an address-> store.
+ * Cleared at the end of each nursery scavenge and when a full collect
+ * flips the semi-spaces (which moves the objects anyway). */
+void gc_dirty_vectors_add(Value *data);
+void gc_dirty_vectors_clear(void);
+
+/* Instrumentation: how many times the write barrier recorded a dirty vector
+ * (post-dedup).  Read by gc_nursery_tests() to assert the barrier fires. */
+extern long gc_dirty_vectors_fired;
 
 /* Instrumentation counters (GC Phase 2 Step 4 stress tests in zincvm.c).
  * gc_nursery_scavenge_count increments once per real scavenge (excludes

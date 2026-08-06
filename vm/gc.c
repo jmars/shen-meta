@@ -136,11 +136,15 @@ int gc_in_nursery(void *p) {
     return (page >= nursery_first && page <= nursery_last);
 }
 
-/* gc_in_oldgen: true iff p is in the old-generation region
- * (past the nursery) AND its page is in current_space. */
-static inline int gc_in_oldgen(void *p) {
+/* gc_in_oldgen: true iff p's page is in the live old-gen semi-space
+ * (space == current_space).  Under pin-in-place, a nursery page promoted
+ * by a scavenge keeps its nursery-range ADDRESS but its space becomes
+ * current_space, so the correct old-gen test is the space tag, NOT the
+ * address range (a page > nursery_last would miss promoted-in-place
+ * arrays, which is exactly the case the write barrier must cover). */
+int gc_in_oldgen(void *p) {
     uintptr_t page = GCP_to_PAGE(p);
-    return (page > nursery_last && page <= lastheappage &&
+    return (page >= firstheappage && page <= lastheappage &&
             space[page] == current_space);
 }
 
@@ -170,6 +174,49 @@ void gc_set_extra_roots(void *start, size_t size) {
     extra_roots[n_extra_roots].size  = size;
     n_extra_roots++;
 }
+
+/* ---- write-barrier remembered set (Phase 2 Step 5) --------------- */
+
+/* Dirty vectors: old-gen vector element arrays that may now contain
+ * nursery pointers after an address-> store.  The remember set lets the
+ * nursery scavenge scan only these arrays instead of every old-gen page.
+ * An overflow flag acts as a capacity valve; on overflow we fall back to
+ * a full old-gen OBJECT-page scan. */
+#define DIRTY_VECTORS_MAX 8192
+static Value **dirty_vectors = NULL;
+static size_t dirty_vectors_count = 0;
+static size_t dirty_vectors_cap = 0;
+static int dirty_vectors_overflow = 0;
+
+void gc_dirty_vectors_add(Value *data) {
+    if (dirty_vectors_overflow) return;
+    for (size_t i = 0; i < dirty_vectors_count; i++)
+        if (dirty_vectors[i] == data) return;   /* dedup */
+    if (dirty_vectors_count >= DIRTY_VECTORS_MAX) {
+        dirty_vectors_overflow = 1;
+        return;
+    }
+    if (dirty_vectors_count >= dirty_vectors_cap) {
+        size_t nc = dirty_vectors_cap ? dirty_vectors_cap * 2 : 256;
+        if (nc > DIRTY_VECTORS_MAX) nc = DIRTY_VECTORS_MAX;
+        Value **np = (Value **)realloc(dirty_vectors, nc * sizeof(Value *));
+        if (!np) { dirty_vectors_overflow = 1; return; }
+        dirty_vectors = np; dirty_vectors_cap = nc;
+    }
+    dirty_vectors[dirty_vectors_count++] = data;
+    gc_dirty_vectors_fired++;
+}
+
+void gc_dirty_vectors_clear(void) {
+    dirty_vectors_count = 0;
+    dirty_vectors_overflow = 0;
+}
+
+/* Instrumentation counter (Phase 2 Step 5 stress tests): how many times the
+ * write barrier actually recorded a dirty vector (post-dedup, pre-overflow).
+ * Lets gc_nursery_tests() assert deterministically that address-> of a
+ * nursery-referencing value into an old-gen vector fires the barrier. */
+long gc_dirty_vectors_fired = 0;
 
 /* ---- register-spill jmp_buf --------------------------------------- */
 
@@ -303,6 +350,7 @@ static void collect(void) {
     allocatedpages = 0;
     queue_head = 0;
     pinned_clear_all();
+    gc_dirty_vectors_clear();
 
     /* ---- root set ---- */
 
@@ -427,8 +475,8 @@ static void nursery_root_pin(uintptr_t page) {
  *
  * Does NOT swap semi-spaces, does NOT reset allocatedpages, does NOT
  * clear old-gen pinned bits.  Roots (C stack + extra_roots) are scanned
- * conservatively, then every old-gen OBJECT page is queued and scanned
- * to find old-gen→nursery references (no write barrier yet — Step 5).
+ * conservatively, then the write-barrier dirty-vectors remembered set
+ * (Phase 2 Step 5) is scanned inline for old-gen→nursery references.
  * Nursery survivors are pinned in place (space ← current_space).
  * Finally the bump cursor is reset to the first still-NURSERY page. */
 static void collect_nursery(void) {
@@ -505,13 +553,25 @@ static void collect_nursery(void) {
         }
     }
 
-    /* ---- queue all old-gen OBJECT pages for full scan ---- */
-    /* This finds old-gen→nursery references that the conservative
-     * stack scan might miss.  Without a write barrier (Step 5), a
-     * full old-gen scan is the only way to guarantee liveness. */
-    for (uintptr_t pg = nursery_last + 1; pg <= lastheappage; pg++) {
-        if (space[pg] == current_space && type_page[pg] == OBJECT)
-            queue(pg);
+    /* ---- scan dirty old-gen vectors (write-barrier remembered set) ---- */
+    if (dirty_vectors_overflow) {
+        for (uintptr_t pg = nursery_last + 1; pg <= lastheappage; pg++) {
+            if (space[pg] == current_space && type_page[pg] == OBJECT)
+                queue(pg);
+        }
+    } else {
+        for (size_t k = 0; k < dirty_vectors_count; k++) {
+            Value *data = dirty_vectors[k];
+            if (!gc_in_oldgen(data)) continue;
+            uintptr_t *cp = (uintptr_t *)data - 1;
+            int ty = HEADER_TYPE(*cp);
+            if (ty != GC_TYPE_VALUE_ARRAY) continue;
+            uintptr_t hw = HEADER_WORDS(*cp);
+            uintptr_t body_bytes = (hw - 1) * WORDBYTES;
+            int count = (int)(body_bytes / sizeof(Value));
+            for (int j = 0; j < count; j++)
+                gc_scan_value(&data[j]);
+        }
     }
 
     /* ---- queue previously-promoted nursery pages ---- */
@@ -645,6 +705,8 @@ static void collect_nursery(void) {
                 (unsigned long)allocatedpages);
         exit(1);
     }
+
+    gc_dirty_vectors_clear();
 
     in_scavenge = 0;
 

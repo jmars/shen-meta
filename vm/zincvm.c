@@ -93,6 +93,19 @@ void gc_scan_value(Value *v) {
     }
 }
 
+/* True iff v references any GC object in the nursery.  Must mirror
+ * exactly the pointer fields gc_scan_value evacuates. */
+static int value_references_nursery(Value *v) {
+    switch (v->tag) {
+    case VAL_CONS:    return gc_in_nursery(v->cons.car) || gc_in_nursery(v->cons.cdr);
+    case VAL_LAMBDA:  return gc_in_nursery(v->lambda.code) || gc_in_nursery(v->lambda.env);
+    case VAL_VECTOR:  return v->vector.data && gc_in_nursery(v->vector.data);
+    case VAL_STRING:  return v->str.data && gc_in_nursery(v->str.data);
+    case VAL_ERROR:   return v->error.message && gc_in_nursery(v->error.message);
+    default:          return 0;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Parser state                                                       */
 /* ------------------------------------------------------------------ */
@@ -909,7 +922,18 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         if (vec.tag != VAL_VECTOR || idx.tag != VAL_NUMBER) PRIM_TYPE_ERROR("address-> bad types");
         int i = (int)idx.number;
         if (i < 0 || i >= vec.vector.len) PRIM_TYPE_ERROR("address-> OOB");
-        vec.vector.data[i] = val; *acc = vec; return 0;
+        vec.vector.data[i] = val;
+        /* Phase 2 Step 5 — write barrier: if the vector's element array
+         * is in old-gen and the stored value references a nursery object,
+         * record the element array so the next nursery scavenge scans it
+         * (old-gen is not otherwise scanned).  vec is a by-value pop,
+         * but vec.vector.data is the real heap array pointer. */
+        if (vec.vector.data &&
+            gc_in_oldgen(vec.vector.data) &&
+            value_references_nursery(&val)) {
+            gc_dirty_vectors_add(vec.vector.data);
+        }
+        *acc = vec; return 0;
     }
 
     /* --- Error handling --- */
@@ -1997,12 +2021,12 @@ static int force_nursery_scavenge(long target) {
     return gc_nursery_scavenge_count >= target;
 }
 
-/* Run the GC Phase 2 Step 4 generational nursery stress/retention tests.
+/* Run the GC Phase 2 Step 5 generational nursery stress/retention tests.
  * Runs only when a bundle is loaded.  Returns 0 on all-pass, 1 on failure. */
 static int gc_nursery_tests(void) {
     int failed = 0;
 
-    printf("\n=== GC Phase 2 Step 4: nursery scavenge stress/retention tests ===\n");
+    printf("\n=== GC Phase 2 Step 5: nursery scavenge stress/retention tests ===\n");
     printf("  (state at start: scavenge_count=%ld, pages_reclaimed=%ld)\n",
            gc_nursery_scavenge_count, gc_nursery_pages_reclaimed);
     fflush(stdout);
@@ -2197,6 +2221,86 @@ static int gc_nursery_tests(void) {
         }
     }
 
+    /* ---- Test 6: write-barrier dirty_vectors survival ---- */
+    {
+        /* Allocate a 4-slot vector in a GC_TYPE_VALUE slot so it's
+         * heap-reachable through a cons cell (no C-local to the vector
+         * Value itself, only to the cons that holds it).  The vector's
+         * element array is nursery-allocated by val_vector; a scavenge
+         * promotes it to old-gen.  Then a NURSERY CONS is stored into
+         * the old-gen vector via address->; the write barrier must
+         * record the element array so the next scavenge scans it and
+         * the stored nursery cons survives. */
+        Value *vec_slot = gc_alloc(sizeof(Value), GC_TYPE_VALUE);
+        *vec_slot = val_vector(4);
+
+        /* Wrap vec_slot in a cons so the vector is heap-reachable
+         * (cons_cell is the only C-local pointer to it). */
+        Value *cons_cell = gc_alloc(sizeof(Value), GC_TYPE_VALUE);
+        *cons_cell = val_cons(*vec_slot, val_nil());
+
+        /* Scavenge #1: promote the vector's element array to old-gen.
+         * cons_cell is a C-local → pinned. */
+        long before6 = gc_nursery_scavenge_count;
+        force_nursery_scavenge(before6 + 1);
+
+        /* Re-fetch the vector by-value from the cons (no direct C-local
+         * to the vector — it's only reachable through the cons). */
+        Value vec_byval = *cons_cell->cons.car;
+
+        /* A nursery cons: (778899 . 0).  Created AFTER scavenge #1 so its
+         * car/cdr cells are freshly allocated in the nursery (had we created
+         * it before, scavenge #1 would have promoted them to old-gen and
+         * value_references_nursery() would be false). */
+        Value nursery_cons = val_cons(val_number(778899), val_number(0));
+
+        /* Barrier control: storing a NUMBER into the old-gen vector must
+         * NOT fire the barrier (no nursery reference).  Snapshot counter. */
+        long fired_before = gc_dirty_vectors_fired;
+        {
+            ValueArray stk; va_init(&stk);
+            va_push(&stk, val_number(999));      /* A — value */
+            va_push(&stk, val_number(1));        /* I — index 1 */
+            va_push(&stk, vec_byval);            /* V — vector */
+            Value acc;
+            exec_primitive("address->", &acc, &stk);
+        }
+        int number_no_fire = (gc_dirty_vectors_fired == fired_before);
+
+        /* Now store the NURSERY CONS at index 0 — this MUST fire the barrier. */
+        long fired_before2 = gc_dirty_vectors_fired;
+        {
+            ValueArray stk; va_init(&stk);
+            va_push(&stk, nursery_cons);         /* A — value (nursery cons) */
+            va_push(&stk, val_number(0));        /* I — index 0 */
+            va_push(&stk, vec_byval);            /* V — vector */
+            Value acc;
+            exec_primitive("address->", &acc, &stk);
+        }
+        int cons_fired = (gc_dirty_vectors_fired == fired_before2 + 1);
+
+        /* Scavenge #2: the dirty_vectors scan must find the nursery cons
+         * reference through the old-gen vector and preserve it. */
+        force_nursery_scavenge(gc_nursery_scavenge_count + 1);
+
+        /* Verify: element 0 of the vector (reachable through the cons
+         * chain) is still the nursery cons (778899 . 0). */
+        Value el0 = (*cons_cell->cons.car).vector.data[0];
+        int ok6 = number_no_fire && cons_fired;
+        ok6 = ok6 && (el0.tag == VAL_CONS)
+                  && (el0.cons.car->tag == VAL_NUMBER)
+                  && (el0.cons.car->number == 778899);
+        if (!ok6) {
+            printf("  [6] write-barrier dirty_vectors FAILED "
+                   "(number_no_fire=%d cons_fired=%d)\n",
+                   number_no_fire, cons_fired);
+            failed = 1;
+        } else {
+            printf("  [6] write-barrier dirty_vectors passed — address-> of "
+                   "nursery cons into old-gen vector survived scavenge via barrier\n");
+        }
+    }
+
     printf(failed ? "GC nursery tests FAILED\n" : "GC nursery tests all passed\n");
     return failed;
 }
@@ -2379,7 +2483,7 @@ int main(int argc, char **argv) {
                 global_set("*sterror*", sterr);
             }
 
-            /* GC Phase 2 Step 4: generational nursery scavenge stress and
+            /* GC Phase 2 Step 5: generational nursery scavenge stress and
                retention tests.  Must run here — right after bundle load while
                the nursery still has free NURSERY-tagged pages — because the
                self-hosting tests below allocate enough to promote every nursery
