@@ -1,4 +1,4 @@
-.PHONY: all vm test test-debug debug bundle bundle-full pipeline interp setup clean
+.PHONY: all vm test test-debug debug bundle bundle-full pipeline interp setup clean gate
 
 SHEN   = vendor/shen-scheme/bin/shen-scheme
 CFLAGS = -Wall -Wextra -O2 -I vm
@@ -31,7 +31,7 @@ debug: zincvm-debug
 	@echo "Built ./zincvm-debug (ZINCVM_DEBUG: C-level type-error defense-in-depth active)"
 
 zincvm-asan: vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h vm/zincvm.h
-	$(call compile-vm,$@,$(CFLAGS) -O0 -g -fsanitize=address,vm/zincvm.c vm/gc.c)
+	$(call compile-vm,$@,$(CFLAGS) -O0 -g -fsanitize=undefined,vm/zincvm.c vm/gc.c)
 
 zincdec: vm/zincdec.c
 	$(call compile-vm,$@,$(CFLAGS),vm/zincdec.c)
@@ -43,7 +43,7 @@ zinctest-debug: vm/zinctest.c vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h vm/zinc
 	$(call compile-vm,$@,$(DCFLAGS) -DZINCTEST,vm/zinctest.c vm/zincvm.c vm/gc.c)
 
 zinctest-asan: vm/zinctest.c vm/zincvm.c vm/gc.c vm/gc.h vm/zinctypes.h vm/zincvm.h
-	$(call compile-vm,$@,$(CFLAGS) -O0 -g -fsanitize=address -DZINCTEST,vm/zinctest.c vm/zincvm.c vm/gc.c)
+	$(call compile-vm,$@,$(CFLAGS) -O0 -g -fsanitize=undefined -DZINCTEST,vm/zinctest.c vm/zincvm.c vm/gc.c)
 
 clean:
 	rm -f zincvm zincvm-debug zincdec zincvm-asan zinctest zinctest-debug zinctest-asan *.csexp globals.csexp globals-full.csexp
@@ -55,10 +55,12 @@ test-debug: zinctest-debug
 	./zinctest-debug
 
 test-asan: zinctest-asan
-	ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 ./zinctest-asan
+	./zinctest-asan
+
+gate: test test-debug test-asan
 
 asan: zinctest-asan
-	ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 ./zinctest-asan globals.csexp
+	./zinctest-asan globals.csexp
 
 bundle: shen/serialize-reduced.shen
 	$(SHEN) script shen/serialize-reduced.shen 2>/dev/null

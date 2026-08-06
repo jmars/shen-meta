@@ -96,4 +96,13 @@ typedef struct {
     ValueArray stack;
 } CallFrame;
 
+/* ---- load-bearing size classes (Phase 3/4 BiBOP) ----
+ * These MUST stay true: the collector's size-class routing (if/when added)
+ * assumes fixed strides.  Build-verified: Value=40, Instr=64, CallFrame=48. */
+_Static_assert(sizeof(Value) == 40,   "Value size class is 40B");
+_Static_assert(sizeof(Instr) == 64,   "Instr size class is 64B");
+_Static_assert(sizeof(CallFrame) == 48, "CallFrame size class is 48B");
+_Static_assert(sizeof(ValueArray) == 16, "ValueArray is 16B");
+_Static_assert(sizeof(uintptr_t) == 8, "Phase 3/4 assumes LP64");
+
 #endif /* ZINCVM_TYPES_H */

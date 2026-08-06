@@ -949,7 +949,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
            Stack: [mark, Handler, Body] → pop Body first, then Handler.
            handler is volatile: after longjmp from vm_throw, the compiler
            must re-read handler from the stack, not from a cached register. */
-        Value body = va_pop(stack);
+        volatile Value body = va_pop(stack);
         volatile Value handler = va_pop(stack);
         if (handler.tag != VAL_LAMBDA) PRIM_TYPE_ERROR("trap-error handler not fn");
         CatchFrame cf;
@@ -1451,7 +1451,7 @@ static void env_push(Value **env, int *env_len, int *env_cap, Value v) {
     if (*env_len >= *env_cap) {
         int new_cap = *env_cap ? (*env_cap) * 2 : 4;
         Value *new_env = GC_VALUE_ARRAY(new_cap);
-        memcpy(new_env, *env, *env_len * sizeof(Value));
+        if (*env_len > 0) memcpy(new_env, *env, *env_len * sizeof(Value));
         *env = new_env; *env_cap = new_cap;
     }
     (*env)[(*env_len)++] = v;
