@@ -165,18 +165,21 @@ Value val_boolean(int b) {
 }
 Value val_cons(Value car, Value cdr) {
     /* Pin car and cdr so their interior pointers survive the two gc_alloc
-     * calls below.  The existing volatile car_root mechanism is still needed
-     * for the conservative scan to find car_cell across the second alloc;
-     * the precise-root pins are additive and cover the by-value args. */
+       calls below.  car_root is separately pinned (ROOT_PTR) because it is
+       held only in a C local across the second gc_alloc; without this the
+       conservative scan used to find it, but under precise-only roots (4a.6)
+       it goes stale. */
     gc_root_push_value(&car);
     gc_root_push_value(&cdr);
     Value *car_cell = (Value*)gc_alloc(sizeof(Value), GC_TYPE_VALUE);
     Value *volatile car_root = car_cell;
+    gc_root_push_ptr((void**)&car_root);
     Value *cdr_cell = (Value*)gc_alloc(sizeof(Value), GC_TYPE_VALUE);
     *car_root = car;
     *cdr_cell = cdr;
-    gc_root_pop();
-    gc_root_pop();
+    gc_root_pop();  /* car_root */
+    gc_root_pop();  /* cdr */
+    gc_root_pop();  /* car */
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_CONS; v.cons.car = car_root; v.cons.cdr = cdr_cell;
     return v;
@@ -974,9 +977,9 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
         volatile Value handler = va_pop(stack);
         /* Pin body and handler so their interior pointers (lambda.env,
            lambda.code) survive the GC_VALUE_ARRAY calls below (4a precise-root).
-           Cast away volatile — the shadow stack only reads, never writes. */
-        gc_root_push_value((Value*)&body);
-        gc_root_push_value((Value*)&handler);
+           Use volatile-safe API — body/handler are volatile (longjmp re-read). */
+        gc_root_push_value_volatile(&body);
+        gc_root_push_value_volatile(&handler);
         if (handler.tag != VAL_LAMBDA) PRIM_TYPE_ERROR("trap-error handler not fn");
         CatchFrame cf;
         cf.parent = vm_catch_chain;
@@ -1007,14 +1010,19 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             vm_catch_chain = cf.parent;
             Value err = cf.error_val;
             Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
-            Value *henv = GC_VALUE_ARRAY(handler.lambda.env_len + 1);
-            if (handler.lambda.env_len > 0)
-                memcpy(henv, handler.lambda.env, handler.lambda.env_len * sizeof(Value));
-            henv[handler.lambda.env_len] = err;
-            handler.lambda.env = henv; handler.lambda.env_len++;
-            *acc = vm_exec_env(hc, hl, handler.lambda.env, handler.lambda.env_len);
+            int env_len = handler.lambda.env_len;
+            int new_env_len = env_len + 1;
+            Value *henv = GC_VALUE_ARRAY(new_env_len);
+            if (env_len > 0)
+                memcpy(henv, handler.lambda.env, env_len * sizeof(Value));
+            henv[env_len] = err;
+            /* Pop roots BEFORE calling handler — if handler's vm_exec_env
+               raises a simple-error (longjmps to cf.parent), the pops
+               would be skipped.  All handler interior-pointers have been
+               captured into locals (hc, hl, henv, new_env_len). */
             gc_root_pop();  /* handler */
             gc_root_pop();  /* body */
+            *acc = vm_exec_env(hc, hl, henv, new_env_len);
             return 0;
         }
     }
@@ -1397,6 +1405,11 @@ static int parse_body(ParseState *ps, Instr **out) {
     Instr *code = (Instr*)gc_alloc(len * sizeof(Instr), GC_TYPE_INSTR_ARRAY);
     memcpy(code, scratch, len * sizeof(Instr));
 
+    /* Pin code across the GC_STR calls in the re-wrap loop.  GC_STR may
+       trigger a collection; code is a C local not yet returned/registered,
+       so without this pin it goes stale under precise-only roots (4a.6). */
+    gc_root_push_ptr((void**)&code);
+
     /* Re-wrap VAL_STRING operand strings: malloc → GC_STR (GC-managed) */
     for (int i = 0; i < len; i++) {
         if (code[i].operand.tag == VAL_STRING) {
@@ -1413,6 +1426,8 @@ static int parse_body(ParseState *ps, Instr **out) {
         /* VAL_SYMBOL sym.name is strdup'd (C-heap) — stays as-is.
          * VAL_NUMBER / VAL_BOOLEAN have no pointers. */
     }
+
+    gc_root_pop();  /* code */
 
     free(scratch);
     *out = code; return len;

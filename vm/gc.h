@@ -99,9 +99,10 @@ extern long gc_full_collect_count;
 
 /* ---- precise-root API (Phase 3/4) --------------------------------- */
 
-typedef enum { ROOT_PTR, ROOT_VALUE, ROOT_VALUE_ARRAY } RootKind;
+typedef enum { ROOT_PTR, ROOT_VALUE, ROOT_VALUE_ARRAY, ROOT_VALUE_VOLATILE } RootKind;
 void  gc_root_push_ptr(void **slot);               /* single GC pointer slot */
 void  gc_root_push_value(Value *vslot);            /* by-value Value, interior ptrs rewritten */
+void  gc_root_push_value_volatile(volatile Value *vslot); /* volatile-qualified Value */
 void  gc_root_push_value_array(Value *base, int *np); /* N by-value Values */
 void  gc_root_pop(void);                           /* pop one entry */
 void  gc_root_pop_to(size_t watermark);            /* truncate (longjmp unwind) */

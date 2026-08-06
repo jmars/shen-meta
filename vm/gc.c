@@ -127,6 +127,32 @@ static int    *reg_traced_code_len  = NULL;
 static uint64_t *pinned_bits;
 static size_t    pinned_bits_words;
 
+#ifdef GC_ROOTS_DIFF
+static uint64_t *precise_pinned;         /* pages pinned by precise roots */
+static int       gc_diff_phase = 0;     /* 0=off, 1=precise, 2=conservative */
+static long      gc_diff_missed = 0;    /* pages pinned only by conservative scan */
+static uintptr_t gc_diff_missed_pages[16]; /* first few missed page #s */
+static int       gc_diff_missed_count = 0;
+
+static void gc_diff_record_page(uintptr_t page) {
+    if (page < firstheappage || page > lastheappage) return;
+    size_t idx = page - firstheappage;
+    if (gc_diff_phase == 1) {
+        precise_pinned[idx / 64] |= (uint64_t)1 << (idx % 64);
+    } else if (gc_diff_phase == 2) {
+        if (!((precise_pinned[idx / 64] >> (idx % 64)) & 1)) {
+            gc_diff_missed++;
+            /* Dedupe for the report array */
+            int found = 0;
+            for (int i = 0; i < gc_diff_missed_count; i++)
+                if (gc_diff_missed_pages[i] == page) { found = 1; break; }
+            if (!found && gc_diff_missed_count < 16)
+                gc_diff_missed_pages[gc_diff_missed_count++] = page;
+        }
+    }
+}
+#endif
+
 static int page_is_pinned(uintptr_t page) {
     if (!pinned_bits) return 0;
     if (page < firstheappage || page > lastheappage) return 0;
@@ -288,11 +314,17 @@ static void pin_page(uintptr_t page) {
             allocatedpages++;
             space[page] = next_space;
             page_set_pinned(page);
+#ifdef GC_ROOTS_DIFF
+            gc_diff_record_page(page);
+#endif
             page--;
         }
         space[page] = next_space;
         allocatedpages++;
         page_set_pinned(page);
+#ifdef GC_ROOTS_DIFF
+        gc_diff_record_page(page);
+#endif
         queue(page);
     }
 }
@@ -313,6 +345,9 @@ static void pin_nursery_page(uintptr_t page) {
     /* Pin the head page */
     space[head] = current_space;
     page_set_pinned(head);
+#ifdef GC_ROOTS_DIFF
+    gc_diff_record_page(head);
+#endif
     queue(head);
     allocatedpages++;
 
@@ -322,6 +357,9 @@ static void pin_nursery_page(uintptr_t page) {
            space[p] == NURSERY) {
         space[p] = current_space;
         page_set_pinned(p);
+#ifdef GC_ROOTS_DIFF
+        gc_diff_record_page(p);
+#endif
         allocatedpages++;
         p++;
     }
@@ -382,6 +420,62 @@ static void collect(void) {
 
     /* ---- root set ---- */
 
+#ifdef GC_ROOTS_DIFF
+    /* Reset diff state */
+    memset(precise_pinned, 0, pinned_bits_words * sizeof(uint64_t));
+    gc_diff_missed = 0;
+    gc_diff_missed_count = 0;
+
+    /* Phase 1: precise roots only */
+    gc_diff_phase = 1;
+    gc_scan_roots(0);
+    gc_diff_phase = 2;
+
+    /* Phase 2: conservative C-stack scan + extra roots */
+    for (fp = (uintptr_t *)(&fp);
+         fp <= stackbase;
+         fp = (uintptr_t *)((char *)fp + STACKINC))
+    {
+        pin_page(GCP_to_PAGE(*fp));
+    }
+
+    for (i = 0; i < (uintptr_t)n_extra_roots; i++) {
+        uintptr_t *p   = (uintptr_t *)extra_roots[i].start;
+        uintptr_t *end = (uintptr_t *)((char *)extra_roots[i].start +
+                                       extra_roots[i].size);
+        for (; p < end; p++) {
+            pin_page(GCP_to_PAGE(*p));
+        }
+    }
+
+    gc_diff_phase = 0;
+
+    /* Diagnostic report */
+    {
+        uintptr_t pinned_count = 0;
+        if (pinned_bits) {
+            for (size_t bi = 0; bi < pinned_bits_words; bi++) {
+                uint64_t w = pinned_bits[bi];
+                while (w) { pinned_count += (w & 1); w >>= 1; }
+            }
+        }
+        fprintf(stderr, "GC_ROOTS_DIFF: collect(): conservative pinned pages = %zu, "
+                "precise roots = %zu, "
+                "global_table_len = %d, num_traced = %d\n",
+                (size_t)pinned_count, shadow_len,
+                reg_global_table_len ? *reg_global_table_len : 0,
+                reg_traced_code_len ? *reg_traced_code_len : 0);
+        if (gc_diff_missed == 0) {
+            fprintf(stderr, "GC_ROOTS_DIFF: P_cons subset P_prec (no missed roots)\n");
+        } else {
+            fprintf(stderr, "GC_ROOTS_DIFF: %ld pages pinned only by conservative scan (list):",
+                    gc_diff_missed);
+            for (int di = 0; di < gc_diff_missed_count; di++)
+                fprintf(stderr, " %lu", (unsigned long)gc_diff_missed_pages[di]);
+            fprintf(stderr, "\n");
+        }
+    }
+#else
     /* 1. conservative C-stack scan */
     for (fp = (uintptr_t *)(&fp);
          fp <= stackbase;
@@ -402,29 +496,6 @@ static void collect(void) {
 
     /* 3. Precise roots (additive pinning — 4a invariant) */
     gc_scan_roots(0);
-
-#ifdef GC_ROOTS_DIFF
-    /* ---- conservative-diff instrumentation ----
-     * Count pinned pages (P_cons) after the conservative root scan.
-     * In later phases (4a.3-4a.6) this will be compared against the
-     * set of pages reachable from precise roots (P_prec) to assert
-     * P_cons ⊆ P_prec — i.e., the precise roots cover everything
-     * the conservative scan found. */
-    {
-        uintptr_t pinned_count = 0;
-        if (pinned_bits) {
-            for (size_t bi = 0; bi < pinned_bits_words; bi++) {
-                uint64_t w = pinned_bits[bi];
-                while (w) { pinned_count += (w & 1); w >>= 1; }
-            }
-        }
-        fprintf(stderr, "GC_ROOTS_DIFF: collect(): conservative pinned pages = %zu, "
-                "precise roots = %zu, "
-                "global_table_len = %d, num_traced = %d\n",
-                (size_t)pinned_count, shadow_len,
-                reg_global_table_len ? *reg_global_table_len : 0,
-                reg_traced_code_len ? *reg_traced_code_len : 0);
-    }
 #endif
 
     /* ---- Cheney scavenge ---- */
@@ -519,9 +590,15 @@ static void nursery_root_pin(uintptr_t page) {
             /* Already promoted (current_space or the other
              * semi-space from a prior cycle).  Queue for scanning
              * so we find this object's refs into new nursery pages. */
+#ifdef GC_ROOTS_DIFF
+            gc_diff_record_page(page);
+#endif
             queue(page);
         }
     } else if (space[page] == current_space) {
+#ifdef GC_ROOTS_DIFF
+        gc_diff_record_page(page);
+#endif
         queue(page);
     }
 }
@@ -598,6 +675,12 @@ static void gc_scan_roots(int use_nursery) {
         case ROOT_VALUE:
             gc_pin_value((Value *)r->slot, use_nursery);
             break;
+        case ROOT_VALUE_VOLATILE: {
+            volatile Value *vs = (volatile Value *)r->slot;
+            Value tmp = *vs;
+            gc_pin_value(&tmp, use_nursery);
+            break;
+        }
         case ROOT_VALUE_ARRAY: {
             Value *base = (Value *)r->slot;
             int n = *(r->np);
@@ -692,6 +775,59 @@ static void collect_nursery(void) {
 
     /* ---- root set ---- */
 
+#ifdef GC_ROOTS_DIFF
+    /* Reset diff state */
+    memset(precise_pinned, 0, pinned_bits_words * sizeof(uint64_t));
+    gc_diff_missed = 0;
+    gc_diff_missed_count = 0;
+
+    /* Phase 1: precise roots only */
+    gc_diff_phase = 1;
+    gc_scan_roots(1);
+    gc_diff_phase = 2;
+
+    /* Phase 2: conservative C-stack scan + extra roots */
+    for (fp = (uintptr_t *)(&fp);
+         fp <= stackbase;
+         fp = (uintptr_t *)((char *)fp + STACKINC))
+    {
+        nursery_root_pin(GCP_to_PAGE(*fp));
+    }
+
+    for (i = 0; i < (uintptr_t)n_extra_roots; i++) {
+        uintptr_t *p   = (uintptr_t *)extra_roots[i].start;
+        uintptr_t *end = (uintptr_t *)((char *)extra_roots[i].start +
+                                       extra_roots[i].size);
+        for (; p < end; p++) {
+            nursery_root_pin(GCP_to_PAGE(*p));
+        }
+    }
+
+    gc_diff_phase = 0;
+
+    /* Diagnostic report */
+    {
+        uintptr_t pinned_count = 0;
+        if (pinned_bits) {
+            for (size_t bi = 0; bi < pinned_bits_words; bi++) {
+                uint64_t w = pinned_bits[bi];
+                while (w) { pinned_count += (w & 1); w >>= 1; }
+            }
+        }
+        if (gc_diff_missed == 0) {
+            fprintf(stderr, "GC_ROOTS_DIFF: collect_nursery(): P_cons subset P_prec (no missed roots) "
+                    "(total pinned=%zu, precise roots=%zu)\n",
+                    (size_t)pinned_count, shadow_len);
+        } else {
+            fprintf(stderr, "GC_ROOTS_DIFF: collect_nursery(): %ld pages pinned only by conservative scan (list):",
+                    gc_diff_missed);
+            for (int di = 0; di < gc_diff_missed_count; di++)
+                fprintf(stderr, " %lu", (unsigned long)gc_diff_missed_pages[di]);
+            fprintf(stderr, " (total pinned=%zu, precise roots=%zu)\n",
+                    (size_t)pinned_count, shadow_len);
+        }
+    }
+#else
     /* 1. Conservative C-stack scan */
     for (fp = (uintptr_t *)(&fp);
          fp <= stackbase;
@@ -712,6 +848,7 @@ static void collect_nursery(void) {
 
     /* 3. Precise roots (additive pinning — 4a invariant) */
     gc_scan_roots(1);
+#endif
 
     /* ---- scan dirty old-gen vectors (write-barrier remembered set) ---- */
     if (dirty_vectors_overflow) {
@@ -1230,6 +1367,14 @@ void gc_init(uintptr_t heap_size, void *stack_base) {
         exit(1);
     }
 
+#ifdef GC_ROOTS_DIFF
+    precise_pinned = calloc(pinned_bits_words, sizeof(uint64_t));
+    if (!precise_pinned) {
+        fprintf(stderr, "gc_init: precise_pinned bitmap alloc failed\n");
+        exit(1);
+    }
+#endif
+
     n_extra_roots = 0;
 }
 
@@ -1354,6 +1499,14 @@ void gc_root_push_value(Value *vslot) {
     if (shadow_len >= shadow_cap) shadow_stack_grow();
     shadow_stack[shadow_len].kind = ROOT_VALUE;
     shadow_stack[shadow_len].slot = vslot;
+    shadow_stack[shadow_len].np   = NULL;
+    shadow_len++;
+}
+
+void gc_root_push_value_volatile(volatile Value *vslot) {
+    if (shadow_len >= shadow_cap) shadow_stack_grow();
+    shadow_stack[shadow_len].kind = ROOT_VALUE_VOLATILE;
+    shadow_stack[shadow_len].slot = (void *)vslot;
     shadow_stack[shadow_len].np   = NULL;
     shadow_len++;
 }
