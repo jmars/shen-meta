@@ -10,7 +10,7 @@
  * - gc_alloc zeros the entire object body (not just pointer slots)
  * - No grow/shrink — fixed heap; OOM prints diagnostic and exits
  * - No global_ptr array (zincvm uses extra_roots for global_table)
- * - Public API: gc_alloc, gc_alloc_atomic, gc_realloc, gc_init, gc_move
+ * - Public API: gc_alloc, gc_alloc_atomic, gc_init, gc_move
  * - gc_alloc marked __attribute__((noinline)) to spill registers
  * - SIGALRM blocked during collection (zincvm uses alarm for test timeouts)
  */
@@ -1326,16 +1326,6 @@ void *gc_alloc_oldgen(size_t bytes, int type_tag) {
         collect();
 
     return gcalloc_internal(bytes, type_tag);
-}
-
-__attribute__((noinline))
-void *gc_realloc(void *old, size_t old_bytes, size_t new_bytes, int type_tag) {
-    void *newp = gc_alloc(new_bytes, type_tag);
-    if (old_bytes > 0 && old != NULL) {
-        size_t copy = old_bytes < new_bytes ? old_bytes : new_bytes;
-        memcpy(newp, old, copy);
-    }
-    return newp;
 }
 
 /* ---- precise-root API (Phase 4a) --------------------------------- */

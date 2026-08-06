@@ -251,6 +251,32 @@ deleted without losing any root:
 authoritative root set. Gate: `GC_ROOTS_DIFF` must show `P_cons ⊆ P_prec` (empty
 diff) across the whole gate before this lands. This is the highest-risk step.
 
+**Known 4a.6 blockers to fix BEFORE the flip** (from the 2026-08-06 review of
+the 4a foundation — all currently masked by the additive-pinning invariant, all
+become live use-after-move bugs once the conservative scan is removed):
+1. **trap-error handler-throw leak** (zincvm.c:1015-1017): if the handler body
+   raises a `simple-error`, `vm_throw` longjmps to `cf.parent` and the
+   body/handler `gc_root_pop()`s at 1016-1017 are skipped. Mostly cleaned by the
+   enclosing frame's watermark truncation, but fix so pops execute before the
+   handler call.
+2. **parse_body re-wrap `code` staleness** (zincvm.c:~1397-1415): the re-wrap
+   loop calls `GC_STR` (can trigger a collect) while `code` (a C local, not yet
+   returned/registered) is unrooted. Push `ROOT_PTR(&code)` around the loop.
+3. **val_cons intermediate cells** (zincvm.c:170-178): `car_cell`/`cdr_cell`
+   are held only in C locals (incl. the volatile `car_root`) between the two
+   `gc_alloc`s; push `ROOT_PTR(&car_root)` before the second alloc.
+4. **primitive intermediates** (exec_primitive, e.g. `cn`, `str`, `n->string`,
+   `val_string_from` callers): popped Values' interior pointers held only in
+   C-stack locals across their `gc_alloc`/`GC_STR`. Systematic audit of every
+   `gc_alloc` site in `exec_primitive` required before 4a.6.
+5. **volatile cast-away** (zincvm.c:977-979): `gc_root_push_value((Value*)&body)`
+   reads a `volatile Value` through a non-volatile alias — technically UB,
+   safe in practice; consider a `ROOT_VALUE_VOLATILE` kind.
+
+None of these are live bugs under the additive-pinning 4a invariant (the
+conservative scan still pins everything reachable on the C stack), which is why
+the foundation is safe to ship/push at the end of 4a.
+
 **Phase 4b — copy instead of pin = sliding compaction (PENDING).** Once roots
 are precise, `collect()` evacuates root-reachable objects instead of pinning
 them; compaction falls out of `move_internal`'s bump-into-`next_space` for free.

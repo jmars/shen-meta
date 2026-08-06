@@ -43,12 +43,6 @@ void *gc_alloc_oldgen(size_t bytes, int type_tag);
  * messages, and other blobs that contain no GC-managed pointers. */
 void *gc_alloc_atomic(size_t bytes);
 
-/* Reallocate a previously-allocated object.  old_bytes must match the
- * original allocation size.  type_tag is the same type tag as the original.
- * The old object is NOT freed (the GC will reclaim it eventually); the
- * returned pointer is a fresh allocation with old_bytes copied in. */
-void *gc_realloc(void *old, size_t old_bytes, size_t new_bytes, int type_tag);
-
 /* Register a memory range for conservative root scanning.  Every
  * sizeof(uintptr_t)-aligned word in the range is checked as a potential
  * heap pointer and the containing page is pinned (not moved). */
