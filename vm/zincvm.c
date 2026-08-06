@@ -1371,7 +1371,11 @@ static int parse_csexp_list(ParseState *ps, Instr **out) {
 }
 int parse_bytecode(const char *str, Instr **out) {
     ParseState ps; ps.p = str; ps.start = str;
-    if (setjmp(parse_err_jmp)) { fprintf(stderr, "%s\n", parse_err_msg); *out = NULL; return 0; }
+    volatile size_t parse_wm = gc_root_watermark();
+    if (setjmp(parse_err_jmp)) {
+        gc_root_pop_to(parse_wm);
+        fprintf(stderr, "%s\n", parse_err_msg); *out = NULL; return 0;
+    }
     return parse_csexp_list(&ps, out);
 }
 
@@ -1786,10 +1790,12 @@ static Value call_closure1(const char *name, Value arg) {
         fprintf(stderr, "meta-repl: %s not found in bundle (tag=%d)\n", name, g.tag);
         return val_nil();
     }
+    gc_root_push_value(&g);
     int env_len = g.lambda.env_len;
     Value *env = GC_VALUE_ARRAY(env_len + 1);
     if (env_len > 0) memcpy(env, g.lambda.env, env_len * sizeof(Value));
     env[env_len] = arg;
+    gc_root_pop();
     return vm_exec_env(g.lambda.code, g.lambda.code_len, env, env_len + 1);
 }
 
@@ -1801,10 +1807,12 @@ static Value call_closure3(const char *name, Value a, Value b, Value c) {
         fprintf(stderr, "meta-repl: %s not found in bundle (tag=%d)\n", name, g.tag);
         return val_nil();
     }
+    gc_root_push_value(&g);
     int env_len = g.lambda.env_len;
     Value *env = GC_VALUE_ARRAY(env_len + 3);
     if (env_len > 0) memcpy(env, g.lambda.env, env_len * sizeof(Value));
     env[env_len] = a; env[env_len+1] = b; env[env_len+2] = c;
+    gc_root_pop();
     return vm_exec_env(g.lambda.code, g.lambda.code_len, env, env_len + 3);
 }
 
@@ -1994,7 +2002,9 @@ int parse_bundle(const char *str) {
     ParseState ps;
     ps.p = str; ps.start = str;
 
+    volatile size_t parse_wm = gc_root_watermark();
     if (setjmp(parse_err_jmp)) {
+        gc_root_pop_to(parse_wm);
         fprintf(stderr, "%s\n", parse_err_msg);
         return 0;
     }
@@ -2238,10 +2248,12 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "repl: shen.initialise not found (tag=%d)\n", init.tag);
                     return 1;
                 }
+                gc_root_push_value(&init);
                 Value *env_init = GC_VALUE_ARRAY(init.lambda.env_len + 1);
                 if (init.lambda.env_len > 0)
                     memcpy(env_init, init.lambda.env, init.lambda.env_len * sizeof(Value));
                 env_init[init.lambda.env_len] = val_number(0);
+                gc_root_pop();
                 {
                     CatchFrame cf;
                     cf.parent = vm_catch_chain;
@@ -2261,10 +2273,12 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "repl: shen.repl not found\n");
                     return 1;
                 }
+                gc_root_push_value(&repl);
                 Value *env_repl = GC_VALUE_ARRAY(repl.lambda.env_len + 1);
                 if (repl.lambda.env_len > 0)
                     memcpy(env_repl, repl.lambda.env, repl.lambda.env_len * sizeof(Value));
                 env_repl[repl.lambda.env_len] = val_number(0);
+                gc_root_pop();
 
                 /* Set up REPL mode: intercept "error: empty stream" to
                    exit cleanly on EOF instead of looping forever. */

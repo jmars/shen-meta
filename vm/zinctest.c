@@ -648,10 +648,12 @@ int main(int argc, char **argv) {
                     Value nil = val_nil();
                     printf("  Test A ([] -> [cons]):\n");
 
+                    gc_root_push_value(&tli);
                     Value *env = GC_VALUE_ARRAY(tli.lambda.env_len + 1);
                     if (tli.lambda.env_len > 0)
                         memcpy(env, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
                     env[tli.lambda.env_len] = nil;  /* empty code */
+                    gc_root_pop();
 
                     {
                         CatchFrame cf;
@@ -676,10 +678,12 @@ int main(int argc, char **argv) {
                     Value n42 = val_number(42);
                     Value bc = val_cons(num_sym, val_cons(n42, nil));
 
+                    gc_root_push_value(&tli);
                     Value *env2 = GC_VALUE_ARRAY(tli.lambda.env_len + 1);
                     if (tli.lambda.env_len > 0)
                         memcpy(env2, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
                     env2[tli.lambda.env_len] = bc;
+                    gc_root_pop();
 
                     /* Trace Test B — disabled */
                     /* trace_counter = 0; trace_limit = 800; */
@@ -729,6 +733,7 @@ int main(int argc, char **argv) {
                         Value ctest = val_boolean(args[4].tag == VAL_CONS);
                         print_value(ctest); printf(" (expected false)\n");
 
+                        gc_root_push_value(&interp_fn);
                         Value *env_i = GC_VALUE_ARRAY(interp_fn.lambda.env_len + 5);
                         env_i[0] = args[4];  /* code   → access 4 */
                         env_i[1] = args[3];  /* acc    → access 3 */
@@ -737,6 +742,7 @@ int main(int argc, char **argv) {
                         env_i[4] = args[0];  /* ret    → access 0 */
                         if (interp_fn.lambda.env_len > 0)
                             memcpy(env_i + 5, interp_fn.lambda.env, interp_fn.lambda.env_len * sizeof(Value));
+                        gc_root_pop();
 
                         {
                             CatchFrame cf;
