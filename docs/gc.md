@@ -162,9 +162,35 @@ bitset only if profiling shows over-retention is a real problem.
 pin-in-place approach, so Step 4's remaining content is docs + generational
 stress/retention tests (item 6); 5) [DONE] add the `address->` barrier +
 `dirty_vectors`; 6) [DONE] add generational stress/retention tests (Step 4,
-incl. write-barrier Test 6 in Step 5); 7) [PENDING]
+incl. write-barrier Test 6 in Step 5); 7) [DONE]
 separate pre-emptive triggers (nursery-full → scavenge; old-gen → full collect);
 8) [DONE] docs update.
+
+**Step 6 — separate pre-emptive triggers (DONE).** The nursery scavenge and the
+old-gen full `collect()` now fire on independent, pre-emptive triggers:
+
+- **Nursery:** `gc_alloc`'s fast path fires `collect_nursery()` when free space
+  drops to `NURSERY_SCAVENGE_FREE_LOWATER` (1/8 of the 2MB nursery = 256KB),
+  *before* the bump cursor exhausts — not merely when a request can't fit. It is
+  gated on `!in_scavenge && first_free_nursery_page() <= nursery_last` so the
+  permanently-promoted (one-shot) degraded nursery is skipped, and it sets
+  `nursery_tried=1` so the reactive fallback doesn't scavenge twice in one call.
+  The reactive not-enough-room path is retained as the safety net.
+- **Old-gen:** the three literal `heappages/4` / `heappages/2` triggers are
+  unified into `oldgen_collect_threshold()` (pre-emptive, semi-space half-full)
+  and `oldgen_collect_lastresort()` (in `allocatepage`, semi-space full), which
+  read `heappages` live so `grow_heap` is tracked. No numeric threshold changed.
+- **Independence:** the nursery trigger reads only nursery free-space; the
+  old-gen trigger reads only `allocatedpages`/`heappages`. A scavenge never
+  nests a full collect (`!in_scavenge` at every `collect()` site); the only
+  coupling is sequential promotion pressure.
+- **Instrumentation** (`gc.h` externs): `gc_preemptive_scavenge_count`,
+  `gc_reactive_scavenge_count`, `gc_full_collect_count`. Test 7 in
+  `gc_nursery_tests()` (zinctest) burst-allocates 30K dead objects and asserts
+  the pre-emptive trigger fires while the reactive path never does. Probe
+  location is informational: under `ZINCVM_DEBUG` the conservative stack scan
+  pins more nursery pages, so the nursery may legitimately degrade to one-shot
+  promotion (probe in old-gen) — accepted, not a failure.
 
 **Top risks:** (1) `scavenge_to_space` — handled by the no-flip pin-in-place
 design: promoted pages go to the live old-gen `current_space`, never

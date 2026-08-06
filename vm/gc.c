@@ -49,6 +49,11 @@
 #define NURSERY_BYTES   (2 * 1024 * 1024)
 #define NURSERY_PAGES   (NURSERY_BYTES / PAGEBYTES)
 
+/* Fire a nursery scavenge when free space drops to this fraction of the
+ * nursery region, BEFORE the bump cursor exhausts it.  1/8 = 87.5% full.
+ * Decouples the nursery trigger from the reactive not-enough-room path. */
+#define NURSERY_SCAVENGE_FREE_LOWATER  (NURSERY_BYTES / 8)
+
 #define STACKINC  sizeof(uintptr_t)
 
 /* ---- static state ------------------------------------------------- */
@@ -89,6 +94,10 @@ static uintptr_t  next_space;
  * Non-static so zincvm.c can read them via gc.h. */
 long gc_nursery_scavenge_count = 0;
 long gc_nursery_pages_reclaimed = 0;
+
+long gc_preemptive_scavenge_count = 0;
+long gc_reactive_scavenge_count  = 0;
+long gc_full_collect_count       = 0;
 
 /* raw pointers to malloc'd metadata for eventual teardown */
 static char      *raw_heap_start;
@@ -338,6 +347,8 @@ static void collect(void) {
         fprintf(stderr, "gcalloc - Out of space during collect\n");
         exit(1);
     }
+
+    gc_full_collect_count++;
 
     /* Finalize any partial page */
     if (freewords != 0) {
@@ -805,6 +816,10 @@ static int grow_heap(uintptr_t pages_needed) {
     return -1;
 }
 
+/* Old-gen full-collect triggers.  read heappages live so grow_heap is tracked. */
+static inline uintptr_t oldgen_collect_threshold(void)   { return heappages / 4; }
+static inline uintptr_t oldgen_collect_lastresort(void)  { return heappages / 2; }
+
 /* ---- allocatepage --------------------------------------------------- */
 
 static void allocatepage(uintptr_t pages) {
@@ -822,9 +837,9 @@ retry:
      * gc_move copies live objects here). */
     if (current_space == next_space &&  /* not mid-collection */
         !in_scavenge &&                /* not during nursery scavenge */
-        allocatedpages + pages >= heappages / 2) {
+        allocatedpages + pages >= oldgen_collect_lastresort()) {
         collect();
-        if (allocatedpages + pages >= heappages / 2) {
+        if (allocatedpages + pages >= oldgen_collect_lastresort()) {
             if (!retried && grow_heap(pages) == 0) {
                 retried = 1;
                 goto retry;
@@ -1077,6 +1092,16 @@ void *gc_alloc(size_t bytes, int type_tag) {
         size_t total = words * WORDBYTES;
         int nursery_tried = 0;
 
+        /* Pre-emptive nursery scavenge: fire when free space drops below
+         * NURSERY_SCAVENGE_FREE_LOWATER, BEFORE the bump cursor is exhausted.
+         * This decouples the scavenge trigger from the reactive path. */
+        if (!in_scavenge && first_free_nursery_page() <= nursery_last &&
+            (size_t)(nursery_end - nursery_cur) <= NURSERY_SCAVENGE_FREE_LOWATER) {
+            collect_nursery();
+            nursery_tried = 1;
+            gc_preemptive_scavenge_count++;
+        }
+
     nursery_retry:
         /* Skip promoted (non-NURSERY) pages that were pinned by a
          * prior collection.  This keeps the bump cursor on free space. */
@@ -1121,6 +1146,7 @@ void *gc_alloc(size_t bytes, int type_tag) {
         if (!nursery_tried && first_free_nursery_page() <= nursery_last) {
             collect_nursery();
             nursery_tried = 1;
+            gc_reactive_scavenge_count++;
             goto nursery_retry;
         }
 
@@ -1132,7 +1158,7 @@ void *gc_alloc(size_t bytes, int type_tag) {
      * is getting full.  allocatepage() also triggers collect() as a
      * last resort, but pre-emptive collection here improves throughput
      * and keeps the heap from filling to the brink. */
-    if (allocatedpages > 0 && allocatedpages > heappages / 4 && !in_scavenge)
+    if (allocatedpages > 0 && allocatedpages > oldgen_collect_threshold() && !in_scavenge)
         collect();
 
     return gcalloc_internal(bytes, type_tag);
@@ -1147,7 +1173,7 @@ void *gc_alloc_oldgen(size_t bytes, int type_tag) {
     /* Force allocation through the old-gen path, bypassing the nursery
      * entirely.  Used for large objects (frame_stack, big arrays) that
      * would never fit in the nursery and would fragment it. */
-    if (allocatedpages > 0 && allocatedpages > heappages / 4 && !in_scavenge)
+    if (allocatedpages > 0 && allocatedpages > oldgen_collect_threshold() && !in_scavenge)
         collect();
 
     return gcalloc_internal(bytes, type_tag);

@@ -99,4 +99,8 @@ extern long gc_dirty_vectors_fired;
 extern long gc_nursery_scavenge_count;
 extern long gc_nursery_pages_reclaimed;
 
+extern long gc_preemptive_scavenge_count;
+extern long gc_reactive_scavenge_count;
+extern long gc_full_collect_count;
+
 #endif /* ZINCVM_GC_H */

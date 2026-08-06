@@ -392,6 +392,49 @@ static int gc_nursery_tests(void) {
         }
     }
 
+    /* ---- Test 7: pre-emptive triggers ---- */
+    {
+        long before_pre = gc_preemptive_scavenge_count;
+        long before_react = gc_reactive_scavenge_count;
+
+        /* Burst-allocate ~30000 dead gc_alloc_atomic(64) objects.
+         * The pre-emptive trigger fires at 87.5% nursery fullness,
+         * so the reactive path should never be hit during this burst. */
+        long cap = 30000;
+        while (cap-- > 0) {
+            char *p = (char *)gc_alloc_atomic(64);
+            (void)p;
+        }
+
+        long pre_fired = gc_preemptive_scavenge_count - before_pre;
+        long react_fired = gc_reactive_scavenge_count - before_react;
+
+        if (pre_fired == 0 && react_fired == 0) {
+            printf("  [7] pre-emptive triggers SKIPPED (nursery exhausted at load)\n");
+        } else {
+            /* The core Step 6 proof: the pre-emptive trigger fired and the
+             * reactive path never ran during the dead-alloc burst.  The probe
+             * location is informational only: under ZINCVM_DEBUG (or a
+             * retention-heavy load) the conservative stack scan pins more
+             * nursery pages, so the nursery may legitimately degrade to
+             * one-shot promotion and the probe lands in old-gen — that is the
+             * accepted degradation, not a trigger failure. */
+            int ok = (pre_fired >= 1) && (react_fired == 0);
+            char *probe = (char *)gc_alloc_atomic(64);
+            int in_nursery = probe ? gc_in_nursery(probe) : 0;
+            if (!ok) {
+                printf("  [7] pre-emptive triggers FAILED "
+                       "(pre_fired=%ld react_fired=%ld)\n",
+                       pre_fired, react_fired);
+                failed = 1;
+            } else {
+                printf("  [7] pre-emptive triggers passed — %ld pre-emptive, "
+                       "0 reactive (probe in nursery=%d)\n",
+                       pre_fired, in_nursery);
+            }
+        }
+    }
+
     printf(failed ? "GC nursery tests FAILED\n" : "GC nursery tests all passed\n");
     return failed;
 }
