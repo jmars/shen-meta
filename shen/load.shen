@@ -65,6 +65,9 @@
             (skip-ws Str (+ Pos 1) Len)
             (skip-comment Str (+ Pos 1) Len)))))
 
+\* skip-ws consumes whitespace and comments. Comments:
+   \ \  line comment (backslash backslash ... to end of line)
+   \* *\  block comment (backslash asterisk ... asterisk backslash) *\
 (define skip-ws
   Str Pos Len ->
   (if (>= Pos Len)
@@ -79,8 +82,26 @@
                       (let Ch2 (pos Str NextPos)
                         (if (= Ch2 (n->string 92))
                             (skip-comment Str (+ Pos 2) Len)
-                            (skip-ws Str NextPos Len)))))
+                            (if (= Ch2 (n->string 42))
+                                (skip-block-comment Str (+ NextPos 1) Len)
+                                (skip-ws Str NextPos Len))))))
                 Pos)))))
+
+\* skip-block-comment: Pos points just past the \* opener. Skip to the
+   closing *\ (asterisk then backslash) and continue with skip-ws. *\
+(define skip-block-comment
+  Str Pos Len ->
+  (if (>= Pos Len)
+      (simple-error "unterminated block comment")
+      (let Ch (pos Str Pos)
+        (if (= Ch (n->string 42))
+            (let NextPos (+ Pos 1)
+              (if (>= NextPos Len)
+                  (simple-error "unterminated block comment")
+                  (if (= (pos Str NextPos) (n->string 92))
+                      (skip-ws Str (+ NextPos 1) Len)
+                      (skip-block-comment Str (+ Pos 1) Len))))
+            (skip-block-comment Str (+ Pos 1) Len)))))
 
 (define parse-string-chars
   Str Pos Acc Len ->
@@ -106,6 +127,11 @@
         (if (or (ws-ch? Ch)
                 (= Ch "(")
                 (= Ch ")")
+                (= Ch "[")
+                (= Ch "]")
+                (= Ch "{")
+                (= Ch "}")
+                (= Ch "|")
                 (= Ch (n->string 34))
                 (= Ch (n->string 92)))
             [Acc Pos]
@@ -126,35 +152,52 @@
                   [(parse-num-str Token) FinalPos]
                   [(intern Token) FinalPos])))))))
 
+\* parse-list-tail: continue parsing a list after its first element.
+   Close is the closing char for the enclosing opener. Dotted is true only
+   inside [ ... ], where | marks the start of the cdr (improper list). *\
 (define parse-list-tail
-  Str Pos Len ->
+  Str Pos Close Dotted Len ->
   (let P (skip-ws Str Pos Len)
     (if (>= P Len)
         (simple-error "unterminated list")
-        (if (= (pos Str P) ")")
+        (if (= (pos Str P) Close)
             [[] (+ P 1)]
-            (let Pair1 (parse-expr Str P Len)
-              (let First (hd Pair1)
-                (let AfterFirst (hd (tl Pair1))
-                  (let Pair2 (parse-list-tail Str AfterFirst Len)
-                    (let Rest (hd Pair2)
-                      (let AfterRest (hd (tl Pair2))
-                        [[First | Rest] AfterRest]))))))))))
+            (if (and Dotted (= (pos Str P) (n->string 124)))
+                (let Pair1 (parse-expr Str (+ P 1) Len)
+                  (let Cdr (hd Pair1)
+                    (let After (hd (tl Pair1))
+                      (if (= (pos Str After) Close)
+                          [Cdr (+ After 1)]
+                          (simple-error "unterminated dotted pair")))))
+                (let Pair1 (parse-expr Str P Len)
+                  (let First (hd Pair1)
+                    (let AfterFirst (hd (tl Pair1))
+                      (let Pair2 (parse-list-tail Str AfterFirst Close Dotted Len)
+                        (let Rest (hd Pair2)
+                          (let AfterRest (hd (tl Pair2))
+                            [[First | Rest] AfterRest])))))))))))
 
 (define parse-list
-  Str Pos Len ->
+  Str Pos Close Dotted Len ->
   (let P (skip-ws Str Pos Len)
     (if (>= P Len)
         (simple-error "unterminated list")
-        (if (= (pos Str P) ")")
+        (if (= (pos Str P) Close)
             [[] (+ P 1)]
-            (let Pair1 (parse-expr Str P Len)
-              (let First (hd Pair1)
-                (let AfterFirst (hd (tl Pair1))
-                  (let Pair2 (parse-list-tail Str AfterFirst Len)
-                    (let Rest (hd Pair2)
-                      (let AfterRest (hd (tl Pair2))
-                        [[First | Rest] AfterRest]))))))))))
+            (if (and Dotted (= (pos Str P) (n->string 124)))
+                (let Pair1 (parse-expr Str (+ P 1) Len)
+                  (let Cdr (hd Pair1)
+                    (let After (hd (tl Pair1))
+                      (if (= (pos Str After) Close)
+                          [[[] | Cdr] (+ After 1)]
+                          (simple-error "unterminated dotted pair")))))
+                (let Pair1 (parse-expr Str P Len)
+                  (let First (hd Pair1)
+                    (let AfterFirst (hd (tl Pair1))
+                      (let Pair2 (parse-list-tail Str AfterFirst Close Dotted Len)
+                        (let Rest (hd Pair2)
+                          (let AfterRest (hd (tl Pair2))
+                            [[First | Rest] AfterRest])))))))))))
 
 (define parse-expr
   Str Pos Len ->
@@ -163,12 +206,19 @@
         (simple-error "unexpected end of input")
         (let Ch (pos Str P)
           (if (= Ch "(")
-              (parse-list Str (+ P 1) Len)
-              (if (= Ch ")")
-                  (simple-error "unexpected )")
-                  (if (= Ch (n->string 34))
-                      (parse-string Str (+ P 1) Len)
-                      (parse-atom Str P Len))))))))
+              (parse-list Str (+ P 1) ")" false Len)
+              (if (= Ch "[")
+                  (parse-list Str (+ P 1) (n->string 93) true Len)
+                  (if (= Ch "{")
+                      (parse-list Str (+ P 1) (n->string 125) false Len)
+                      (if (or (= Ch ")")
+                              (= Ch "]")
+                              (= Ch "}")
+                              (= Ch "|"))
+                          (simple-error (cn "unexpected " Ch))
+                          (if (= Ch (n->string 34))
+                              (parse-string Str (+ P 1) Len)
+                              (parse-atom Str P Len))))))))))
 
 (define parse-exprs
   Str Pos Len ->
