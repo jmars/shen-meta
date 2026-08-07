@@ -246,57 +246,7 @@ static void queue(uintptr_t page) {
     }
 }
 
-/* ---- move / pin --------------------------------------------------- */
-
-/* pin_page: mark a page and its CONTINUED predecessors as in next_space
- * so they survive this collection.  Also sets the pinned bitmap so
- * these pages stay pinned even after a space swap. */
-static void pin_page(uintptr_t page) {
-    if (page >= firstheappage &&
-        page <= lastheappage &&
-        space[page] == current_space)
-    {
-        /* Save the original input page: the backward walk below
-         * decrements `page` to the OBJECT (head) page, and the forward
-         * walk must resume from the INPUT page, not the head.  If the
-         * input is a tail page (a raw C-stack pointer into the middle
-         * or tail of a multi-page object), the backward walk already
-         * pinned [head .. input]; starting the forward walk at head+1
-         * would find space[head+1]==next_space and stop after zero
-         * iterations, leaving pages BEYOND the input unpinned. */
-        uintptr_t input = page;
-        while (page > firstheappage && type_page[page] == CONTINUED) {
-            allocatedpages++;
-            space[page] = next_space;
-            page_set_pinned(page);
-            page--;
-        }
-        space[page] = next_space;
-        allocatedpages++;
-        page_set_pinned(page);
-        queue(page);
-
-        /* Forward-walk CONTINUED tail pages of the same multi-page
-         * object and pin them in place.  They are scanned as part of
-         * the head page's body during the Cheney drain (cp += hw
-         * crosses the page boundary), so DO NOT queue them — only pin
-         * so they survive the post-flip free-page scan.  Without this
-         * a multi-page old-gen object reached via its head page would
-         * have its tail pages reclaimed and overwritten after collect.
-         * Start at input+1 (not head+1): the backward walk pinned
-         * [head..input] already, and the pages beyond the input tail
-         * page are the ones that still need pinning. */
-        uintptr_t t = input + 1;
-        while (t <= lastheappage &&
-               type_page[t] == CONTINUED &&
-               space[t] == current_space) {
-            space[t] = next_space;
-            allocatedpages++;
-            page_set_pinned(t);
-            t++;
-        }
-    }
-}
+/* ---- pin (nursery only — full collect uses gc_move evacuation) ---- */
 
 /* pin_nursery_page: pin a nursery page in place (no copy, no flip).
  * Walks backward to find the OBJECT (head) page, then forward through
@@ -467,9 +417,7 @@ static void collect(void) {
 /* ---- nursery collection (Phase 2 Step 3 — pin-in-place) ------------- */
 
 /* Root-scan dispatcher for the nursery scavenge: routes nursery pages
- * to pin_nursery_page and old-gen pages directly to the Cheney queue.
- * Does NOT call pin_page because in a no-flip scavenge next_space ==
- * current_space and pin_page would double-count allocatedpages. */
+ * to pin_nursery_page and old-gen pages directly to the Cheney queue. */
 static void nursery_root_pin(uintptr_t page) {
     if (page < firstheappage || page > lastheappage) return;
     if (page >= nursery_first && page <= nursery_last) {
@@ -488,47 +436,26 @@ static void nursery_root_pin(uintptr_t page) {
 
 /* gc_pin_value: pin all GC-managed pages reachable from a Value's
  * interior pointers.  Mirrors gc_scan_value's field list exactly.
- * use_nursery=1 → nursery_root_pin; use_nursery=0 → pin_page.
- * ADDITIVE only — never evacuates (4a invariant). */
-static void gc_pin_value(Value *v, int use_nursery) {
+ * Nursery-only — used by collect_nursery's root scan (4b.1).
+ * Full-collect root scan uses gc_scan_value (evacuation) instead. */
+static void gc_pin_value(Value *v) {
     switch (v->tag) {
     case VAL_CONS:
-        if (v->cons.car) {
-            uintptr_t pg = GCP_to_PAGE(v->cons.car);
-            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
-        }
-        if (v->cons.cdr) {
-            uintptr_t pg = GCP_to_PAGE(v->cons.cdr);
-            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
-        }
+        if (v->cons.car)   nursery_root_pin(GCP_to_PAGE(v->cons.car));
+        if (v->cons.cdr)   nursery_root_pin(GCP_to_PAGE(v->cons.cdr));
         break;
     case VAL_LAMBDA:
-        if (v->lambda.code) {
-            uintptr_t pg = GCP_to_PAGE(v->lambda.code);
-            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
-        }
-        if (v->lambda.env) {
-            uintptr_t pg = GCP_to_PAGE(v->lambda.env);
-            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
-        }
+        if (v->lambda.code) nursery_root_pin(GCP_to_PAGE(v->lambda.code));
+        if (v->lambda.env)  nursery_root_pin(GCP_to_PAGE(v->lambda.env));
         break;
     case VAL_VECTOR:
-        if (v->vector.data) {
-            uintptr_t pg = GCP_to_PAGE(v->vector.data);
-            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
-        }
+        if (v->vector.data) nursery_root_pin(GCP_to_PAGE(v->vector.data));
         break;
     case VAL_STRING:
-        if (v->str.data) {
-            uintptr_t pg = GCP_to_PAGE(v->str.data);
-            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
-        }
+        if (v->str.data)    nursery_root_pin(GCP_to_PAGE(v->str.data));
         break;
     case VAL_ERROR:
-        if (v->error.message) {
-            uintptr_t pg = GCP_to_PAGE(v->error.message);
-            if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
-        }
+        if (v->error.message) nursery_root_pin(GCP_to_PAGE(v->error.message));
         break;
     /* VAL_NUMBER, VAL_SYMBOL, VAL_BOOLEAN, VAL_NIL, VAL_MARK,
      * VAL_PRIM, VAL_STREAM contain no GC-managed pointers */
@@ -537,41 +464,70 @@ static void gc_pin_value(Value *v, int use_nursery) {
     }
 }
 
-/* gc_scan_roots: walk the precise-root shadow stack + typed walkers,
- * pinning all referenced pages.  ADDITIVE only — never evacuates
- * (4a invariant).  This is the SOLE authoritative root source;
- * there is no conservative C-stack scan or extra_roots fallback.
- * use_nursery=1 → nursery_root_pin (for collect_nursery);
- * use_nursery=0 → pin_page (for collect). */
+/* gc_scan_roots: walk the precise-root shadow stack + typed walkers.
+ * This is the SOLE authoritative root source; there is no conservative
+ * C-stack scan or extra_roots fallback.
+ *
+ * use_nursery=1 → nursery_root_pin (for collect_nursery — pin-in-place).
+ * use_nursery=0 → EVACUATE roots into next_space (full collect — 4b.1
+ *   sliding compaction).  gc_scan_value/gc_evacuate update the root
+ *   slots in place; the Cheney drain recursively evacuates all reachable
+ *   objects.  Nursery pointers within evacuated old-gen objects are
+ *   returned unchanged by gc_move (nursery is untouched during full
+ *   collect). */
 static void gc_scan_roots(int use_nursery) {
     /* 1. Shadow stack entries */
     for (size_t i = 0; i < shadow_len; i++) {
         GcRoot *r = &shadow_stack[i];
-        switch (r->kind) {
-        case ROOT_PTR: {
-            void *p = *(void **)r->slot;
-            if (p) {
-                uintptr_t pg = GCP_to_PAGE(p);
-                if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
+        if (use_nursery) {
+            /* ---- nursery scavenge: pin in place ---- */
+            switch (r->kind) {
+            case ROOT_PTR: {
+                void *p = *(void **)r->slot;
+                if (p) nursery_root_pin(GCP_to_PAGE(p));
+                break;
             }
-            break;
-        }
-        case ROOT_VALUE:
-            gc_pin_value((Value *)r->slot, use_nursery);
-            break;
-        case ROOT_VALUE_VOLATILE: {
-            volatile Value *vs = (volatile Value *)r->slot;
-            Value tmp = *vs;
-            gc_pin_value(&tmp, use_nursery);
-            break;
-        }
-        case ROOT_VALUE_ARRAY: {
-            Value *base = (Value *)r->slot;
-            int n = *(r->np);
-            for (int j = 0; j < n; j++)
-                gc_pin_value(&base[j], use_nursery);
-            break;
-        }
+            case ROOT_VALUE:
+                gc_pin_value((Value *)r->slot);
+                break;
+            case ROOT_VALUE_VOLATILE: {
+                volatile Value *vs = (volatile Value *)r->slot;
+                Value tmp = *vs;
+                gc_pin_value(&tmp);
+                break;
+            }
+            case ROOT_VALUE_ARRAY: {
+                Value *base = (Value *)r->slot;
+                int n = *(r->np);
+                for (int j = 0; j < n; j++)
+                    gc_pin_value(&base[j]);
+                break;
+            }
+            }
+        } else {
+            /* ---- full collect: evacuate roots ---- */
+            switch (r->kind) {
+            case ROOT_PTR:
+                gc_evacuate((void **)r->slot);
+                break;
+            case ROOT_VALUE:
+                gc_scan_value((Value *)r->slot);
+                break;
+            case ROOT_VALUE_VOLATILE: {
+                volatile Value *vs = (volatile Value *)r->slot;
+                Value tmp = *vs;
+                gc_scan_value(&tmp);
+                *vs = tmp;
+                break;
+            }
+            case ROOT_VALUE_ARRAY: {
+                Value *base = (Value *)r->slot;
+                int n = *(r->np);
+                for (int j = 0; j < n; j++)
+                    gc_scan_value(&base[j]);
+                break;
+            }
+            }
         }
     }
 
@@ -579,8 +535,12 @@ static void gc_scan_roots(int use_nursery) {
     if (reg_global_table && reg_global_table_len) {
         GlobalEntry *gt = (GlobalEntry *)reg_global_table;
         int n = *reg_global_table_len;
-        for (int i = 0; i < n; i++)
-            gc_pin_value(&gt[i].closure, use_nursery);
+        for (int i = 0; i < n; i++) {
+            if (use_nursery)
+                gc_pin_value(&gt[i].closure);
+            else
+                gc_scan_value(&gt[i].closure);
+        }
     }
 
     /* 3. Typed walker: traced_code Instr arrays */
@@ -588,8 +548,10 @@ static void gc_scan_roots(int use_nursery) {
         int n = *reg_traced_code_len;
         for (int i = 0; i < n; i++) {
             if (reg_traced_code[i]) {
-                uintptr_t pg = GCP_to_PAGE(reg_traced_code[i]);
-                if (use_nursery) nursery_root_pin(pg); else pin_page(pg);
+                if (use_nursery)
+                    nursery_root_pin(GCP_to_PAGE(reg_traced_code[i]));
+                else
+                    gc_evacuate((void **)&reg_traced_code[i]);
             }
         }
     }
@@ -1297,6 +1259,10 @@ void *gc_alloc_oldgen(size_t bytes, int type_tag) {
         collect();
 
     return gcalloc_internal(bytes, type_tag);
+}
+
+long gc_allocatedpages(void) {
+    return (long)allocatedpages;
 }
 
 /* ---- precise-root API (Phase 4a) --------------------------------- */

@@ -117,10 +117,16 @@ static int force_nursery_scavenge(long target) {
 /* Test 8 helpers.  These run in their own noinline frames so that no pointer
  * into body's TAIL pages (base+offset from the fill loop, or the burst's
  * locals) is ever left live on the frame that holds `body` itself.  If such a
- * tail-page pointer sat on the C stack during a collect, pin_page's BACKWARD
- * walk would pin that tail (space[tail]=next_space) and mask the very bug the
- * test exists to detect: a multi-page old-gen object reached only via its HEAD
- * page leaves its CONTINUED tail pages unpinned. */
+ * tail-page pointer sat on the C stack during a collect, the backward walk
+ * in the (now-deleted) pin_page would pin that tail and mask the very bug the
+ * test existed to detect: a multi-page old-gen object reached only via its HEAD
+ * page left its CONTINUED tail pages unpinned.
+ *
+ * Under 4b.1 sliding compaction, pin_page is deleted and root-reached objects
+ * are EVACUATED (copied) into next_space via gc_move → move_internal, which
+ * copies the full multi-page object word-by-word.  Tail-page retention is
+ * therefore guaranteed by copy, not by pinning.  The test continues to verify
+ * that a rooted multi-page object survives full collection intact. */
 
 __attribute__((noinline))
 static void t8_fill(Value *body, int N) {
@@ -446,25 +452,24 @@ static int gc_nursery_tests(void) {
         gc_root_pop();  /* vec_slot */
     }
 
-    /* ---- Test 8: multi-page old-gen object tail-page retention ----
-     * Regression test for the latent pin_page bug: a multi-page OLD-GEN
-     * object reached via its HEAD page during a full collect() had only its
-     * head pinned.  Its CONTINUED tail pages kept space == current_space,
-     * so after the semi-space flip they read as free and were reclaimed and
-     * memset (zeroed) by a subsequent allocation, clobbering the still-live
-     * object body.  pin_page's forward-walk of CONTINUED tails fixes it.
+    /* ---- Test 8: multi-page old-gen object survival across full collect ----
+     * Verifies that a multi-page OLD-GEN object reached via its HEAD page
+     * survives a full collection with all its tail pages intact.  Under 4b.1
+     * sliding compaction, the object is evacuated (copied to to-space) via
+     * gc_move → move_internal, which copies the full multi-page body
+     * word-by-word.  Tail-page clobbering is therefore moot — there are no
+     * unpinned tail pages to reclaim.
      *
      * The object's body pointer is held on the precise-root shadow stack
-     * (gc_root_push_ptr).  gc_scan_roots routes the head through pin_page,
-     * which forward-walks CONTINUED tails to pin them too.  If that forward
-     * walk were broken, the tail pages would be reclaimed and the test
-     * would fail — the root path still exercises the pin_page forward-walk
-     * that this regression test exists to verify. */
+     * (gc_root_push_ptr).  gc_scan_roots(0) now calls gc_evacuate on the
+     * slot, routing the head pointer through gc_move which copies the entire
+     * multi-page object to to-space.  If evacuation were broken, the tail
+     * pages would be reclaimed and the sentinel values clobbered. */
     {
         /* N chosen so the VALUE_ARRAY spans exactly 3 pages:
          * words = ceil(N*40/8)+1, PAGEBYTES=512 / WORDBYTES=8 => 64 words/page.
          * N=30 => words=151, which spans pages [0..2] (64+64+23), giving two
-         * CONTINUED tail pages that the (fixed) forward walk must pin. */
+         * CONTINUED tail pages that full-object copy must preserve. */
         const int N = 30;
         size_t bytes = (size_t)N * sizeof(Value);
         Value *body = (Value *)gc_alloc_oldgen(bytes, GC_TYPE_VALUE_ARRAY);
@@ -477,11 +482,11 @@ static int gc_nursery_tests(void) {
 
         /* Force full collections by allocation pressure (same technique as
          * Test 5) and wrap the free-page cursor around the heap (see
-         * t8_burst).  `body`'s head page is pinned via its precise root on
-         * the shadow stack; only pin_page's forward-walk pins its tail pages.
-         * We must NOT read `body` during the burst: that would leave a
-         * tail-page pointer on the stack and pin the tails via the backward
-         * walk, masking the bug. */
+         * t8_burst).  `body` is evacuated via gc_move →
+         * move_internal, which copies the full multi-page object to
+         * to-space.  We must NOT read `body` during the burst: that would
+         * leave a tail-page pointer on the stack and evacuate the object
+         * early, masking any incomplete-copy bug. */
         t8_burst();
 
         int first_bad = t8_verify(body, N);
@@ -667,6 +672,154 @@ done:
     return failed;
 }
 
+/* ---- GC Phase 4b.1 compaction test: prove objects MOVE ----
+ *
+ * Builds a known LIVE set of N cons-cell pairs (car ← gc_alloc_oldgen
+ * number cell, cdr ← next pair or nil) entirely in OLD-GEN so they are
+ * guaranteed to be in current_space and thus candidates for evacuation.
+ * The chain is held ONLY by a precise root (gc_root_push_value).
+ *
+ * After a forced full collect (allocation-pressure burst of dead 4MB raw
+ * chunks), two assertions must hold:
+ *   (a) the chain survived intact (walk and verify all N),
+ *   (b) a specific interior pointer actually MOVED (under pinning it
+ *       would not move; under evacuation it MUST).
+ *
+ * Assertion (a) proves correctness: no missed root.  Assertion (b)
+ * proves compaction: the object was copied to to-space rather than
+ * pinned in place.  Together they are the deterministic gate for 4b.1.
+ *
+ * Deterministic (fixed size, no random seed).  Runs on BOTH the no-arg
+ * path (fresh nursery) and the bundle path (exhausted nursery — the
+ * chain is old-gen and unaffected). */
+static int gc_compaction_test(void) {
+    int failed = 0;
+    const int N = 2000;
+
+    printf("\n=== GC Phase 4b.1 compaction test: %d-node old-gen cons chain ===\n", N);
+    fflush(stdout);
+
+    /* Build chain in old-gen: (0 . (1 . (2 . ... (N-1 . nil))))
+     * Each cons cell and its car (a number Value) are old-gen allocated.
+     * The chain is held ONLY on the precise-root shadow stack.
+     *
+     * IMPORTANT: exhaust any free pages within the nursery address range
+     * first by allocating 2 MB of dead raw chunks via gc_alloc_oldgen.
+     * Promoted nursery pages from a prior era may have their space tag
+     * in the OTHER semi-space (not current_space/next_space/NURSERY),
+     * making them look free to allocatepage.  Reusing such a page for
+     * a chain cell would make gc_in_nursery() return true (it checks
+     * the address range, not the space tag), and gc_move treats nursery
+     * addresses as pinned during full collect — the pointer would never
+     * move, defeating the compaction proof.  Exhausting the range first
+     * ensures the chain lands beyond nursery_last. */
+    {
+        const size_t EXHAUST = 2UL * 1024 * 1024;  /* 2 MB = nursery size */
+        for (int i = 0; i < 4; i++) {
+            char *blob = (char *)gc_alloc_oldgen(EXHAUST, GC_TYPE_RAW);
+            (void)blob;
+        }
+    }
+
+    Value root = val_nil();
+    gc_root_push_value(&root);
+
+    for (int i = N - 1; i >= 0; i--) {
+        Value *car_cell  = gc_alloc_oldgen(sizeof(Value), GC_TYPE_VALUE);
+        Value *cdr_cell  = gc_alloc_oldgen(sizeof(Value), GC_TYPE_VALUE);
+        Value *cons_cell = gc_alloc_oldgen(sizeof(Value), GC_TYPE_VALUE);
+
+        *car_cell  = val_number(i);
+        *cdr_cell  = root;
+        cons_cell->tag = VAL_CONS;
+        cons_cell->cons.car = car_cell;
+        cons_cell->cons.cdr = cdr_cell;
+        root = *cons_cell;
+    }
+
+    /* Verify the freshly-built chain. */
+    {
+        int count = 0; Value cur = root;
+        while (cur.tag == VAL_CONS) {
+            if (cur.cons.car->tag != VAL_NUMBER || cur.cons.car->number != count) {
+                printf("  [compaction] initial chain corrupt at node %d "
+                       "(tag=%d num=%ld)\n", count,
+                       cur.cons.car ? (int)cur.cons.car->tag : -1,
+                       cur.cons.car ? (long)cur.cons.car->number : -1);
+                failed = 1; goto comp_done;
+            }
+            cur = *cur.cons.cdr; count++;
+        }
+        if (count != N) {
+            printf("  [compaction] initial count mismatch: %d vs %d\n", count, N);
+            failed = 1; goto comp_done;
+        }
+        printf("  initial chain verified: %d nodes\n", count);
+    }
+
+    /* Snapshot a pointer into the middle of the chain (interior of old-gen
+     * object).  Under pin-in-place this address would be unchanged after
+     * collect; under evacuation gc_move copies it to to-space. */
+    void *before_ptr = (void *)root.cons.car;  /* interior pointer to car cell */
+
+    /* Force full collections by allocation pressure.
+     * Iterate until at least one full collection actually fires (the
+     * heap may have been grown by earlier tests, raising the threshold).
+     * Each iteration allocates a 4MB dead raw chunk; after the burst,
+     * gc_full_collect_count must have advanced at least once. */
+    {
+        const size_t CHUNK = 4UL * 1024 * 1024;
+        long fc_target = gc_full_collect_count + 1;
+        int cap = 200;  /* safety cap: up to 800 MB of dead pressure */
+        while (gc_full_collect_count < fc_target && cap-- > 0) {
+            char *blob = (char *)gc_alloc_oldgen(CHUNK, GC_TYPE_RAW);
+            (void)blob;
+        }
+        if (gc_full_collect_count < fc_target) {
+            printf("  [compaction] WARNING: could not force a full collect "
+                   "(heap too large?)\n");
+        }
+    }
+
+    /* (a) Chain survived intact. */
+    {
+        int count = 0; Value cur = root;
+        while (cur.tag == VAL_CONS) {
+            if (cur.cons.car->tag != VAL_NUMBER || cur.cons.car->number != count) {
+                printf("  [compaction] chain corrupt after collect at node %d "
+                       "(tag=%d num=%ld)\n", count,
+                       cur.cons.car ? (int)cur.cons.car->tag : -1,
+                       cur.cons.car ? (long)cur.cons.car->number : -1);
+                failed = 1; goto comp_done;
+            }
+            cur = *cur.cons.cdr; count++;
+        }
+        if (count != N) {
+            printf("  [compaction] post-collect count mismatch: %d vs %d\n", count, N);
+            failed = 1; goto comp_done;
+        }
+        printf("  chain intact after full collect: %d nodes\n", count);
+    }
+
+    /* (b) Pointer MUST have moved.  Under pin-in-place the address would
+     * be unchanged; under evacuation gc_move copies it to to-space. */
+    void *after_ptr = (void *)root.cons.car;
+    if (before_ptr == after_ptr) {
+        printf("  [compaction] FAILED: interior pointer did NOT move "
+               "(%p — still pinned)\n", before_ptr);
+        failed = 1;
+    } else {
+        printf("  [compaction] pointer moved: %p → %p (compaction confirmed)\n",
+               before_ptr, after_ptr);
+    }
+
+comp_done:
+    gc_root_pop();  /* root */
+    printf(failed ? "  gc_compaction_test FAILED\n"
+                  : "  gc_compaction_test PASSED — compaction verified\n");
+    return failed;
+}
+
 /* ------------------------------------------------------------------ */
 /*  main — test driver                                                 */
 /* ------------------------------------------------------------------ */
@@ -714,6 +867,13 @@ int main(int argc, char **argv) {
                self-hosting tests below allocate enough to promote every nursery
                page, permanently exhausting the fast lane. */
             gc_nursery_tests();
+
+            /* GC Phase 4b.1: sliding compaction — prove root-reached
+               old-gen objects MOVE during full collect.  The nursery may
+               be exhausted at this point (all pages promoted during bundle
+               load), but the compaction test uses gc_alloc_oldgen and is
+               unaffected by nursery state. */
+            gc_compaction_test();
 
             /* Self-hosting proof: call Shen library functions from the
                bundle with values built in C. */
@@ -1078,6 +1238,10 @@ int main(int argc, char **argv) {
        the persistent tree is built through the nursery bump allocator — the
        path the flip depends on. */
     gc_root_churn_test();
+
+    /* GC Phase 4b.1: sliding compaction — prove root-reached objects MOVE
+       (evacuated to to-space) rather than being pinned in place. */
+    gc_compaction_test();
 
     /* CONVENTION: Hand-written bytecode MUST push args in RTL order
        (rightmost Shen arg pushed first, leftmost arg pushed last/on top).

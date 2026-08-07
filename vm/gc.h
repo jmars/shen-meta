@@ -91,6 +91,11 @@ extern long gc_preemptive_scavenge_count;
 extern long gc_reactive_scavenge_count;
 extern long gc_full_collect_count;
 
+/* Live-set size: number of pages currently allocated in the active
+ * semi-space.  Read by compaction tests to prove objects move (pages
+ * shrink when live objects are packed into to-space instead of pinned). */
+long gc_allocatedpages(void);
+
 /* ---- precise-root API (Phase 3/4) --------------------------------- */
 
 typedef enum { ROOT_PTR, ROOT_VALUE, ROOT_VALUE_ARRAY, ROOT_VALUE_VOLATILE } RootKind;
