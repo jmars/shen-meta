@@ -240,42 +240,44 @@ deleted without losing any root:
   `env_push` NULL→memcpy bug.
 - **Gate** (all pass): 34 release + 39 debug + 34 UBSan + reduced bundle
   (821 closures, nursery 7/7, stress 50k, retention) + full OS bundle
-  (1643 closures, debug VM). Conservative scan is STILL the authoritative root
-  set during 4a (precise roots are additive-pinning, never evacuate); the flip
-  to precise-authoritative is the deferred 4a.6.
+  (1643 closures, debug VM). During 4a the conservative scan was STILL the
+  authoritative root set (precise roots were additive-pinning, never evacuate);
+  the flip to precise-authoritative is 4a.6 below.
 - **Instrumentation**: `GC_ROOTS_DIFF` (debug build flag) reports conservative
   pinned pages + precise root count + typed-walker sizes. `verify_heap` no-op.
 
-**Phase 4a.6 — flip (PENDING).** Delete the conservative C-stack scan in
-`collect()`/`collect_nursery()`; make `gc_scan_roots` + typed walkers the sole
-authoritative root set. Gate: `GC_ROOTS_DIFF` must show `P_cons ⊆ P_prec` (empty
-diff) across the whole gate before this lands. This is the highest-risk step.
+**Phase 4a.6 — flip (DONE).** The conservative C-stack scan and `extra_roots`
+machinery were DELETED from `collect()`/`collect_nursery()`; `gc_scan_roots` +
+the typed walkers are the SOLE authoritative root set. Also removed:
+`GC_ROOTS_DIFF` instrumentation, `STACKINC`/`stackbase`/`gc_reg_buf`, and
+`<setjmp.h>` from gc.c. `gc_init` no longer takes a `stack_base` param;
+`zincvm.c`/`zinctest.c` register typed walkers instead of `gc_set_extra_roots`.
+`gc_root_churn_test` (zinctest.c) is the standing post-flip missed-root
+detector — a 5000-node nursery tree held only by a `ROOT_VALUE` precise root,
+run across 200K iterations of transient garbage + forced scavenges + full
+collects. Verified: 34/34 release, 39/39 debug, 34/34 UBSan, reduced bundle
+suite, churn 200K/100 collections.
 
-**Known 4a.6 blockers to fix BEFORE the flip** (from the 2026-08-06 review of
-the 4a foundation — all currently masked by the additive-pinning invariant, all
-become live use-after-move bugs once the conservative scan is removed):
-1. **trap-error handler-throw leak** (zincvm.c:1015-1017): if the handler body
-   raises a `simple-error`, `vm_throw` longjmps to `cf.parent` and the
-   body/handler `gc_root_pop()`s at 1016-1017 are skipped. Mostly cleaned by the
-   enclosing frame's watermark truncation, but fix so pops execute before the
-   handler call.
-2. **parse_body re-wrap `code` staleness** (zincvm.c:~1397-1415): the re-wrap
-   loop calls `GC_STR` (can trigger a collect) while `code` (a C local, not yet
-   returned/registered) is unrooted. Push `ROOT_PTR(&code)` around the loop.
-3. **val_cons intermediate cells** (zincvm.c:170-178): `car_cell`/`cdr_cell`
-   are held only in C locals (incl. the volatile `car_root`) between the two
-   `gc_alloc`s; push `ROOT_PTR(&car_root)` before the second alloc.
-4. **primitive intermediates** (exec_primitive, e.g. `cn`, `str`, `n->string`,
-   `val_string_from` callers): popped Values' interior pointers held only in
-   C-stack locals across their `gc_alloc`/`GC_STR`. Systematic audit of every
-   `gc_alloc` site in `exec_primitive` required before 4a.6.
-5. **volatile cast-away** (zincvm.c:977-979): `gc_root_push_value((Value*)&body)`
-   reads a `volatile Value` through a non-volatile alias — technically UB,
-   safe in practice; consider a `ROOT_VALUE_VOLATILE` kind.
-
-None of these are live bugs under the additive-pinning 4a invariant (the
-conservative scan still pins everything reachable on the C stack), which is why
-the foundation is safe to ship/push at the end of 4a.
+**Pre-flip hardening (retrospective — all resolved before the flip landed).**
+The following were the documented blockers that had to be fixed before the
+conservative scan could be removed; each is now resolved:
+1. **trap-error handler-throw leak** — handler body raising a `simple-error`
+   used to skip the `gc_root_pop()`s on the enclosing frame's body/handler;
+   fixed by rooting `cf.error_val` as a precise root at catch sites
+   (commit `109c4dc`).
+2. **parse_body re-wrap `code` staleness** — `GC_STR` re-wrap loop could
+   collect while the freshly-parsed `code` C-local was unrooted; fixed by
+   pushing `ROOT_PTR(&code)` around the loop (commits `cdab5da`/`08367d4`).
+3. **val_cons intermediate cells** — `car_cell`/`cdr_cell` held only in C
+   locals between the two `gc_alloc`s; fixed by rooting them (commits
+   `cdab5da`/`08367d4`).
+4. **primitive intermediates** — popped Values' interior pointers held only
+   in C-stack locals across `gc_alloc`/`GC_STR` in `exec_primitive`;
+   systematically audited and rooted (commits `cdab5da`/`08367d4`).
+5. **volatile cast-away UB** — `gc_root_push_value((Value*)&body)` read a
+   `volatile Value` through a non-volatile alias; resolved by the
+   `ROOT_VALUE_VOLATILE` root kind (gc.h), implemented in
+   `gc_root_push_value_volatile` and handled by `gc_scan_roots`.
 
 **Phase 4b — copy instead of pin = sliding compaction (DONE: 4b.1 + 4b.2).** Once
 roots are precise, `collect()` evacuates root-reachable objects instead of pinning

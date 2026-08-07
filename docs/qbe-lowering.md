@@ -90,9 +90,10 @@ This design was chosen through a recorded chain of decisions:
   pop `a1=top=leftmost`, `a2=below=rightmost`, compute `a1 OP a2`
   (`zincvm.c:670-689`) — e.g. `-` yields `left - right`.
 - **GC interface** (`vm/gc.h`): `gc_alloc`, `gc_alloc_atomic`, `GC_VALUE_ARRAY(n)`
-  (`zincvm.h:17-19`), `gc_set_extra_roots`. Typed headers + tag-dispatch scavenger;
-  conservative C-stack scan pins ambiguous roots. Write barrier only on `address->`
-  (`gc.h:83-88`).
+  (`zincvm.h:17-19`), the precise-root shadow-stack API (`gc_root_push_ptr`,
+  `gc_root_push_value`, etc.). Typed headers + tag-dispatch scavenger; precise
+  roots are the sole root source (no conservative C-stack scan since 4a.6).
+  Write barrier only on `address->` (`gc.h:83-88`).
 - **Value constructors** (`vm/zincvm.h:79-86`, `zincvm.c:130-183`): `val_number`,
   `val_string`, `val_symbol`, `val_boolean`, `val_cons`, `val_nil`,
   `val_lambda(code,code_len,env,env_len)` (GC-copies env), `val_vector`. These are
@@ -554,8 +555,8 @@ each `gc_alloc`. Disciplines:
   GC-capable call. QBE's caller-save allocation keeps those locals on the stack at
   the call. Enforce by always routing GC-capable calls through C shims — never let
   QBE hold the only copy of a `Value` across such a call.
-- **Env activation records are GC-rooted via `gc_set_extra_roots`** (`vm/gc.h:55`)
-  for the call duration.
+- **Env activation records are rooted on the precise-root shadow stack**
+  (`gc_root_push_value` / `gc.h`) for the call duration.
 
 Same discipline the C VM already relies on. Not proven (§6.4); a documented trusted
 invariant.

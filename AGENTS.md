@@ -126,11 +126,11 @@ and `pos` out-of-bounds inside `trap-error` (semantic, needed for `strlen`/end-o
 - **GC**: custom generational collector (`vm/gc.c`, `vm/gc.h`, shared types in
   `vm/zinctypes.h`). A 2MB nursery (pages marked `space==3`) is the allocation
   fast lane; the existing full-copy `collect()` is the (rare) old-gen collector
-  and compacts old gen. Typed headers drive a tag-dispatch scavenger;
-  conservative C-stack scan pins ambiguous roots; typed `gc_scan_value`/
-  `gc_evacuate` in `zincvm.c` handle interior pointers. Write barrier at
-  `address->` vector writes (site 1, required); `global_set` barrier deferred
-  (global_table is conservatively pinned as an extra_root). See `docs/gc.md`.
+  and compacts old gen. Typed headers drive a tag-dispatch scavenger; roots are
+  precise-only via the shadow stack + typed walkers (no conservative C-stack
+  scan since 4a.6); typed `gc_scan_value`/`gc_evacuate` in `zincvm.c` handle
+  interior pointers. Write barrier at `address->` vector writes (site 1,
+  required); `global_set` barrier deferred (see `docs/gc.md`).
 
 - csexp atoms: `[len:type]value` — type is `s`/`n`/`S`/`b`
 - Opcodes are single chars: `m` pushmark, `p` apply, `r` grab, `v` return, etc.
