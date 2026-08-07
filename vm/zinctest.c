@@ -734,6 +734,184 @@ static int gc_nursery_tests(void) {
         gc_root_pop();  /* cell1 */
     }
 
+    /* ---- Test 14: dirty-globals survivor (load-bearing) ---- */
+    {
+        /* Allocate a nursery cons, register as precise root, store in
+         * global table, force a scavenge — the cons must be evacuated
+         * to old-gen and intact when retrieved via global_get.
+         * This is the load-bearing test for barrier site 2. */
+        Value c = val_cons(val_number(42), val_nil());
+        gc_root_push_value(&c);  /* precise root across scavenge */
+
+        long fired_before = gc_dirty_globals_fired;
+        global_set("t-dirty-1", c);
+        int fired_ok = (gc_dirty_globals_fired > fired_before);
+
+        long before = gc_nursery_scavenge_count;
+        force_nursery_scavenge(before + 1);
+
+        Value retrieved = global_get("t-dirty-1");
+        int ok14 = fired_ok;
+        ok14 = ok14 && (retrieved.tag == VAL_CONS);
+        ok14 = ok14 && retrieved.cons.car &&
+                       (retrieved.cons.car->tag == VAL_NUMBER) &&
+                       (retrieved.cons.car->number == 42);
+        ok14 = ok14 && gc_in_oldgen(retrieved.cons.car) &&
+                       !gc_in_nursery(retrieved.cons.car);
+
+        if (!ok14) {
+            printf("  [14] dirty-globals survivor FAILED "
+                   "(fired_ok=%d tag=%d val=%ld)\n",
+                   fired_ok, retrieved.tag,
+                   retrieved.cons.car ? (long)retrieved.cons.car->number : -1);
+            failed = 1;
+        } else {
+            printf("  [14] dirty-globals survivor passed — nursery cons "
+                   "survived via dirty-globals barrier, evacuated to old-gen\n");
+        }
+        gc_root_pop();  /* c */
+    }
+
+    /* ---- Test 15: dirty-globals re-mark after clear ---- */
+    {
+        /* After a scavenge clears the bitset, a fresh global_set must
+         * re-mark the bit so the next scavenge still scans it. */
+        Value c2 = val_cons(val_number(99), val_nil());
+        gc_root_push_value(&c2);
+
+        long fired_before = gc_dirty_globals_fired;
+        global_set("t-dirty-1", c2);
+        int refired_ok = (gc_dirty_globals_fired > fired_before);
+
+        long scanned_before = gc_dirty_globals_scanned;
+        long before = gc_nursery_scavenge_count;
+        force_nursery_scavenge(before + 1);
+        int rescanned_ok = (gc_dirty_globals_scanned > scanned_before);
+
+        Value retrieved = global_get("t-dirty-1");
+        int ok15 = refired_ok && rescanned_ok;
+        ok15 = ok15 && (retrieved.tag == VAL_CONS);
+        ok15 = ok15 && retrieved.cons.car &&
+                       (retrieved.cons.car->tag == VAL_NUMBER) &&
+                       (retrieved.cons.car->number == 99);
+        ok15 = ok15 && gc_in_oldgen(retrieved.cons.car) &&
+                       !gc_in_nursery(retrieved.cons.car);
+
+        if (!ok15) {
+            printf("  [15] dirty-globals re-mark FAILED "
+                   "(refired=%d rescanned=%d tag=%d val=%ld)\n",
+                   refired_ok, rescanned_ok, retrieved.tag,
+                   retrieved.cons.car ? (long)retrieved.cons.car->number : -1);
+            failed = 1;
+        } else {
+            printf("  [15] dirty-globals re-mark passed — bit re-marked "
+                   "after clear, rescanned in next scavenge\n");
+        }
+        gc_root_pop();  /* c2 */
+    }
+
+    /* ---- Test 16: dirty-globals skip (optimization proof) ---- */
+    {
+        /* After a scavenge clears the bitset and with no intervening
+         * global_set, the next scavenge must scan zero dirty globals. */
+        long scanned_before = gc_dirty_globals_scanned;
+        long before = gc_nursery_scavenge_count;
+        force_nursery_scavenge(before + 1);
+        long scanned_delta = gc_dirty_globals_scanned - scanned_before;
+
+        int ok16 = (scanned_delta == 0);
+        if (!ok16) {
+            printf("  [16] dirty-globals skip FAILED "
+                   "(scanned_delta=%ld, expected 0)\n", scanned_delta);
+            failed = 1;
+        } else {
+            printf("  [16] dirty-globals skip passed — no dirty globals "
+                   "scanned when none marked\n");
+        }
+    }
+
+    /* ---- Test 17: dirty-globals old-gen store ---- */
+    {
+        /* Storing an old-gen value into the global table must still
+         * mark the bit and be scanned, but gc_scan_value is a no-op
+         * on already-old-gen closures — no corruption. */
+        Value *oldval = (Value *)gc_alloc_oldgen(sizeof(Value), GC_TYPE_VALUE);
+        *oldval = val_number(7777);
+        gc_root_push_ptr((void**)&oldval);
+
+        long fired_before = gc_dirty_globals_fired;
+        global_set("t-oldgen", *oldval);
+        int fired17 = (gc_dirty_globals_fired > fired_before);
+
+        long scanned_before = gc_dirty_globals_scanned;
+        long before = gc_nursery_scavenge_count;
+        force_nursery_scavenge(before + 1);
+        int scanned17 = (gc_dirty_globals_scanned > scanned_before);
+
+        Value retrieved = global_get("t-oldgen");
+        int ok17 = fired17 && scanned17;
+        ok17 = ok17 && (retrieved.tag == VAL_NUMBER) &&
+                       (retrieved.number == 7777);
+
+        if (!ok17) {
+            printf("  [17] dirty-globals old-gen store FAILED "
+                   "(fired=%d scanned=%d tag=%d val=%ld)\n",
+                   fired17, scanned17, retrieved.tag,
+                   (long)retrieved.number);
+            failed = 1;
+        } else {
+            printf("  [17] dirty-globals old-gen store passed — old-gen "
+                   "value scanned without corruption\n");
+        }
+        gc_root_pop();  /* oldval */
+    }
+
+    /* ---- Test 18: dirty-globals full-collect hygiene ---- */
+    {
+        /* A full collect must clear the dirty-globals bitset so a
+         * subsequent scavenge starts from a clean bitset. */
+        Value *hv = (Value *)gc_alloc(sizeof(Value), GC_TYPE_VALUE);
+        *hv = val_number(8888);
+        gc_root_push_ptr((void**)&hv);
+
+        /* Mark a global dirty. */
+        long fired_before = gc_dirty_globals_fired;
+        global_set("t-hygiene", *hv);
+        int fired18 = (gc_dirty_globals_fired > fired_before);
+
+        /* Force a full collect via old-gen allocation pressure.
+         * Use the same technique as Test 8 (200 × 4MB chunks) to
+         * guarantee a full collect fires regardless of heap size. */
+        long fc_before = gc_full_collect_count;
+        {
+            const size_t CHUNK = 4 * 1024 * 1024;
+            for (int i = 0; i < 200; i++) {
+                char *blob = (char *)gc_alloc_oldgen(CHUNK, GC_TYPE_RAW);
+                (void)blob;
+            }
+        }
+        int fc_ok = (gc_full_collect_count > fc_before);
+
+        /* After full collect, force a scavenge — no dirty globals
+         * should be scanned because the full collect cleared them. */
+        long scanned_before = gc_dirty_globals_scanned;
+        long before = gc_nursery_scavenge_count;
+        force_nursery_scavenge(before + 1);
+        long scanned_delta = gc_dirty_globals_scanned - scanned_before;
+
+        int ok18 = fired18 && fc_ok && (scanned_delta == 0);
+        if (!ok18) {
+            printf("  [18] dirty-globals full-collect hygiene FAILED "
+                   "(fired=%d fc_ok=%d scanned_delta=%ld)\n",
+                   fired18, fc_ok, scanned_delta);
+            failed = 1;
+        } else {
+            printf("  [18] dirty-globals full-collect hygiene passed — "
+                   "bits cleared by full collect, no stale scan\n");
+        }
+        gc_root_pop();  /* hv */
+    }
+
     printf(failed ? "GC nursery tests FAILED\n" : "GC nursery tests all passed\n");
     printf("GC alloc classes: RAW=%llu VALUE=%llu VALUE_ARRAY=%llu "
            "INSTR_ARRAY=%llu CALLFRAME_ARRAY=%llu\n",

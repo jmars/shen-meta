@@ -186,6 +186,41 @@ void gc_dirty_vectors_clear(void) {
  * nursery-referencing value into an old-gen vector fires the barrier. */
 long gc_dirty_vectors_fired = 0;
 
+/* ---- write-barrier remembered set: dirty globals (site 2) --------- */
+
+/* Dirty globals: a fixed 256-byte bitset (GLOBAL_TABLE_MAX bits = 2048).
+ * Marked by global_set whenever a closure is stored into any global-table
+ * slot; consulted by gc_scan_roots during nursery scavenges to skip
+ * non-dirty globals (avoiding re-enqueuing hundreds of old-gen code/env
+ * pages that haven't changed).  Cleared at scavenge-end and full-collect
+ * start — same lifecycle as dirty_vectors.  No overflow path (the bitset
+ * is sized exactly to GLOBAL_TABLE_MAX). */
+_Static_assert(GLOBAL_TABLE_MAX % 64 == 0,
+               "DIRTY_GLOBALS bitset requires GLOBAL_TABLE_MAX be a multiple of 64");
+#define DIRTY_GLOBALS_MAX_BITS GLOBAL_TABLE_MAX
+static uint64_t dirty_globals[DIRTY_GLOBALS_MAX_BITS / 64];
+long gc_dirty_globals_fired  = 0;
+long gc_dirty_globals_scanned = 0;
+
+void gc_dirty_globals_mark(int idx) {
+    if (idx < 0 || idx >= GLOBAL_TABLE_MAX) return;
+    int word = idx / 64;
+    uint64_t mask = 1ULL << (idx % 64);
+    if (!(dirty_globals[word] & mask)) {
+        dirty_globals[word] |= mask;
+        gc_dirty_globals_fired++;
+    }
+}
+
+int gc_dirty_globals_test(int idx) {
+    if (idx < 0 || idx >= GLOBAL_TABLE_MAX) return 0;
+    return (dirty_globals[idx / 64] >> (idx % 64)) & 1;
+}
+
+void gc_dirty_globals_clear(void) {
+    memset(dirty_globals, 0, sizeof(dirty_globals));
+}
+
 /* ---- forward declarations ----------------------------------------- */
 
 static void  collect(void);
@@ -258,6 +293,7 @@ static void collect(void) {
     allocatedpages = 0;
     queue_head = 0;
     gc_dirty_vectors_clear();
+    gc_dirty_globals_clear();
 
     /* ---- root set ---- */
 
@@ -399,12 +435,24 @@ static void gc_scan_roots(void) {
         }
     }
 
-    /* 2. Typed walker: global_table closures */
+    /* 2. Typed walker: global_table closures.
+     * During a nursery scavenge, skip non-dirty globals via the bitset
+     * to avoid re-enqueuing hundreds of stable old-gen code/env pages.
+     * Full collects always scan every global (bitset is cleared at start). */
     if (reg_global_table && reg_global_table_len) {
         GlobalEntry *gt = (GlobalEntry *)reg_global_table;
         int n = *reg_global_table_len;
-        for (int i = 0; i < n; i++)
-            gc_scan_value(&gt[i].closure);
+        if (in_scavenge) {
+            for (int i = 0; i < n; i++) {
+                if (gc_dirty_globals_test(i)) {
+                    gc_scan_value(&gt[i].closure);
+                    gc_dirty_globals_scanned++;
+                }
+            }
+        } else {
+            for (int i = 0; i < n; i++)
+                gc_scan_value(&gt[i].closure);
+        }
     }
 
     /* 3. Typed walker: traced_code Instr arrays */
@@ -562,6 +610,7 @@ static void collect_nursery(void) {
     }
 
     gc_dirty_vectors_clear();
+    gc_dirty_globals_clear();
 
     in_scavenge = 0;
 

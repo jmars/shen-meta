@@ -77,6 +77,15 @@ void gc_dirty_vectors_clear(void);
  * (post-dedup).  Read by gc_nursery_tests() to assert the barrier fires. */
 extern long gc_dirty_vectors_fired;
 
+/* Write-barrier remembered set: dirty globals bitset (site 2).
+ * Marked by global_set; consulted during nursery scavenges to skip
+ * non-dirty globals.  Cleared at scavenge-end and full-collect start. */
+void gc_dirty_globals_mark(int idx);
+int  gc_dirty_globals_test(int idx);
+void gc_dirty_globals_clear(void);
+extern long gc_dirty_globals_fired;
+extern long gc_dirty_globals_scanned;
+
 /* Instrumentation counters (GC Phase 2 Step 4 stress tests in zincvm.c).
  * gc_nursery_scavenge_count increments once per real scavenge.
  * gc_nursery_pages_reclaimed accumulates NURSERY_PAGES each scavenge

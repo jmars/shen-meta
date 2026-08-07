@@ -358,12 +358,16 @@ int global_table_len = 0;
 void global_set(const char *name, Value v) {
     for (int i = 0; i < global_table_len; i++) {
         if (strcmp(global_table[i].name, name) == 0) {
-            global_table[i].closure = v; return;
+            global_table[i].closure = v;
+            gc_dirty_globals_mark(i);
+            return;
         }
     }
     if (global_table_len < GLOBAL_TABLE_MAX) {
-        global_table[global_table_len].name = strdup(name);
-        global_table[global_table_len].closure = v;
+        int i = global_table_len;
+        global_table[i].name = strdup(name);
+        global_table[i].closure = v;
+        gc_dirty_globals_mark(i);
         global_table_len++;
     }
 }

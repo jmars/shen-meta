@@ -15,9 +15,9 @@ unless something mutates. We exploit that to build a cheap moving generational
 collector with a **write barrier that fires at only two sites**.
 
 Confirmed mutation surface (independently traced):
-- `vm/zincvm.c:927` — `address->` primitive: `vec.vector.data[i] = val;` (the
+- `vm/zincvm.c:962` — `address->` primitive: `vec.vector.data[i] = val;` (the
   only write to any GC-managed pointer array).
-- `vm/zincvm.c:334` — `global_set()`, the single funnel for global-table writes;
+- `vm/zincvm.c:358` — `global_set()`, the single funnel for global-table writes;
   reached at runtime only via the `set` primitive (line 1161). Other `global_set`
   calls are init/startup only.
 
@@ -31,7 +31,7 @@ old gen: collected infrequently (no barrier → free to pick)
    └─ mark-sweep (v1), then BiBOP size-class pages + compaction (v2)
 roots: precise (stack + globals), no conservative pinning
 barrier: ONLY at `address->` vector write + `global_set`
-remembered set: dirty-vectors list + dirty-globals bitset
+remembered set: dirty-vectors list + dirty-globals bitset (both implemented)
 ```
 
 Goals, in priority order:
@@ -147,12 +147,18 @@ test (`page > nursery_last`) silently misses these promoted-in-place arrays —
 exactly the case the barrier must cover. `gc_in_oldgen` therefore returns
 `space[page] == current_space`. (Diagnosed via gc_nursery_tests Test 6.)
 
-**Barrier site 2 — `global_set` (zincvm.c:324): OPTIONAL / DEFERRED for v1.**
-Correctness is preserved because `global_table` is already conservatively pinned
-as an extra_root in every collect (including the nursery scavenge), so nursery
-pointers in globals survive without a barrier. The only cost is page-granular
-over-retention (one nursery cons pins a 512-byte page). Add a dirty-globals
-bitset only if profiling shows over-retention is a real problem.
+**Barrier site 2 — `global_set` (zincvm.c:358): DONE (dirty-globals bitset).**
+`global_table` is a precise typed walker scanned every collect (gc.c:437-461).
+Post-4a.6 there is no conservative pinning or extra_roots — the typed walker
+scans only `.closure` fields, so there is no page-granular over-retention.
+The bitset reduces nursery-scavenge cost by skipping non-dirty globals:
+`global_set` calls `gc_dirty_globals_mark(i)` unconditionally on every write;
+`gc_scan_roots` during a nursery scavenge (`in_scavenge`) consults
+`gc_dirty_globals_test(i)` and skips non-dirty entries (full collects always
+scan every global).  Cleared at scavenge-end and full-collect start — same
+lifecycle as dirty_vectors.  Fixed 256-byte bitset (GLOBAL_TABLE_MAX=2048 bits,
+no overflow path).  Instrumented via `gc_dirty_globals_fired` (0→1 transitions)
+and `gc_dirty_globals_scanned` (per-scavenge scan count).
 
 **Ordered steps (each gated by `make test && make test-debug && make run-bundle`):
 ** 1) [DONE] Add `NURSERY`+region+predicates (no behavior change); 2) [DONE] route
