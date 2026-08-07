@@ -93,6 +93,17 @@ long gc_preemptive_scavenge_count = 0;
 long gc_reactive_scavenge_count  = 0;
 long gc_full_collect_count       = 0;
 
+/* Per-allocation-class histogram, indexed by GC type tag (see gc.h).
+ * Counts whole allocation requests through the public entry points
+ * (gc_alloc / gc_alloc_oldgen / gc_alloc_atomic).  Raw hooks for a future,
+ * data-driven revisit of the 4c BiBOP size-class decision: if a class shows
+ * high churn, BiBOP may be worth re-evaluating for that class alone. */
+unsigned long long gc_alloc_class_count[5] = {0};
+
+const unsigned long long *gc_alloc_class_counts(void) {
+    return gc_alloc_class_count;
+}
+
 /* raw pointers to malloc'd metadata for eventual teardown */
 static char      *raw_heap_start;
 static uintptr_t *raw_space_ptr;
@@ -915,6 +926,10 @@ void gc_init(uintptr_t heap_size) {
 
 __attribute__((noinline))
 void *gc_alloc(size_t bytes, int type_tag) {
+    /* Count every allocation request at this public entry point, by class.
+     * type_tag is in [0,4] (GC_TYPE_RAW..GC_TYPE_CALLFRAME_ARRAY); guard the
+     * index defensively in case a caller passes an out-of-range tag. */
+    if ((unsigned)type_tag < 5) gc_alloc_class_count[type_tag]++;
     /* ---- nursery fast path (Phase 4b.2 — copying scavenge) ---- */
     /* The nursery bump path only handles SINGLE-page objects.  A multi-page
      * alloc (total > PAGEBYTES) must not go through the nursery: the bump
@@ -1018,6 +1033,8 @@ void *gc_alloc_atomic(size_t bytes) {
 
 __attribute__((noinline))
 void *gc_alloc_oldgen(size_t bytes, int type_tag) {
+    /* Count every allocation request at this public entry point, by class. */
+    if ((unsigned)type_tag < 5) gc_alloc_class_count[type_tag]++;
     /* Force allocation through the old-gen path, bypassing the nursery
      * entirely.  Used for large objects (frame_stack, big arrays) that
      * would never fit in the nursery and would fragment it. */

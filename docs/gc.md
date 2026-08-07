@@ -293,11 +293,24 @@ freshly-copied destination pages. After the drain ALL nursery pages are reset to
 zinctest Tests 9-13 (fully-reclaimed, copy-not-pin, deep-500-node-graph, no
 other_space, cyclic-old-gen-no-infinite-loop).
 
-**Phase 4c — BiBOP size-class pages (PENDING, optional).** Size classes
-`Value`=40B, `Instr`=64B, `CallFrame`=48B (build-verified `_Static_assert`s in
-`zinctypes.h`); page-per-size-class + free-lists. Only worth it after 4b is
-stable and profiling shows old-gen churn (the bundle is ~821 immortal closures
-loaded once, so BiBOP's churning-old-gen premise may not apply).
+**Phase 4c — BiBOP size-class pages (CLOSED, not-applicable — decided 2026-08-06).**
+Rejected as net-negative for this collector. Rationale:
+- Of the asserted size classes (`Value`=40B, `Instr`=64B, `CallFrame`=48B in
+  `zinctypes.h`), only `Value` has fixed-size whole-object allocations.
+  `CallFrame` gets exactly one immortal allocation (the `frame_stack`, ~48K
+  frames at startup); `Instr` is always a variable-length code array — neither
+  fits a fixed size-class page.
+- Old-gen does not churn: there is no `gc_free`/free-list machinery, and the
+  bundle (~821 closures) is loaded once and then stable.
+- 4b.1's copying `collect()` already compacts by evacuating live objects into
+  `next_space`, so the fragmentation BiBOP would address never accumulates.
+- BiBOP free-lists actively fight the moving collector: rebuilding them on
+  every semi-space flip is O(live), for at most ~6% intra-page slack on a
+  single class.
+Data-driven revisit is now possible: the `gc_alloc_class_count` histogram
+(printed by zinctest's `GC alloc classes:` line) counts allocation requests per
+GC type tag, so a future 4c decision can be based on observed per-class churn
+rather than conjecture.
 
 ## Key hazards (from validation)
 

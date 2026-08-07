@@ -735,6 +735,13 @@ static int gc_nursery_tests(void) {
     }
 
     printf(failed ? "GC nursery tests FAILED\n" : "GC nursery tests all passed\n");
+    printf("GC alloc classes: RAW=%llu VALUE=%llu VALUE_ARRAY=%llu "
+           "INSTR_ARRAY=%llu CALLFRAME_ARRAY=%llu\n",
+           gc_alloc_class_count[GC_TYPE_RAW],
+           gc_alloc_class_count[GC_TYPE_VALUE],
+           gc_alloc_class_count[GC_TYPE_VALUE_ARRAY],
+           gc_alloc_class_count[GC_TYPE_INSTR_ARRAY],
+           gc_alloc_class_count[GC_TYPE_CALLFRAME_ARRAY]);
     return failed;
 }
 

@@ -98,6 +98,15 @@ int  gc_nursery_is_empty(void);
 long gc_nursery_capacity_pages(void);
 int  gc_nursery_no_other_space(void);
 
+/* Per-allocation-class histogram (Phase 4c — BiBOP decision hook).
+ * gc_alloc_class_count is indexed by the GC type tags above and counts every
+ * allocation request made through the public entry points (gc_alloc /
+ * gc_alloc_oldgen; gc_alloc_atomic routes through gc_alloc with GC_TYPE_RAW).
+ * Exposed for a future, data-driven revisit of the closed 4c size-class
+ * decision — see docs/gc.md. */
+extern unsigned long long gc_alloc_class_count[5];
+const unsigned long long *gc_alloc_class_counts(void);
+
 /* ---- precise-root API (Phase 3/4) --------------------------------- */
 
 typedef enum { ROOT_PTR, ROOT_VALUE, ROOT_VALUE_ARRAY, ROOT_VALUE_VOLATILE } RootKind;
