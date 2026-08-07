@@ -99,7 +99,14 @@ long gc_allocatedpages(void);
 /* ---- precise-root API (Phase 3/4) --------------------------------- */
 
 typedef enum { ROOT_PTR, ROOT_VALUE, ROOT_VALUE_ARRAY, ROOT_VALUE_VOLATILE } RootKind;
-void  gc_root_push_ptr(void **slot);               /* single GC pointer slot */
+/* single GC pointer slot.  MUST point at the HEAD of a GC object (not an
+ * interior/tail pointer into a multi-page array).  Under 4b.1 the full-collect
+ * root scan EVACUATES ROOT_PTR via gc_evacuate → gc_move, which reads the
+ * object header at *(ptr-1) to size the copy — an interior pointer would read
+ * a garbage header (UB / heap corruption).  The pre-4b pinning API preserved
+ * interior pointers (page-granular), so this head-only contract is NEW and
+ * load-bearing.  All current call sites pass head pointers; keep it that way. */
+void  gc_root_push_ptr(void **slot);
 void  gc_root_push_value(Value *vslot);            /* by-value Value, interior ptrs rewritten */
 void  gc_root_push_value_volatile(volatile Value *vslot); /* volatile-qualified Value */
 void  gc_root_push_value_array(Value *base, int *np); /* N by-value Values */

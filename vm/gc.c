@@ -507,9 +507,28 @@ static void gc_scan_roots(int use_nursery) {
         } else {
             /* ---- full collect: evacuate roots ---- */
             switch (r->kind) {
-            case ROOT_PTR:
+            case ROOT_PTR: {
+                /* ROOT_PTR must point at an object HEAD (see gc.h).  An
+                 * interior pointer into a multi-page object would make
+                 * gc_move read a garbage header at *(ptr-1) — UB / heap
+                 * corruption.  Cheap defense: a head page is never
+                 * CONTINUED (only tail pages are). */
+                void *p = *(void **)r->slot;
+                if (p) {
+                    uintptr_t pg = GCP_to_PAGE(p);
+                    if (pg >= firstheappage && pg <= lastheappage &&
+                        type_page[pg] == CONTINUED) {
+                        fprintf(stderr,
+                                "gc: ROOT_PTR points into a multi-page object "
+                                "tail (page %lu) — interior pointer as root; "
+                                "only object HEAD pointers are valid roots\n",
+                                (unsigned long)pg);
+                        exit(1);
+                    }
+                }
                 gc_evacuate((void **)r->slot);
                 break;
+            }
             case ROOT_VALUE:
                 gc_scan_value((Value *)r->slot);
                 break;
