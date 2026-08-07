@@ -112,6 +112,42 @@ static int force_nursery_scavenge(long target) {
     return gc_nursery_scavenge_count >= target;
 }
 
+/* Test 8 helpers.  These run in their own noinline frames so that no pointer
+ * into body's TAIL pages (base+offset from the fill loop, or the burst's
+ * locals) is ever left live on the frame that holds `body` itself.  If such a
+ * tail-page pointer sat on the C stack during a collect, pin_page's BACKWARD
+ * walk would pin that tail (space[tail]=next_space) and mask the very bug the
+ * test exists to detect: a multi-page old-gen object reached only via its HEAD
+ * page leaves its CONTINUED tail pages unpinned. */
+
+__attribute__((noinline))
+static void t8_fill(Value *body, int N) {
+    for (int i = 0; i < N; i++)
+        body[i] = val_number(0xABCD0000u + (unsigned)i);
+}
+
+__attribute__((noinline))
+static void t8_burst(void) {
+    /* Enough dead 4MB raw chunks to fire several full collects AND wrap the
+     * forward-only allocatepage cursor around the whole heap, so the cyclic
+     * free-page scan eventually re-claims body's unpinned tail pages. */
+    const size_t CHUNK = 4 * 1024 * 1024;
+    for (int i = 0; i < 200; i++) {
+        char *blob = (char *)gc_alloc_oldgen(CHUNK, GC_TYPE_RAW);
+        (void)blob;
+    }
+}
+
+__attribute__((noinline))
+static int t8_verify(const Value *body, int N) {
+    for (int i = 0; i < N; i++) {
+        if (body[i].tag != VAL_NUMBER ||
+            body[i].number != (long)(0xABCD0000u + (unsigned)i))
+            return i;   /* index of first clobbered slot, or -1 if intact */
+    }
+    return -1;
+}
+
 /* Run the GC Phase 2 Step 5 generational nursery stress/retention tests.
  * Runs only when a bundle is loaded.  Returns 0 on all-pass, 1 on failure. */
 static int gc_nursery_tests(void) {
@@ -389,6 +425,50 @@ static int gc_nursery_tests(void) {
         } else {
             printf("  [6] write-barrier dirty_vectors passed — address-> of "
                    "nursery cons into old-gen vector survived scavenge via barrier\n");
+        }
+    }
+
+    /* ---- Test 8: multi-page old-gen object tail-page retention ----
+     * Regression test for the latent pin_page bug: a multi-page OLD-GEN
+     * object reached via its HEAD page during a full collect() had only its
+     * head pinned.  Its CONTINUED tail pages kept space == current_space,
+     * so after the semi-space flip they read as free and were reclaimed and
+     * memset (zeroed) by a subsequent allocation, clobbering the still-live
+     * object body.  pin_page's forward-walk of CONTINUED tails fixes it.
+     *
+     * The object's body pointer is held ONLY in a C local (NOT on the
+     * precise-root shadow stack), so reachability flows through the
+     * conservative C-stack scan, exercising pin_page. */
+    {
+        /* N chosen so the VALUE_ARRAY spans exactly 3 pages:
+         * words = ceil(N*40/8)+1, PAGEBYTES=512 / WORDBYTES=8 => 64 words/page.
+         * N=30 => words=151, which spans pages [0..2] (64+64+23), giving two
+         * CONTINUED tail pages that the (fixed) forward walk must pin. */
+        const int N = 30;
+        size_t bytes = (size_t)N * sizeof(Value);
+        Value *body = (Value *)gc_alloc_oldgen(bytes, GC_TYPE_VALUE_ARRAY);
+
+        /* Fill the sentinels from a separate frame so no tail-page pointer
+         * lingers on this frame (see t8_fill comment). */
+        t8_fill(body, N);
+
+        /* Force full collections by allocation pressure (same technique as
+         * Test 5) and wrap the free-page cursor around the heap (see
+         * t8_burst).  `body`'s head page is pinned by the conservative
+         * C-stack scan; only pin_page's forward-walk pins its tail pages.
+         * We must NOT read `body` during the burst: that would leave a
+         * tail-page pointer on the stack and pin the tails via the backward
+         * walk, masking the bug. */
+        t8_burst();
+
+        int first_bad = t8_verify(body, N);
+        if (first_bad >= 0) {
+            printf("  [8] multi-page old-gen tail retention FAILED (slot %d "
+                   "clobbered)\n", first_bad);
+            failed = 1;
+        } else {
+            printf("  [8] multi-page old-gen tail retention passed — all %d "
+                   "slots intact across full collect\n", N);
         }
     }
 

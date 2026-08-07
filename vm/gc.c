@@ -310,6 +310,15 @@ static void pin_page(uintptr_t page) {
         page <= lastheappage &&
         space[page] == current_space)
     {
+        /* Save the original input page: the backward walk below
+         * decrements `page` to the OBJECT (head) page, and the forward
+         * walk must resume from the INPUT page, not the head.  If the
+         * input is a tail page (a raw C-stack pointer into the middle
+         * or tail of a multi-page object), the backward walk already
+         * pinned [head .. input]; starting the forward walk at head+1
+         * would find space[head+1]==next_space and stop after zero
+         * iterations, leaving pages BEYOND the input unpinned. */
+        uintptr_t input = page;
         while (page > firstheappage && type_page[page] == CONTINUED) {
             allocatedpages++;
             space[page] = next_space;
@@ -326,6 +335,29 @@ static void pin_page(uintptr_t page) {
         gc_diff_record_page(page);
 #endif
         queue(page);
+
+        /* Forward-walk CONTINUED tail pages of the same multi-page
+         * object and pin them in place.  They are scanned as part of
+         * the head page's body during the Cheney drain (cp += hw
+         * crosses the page boundary), so DO NOT queue them — only pin
+         * so they survive the post-flip free-page scan.  Without this
+         * a multi-page old-gen object reached via its head page would
+         * have its tail pages reclaimed and overwritten after collect.
+         * Start at input+1 (not head+1): the backward walk pinned
+         * [head..input] already, and the pages beyond the input tail
+         * page are the ones that still need pinning. */
+        uintptr_t t = input + 1;
+        while (t <= lastheappage &&
+               type_page[t] == CONTINUED &&
+               space[t] == current_space) {
+            space[t] = next_space;
+            allocatedpages++;
+            page_set_pinned(t);
+#ifdef GC_ROOTS_DIFF
+            gc_diff_record_page(t);
+#endif
+            t++;
+        }
     }
 }
 
@@ -363,6 +395,14 @@ static void pin_nursery_page(uintptr_t page) {
         allocatedpages++;
         p++;
     }
+
+    /* Defensive-only: the nursery fast path is gated so a single-page
+     * object is the maximum that can ever be allocated in the nursery
+     * (gc.c gc_alloc: total <= PAGEBYTES).  Multi-page objects fall
+     * through to gcalloc_internal / old-gen and can never land in the
+     * nursery, so type_page is never CONTINUED in the nursery range and
+     * the forward walk above never executes.  Kept for symmetry with
+     * pin_page's forward walk, not because nursery objects can span pages. */
 }
 
 /* ---- typed scanning helpers (called from collect) ------------------ */
