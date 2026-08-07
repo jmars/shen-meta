@@ -66,7 +66,9 @@ static void run_test_timeout(const char *label, const char *bytecode, int show_c
         if (setjmp(cf.buf)) {
             vm_catch_chain = cf.parent;
             alarm(0);
+            gc_root_push_value(&cf.error_val);   /* S3: root error message */
             printf("ERROR CAUGHT: "); print_value(cf.error_val); printf("\n\n"); fflush(stdout);
+            gc_root_pop();  /* S3: cf.error_val */
         } else {
             Value result = vm_exec((Instr *)code, len);
             vm_catch_chain = cf.parent;
@@ -887,7 +889,9 @@ int main(int argc, char **argv) {
                             vm_catch_chain = cf.parent;
                         } else {
                             vm_catch_chain = cf.parent;
+                            gc_root_push_value(&cf.error_val);   /* S3: root error message */
                             printf("    ERROR: "); print_value(cf.error_val); printf("\n");
+                            gc_root_pop();  /* S3: cf.error_val */
                         }
                     }
 
@@ -922,7 +926,9 @@ int main(int argc, char **argv) {
                             vm_catch_chain = cf.parent;
                         } else {
                             vm_catch_chain = cf.parent;
+                            gc_root_push_value(&cf.error_val);   /* S3: root error message */
                             printf("    ERROR: "); print_value(cf.error_val); printf("\n");
+                            gc_root_pop();  /* S3: cf.error_val */
                         }
                     }
                     trace_counter = -1;
@@ -978,7 +984,9 @@ int main(int argc, char **argv) {
                                 vm_catch_chain = cf.parent;
                             } else {
                                 vm_catch_chain = cf.parent;
+                                gc_root_push_value(&cf.error_val);   /* S3: root error message */
                                 printf("    ERROR: "); print_value(cf.error_val); printf("\n");
+                                gc_root_pop();  /* S3: cf.error_val */
                             }
                         }
                     } else {

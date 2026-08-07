@@ -343,10 +343,11 @@ void trace_add(const char *name) {
 GlobalEntry global_table[GLOBAL_TABLE_MAX];
 int global_table_len = 0;
 
-/* GC-visible pointer to the active value stack.  A conservative C-stack
-   scan alone is unreliable (register allocation can hide pointers).  By
-   keeping the stack data pointer here (registered as an extra root), the
-   GC always traces Values on the VM stack. */
+/* global_table stores name→closure bindings.  It is registered with the
+   GC via gc_register_global_table so gc_scan_roots traces every closure
+   (and their interior pointers) precisely.  There is no conservative
+   C-stack scan or extra_roots mechanism; the shadow stack + registered
+   tables are the sole root sources (4a.6). */
 
 void global_set(const char *name, Value v) {
     for (int i = 0; i < global_table_len; i++) {
@@ -381,12 +382,13 @@ Value global_get(const char *name) {
 
 /* CatchFrame is in zincvm.h */
 
-/* FIXME(4a.6-flip): CatchFrames are stack-allocated at each catch site
-   (trap-error, eval-kl, vm_exec_env callers in zinctest.c and main).  Their
-   error_val field holds a GC-allocated string.  Today the conservative C-stack
-   scan pins them; after the flip to precise-only roots, each CatchFrame must
-   be registered as a precise root (e.g. via gc_root_push_value on &cf.error_val
-   after setjmp).  Until then, the conservative scan masks this gap. */
+/* S3: CatchFrames are stack-allocated at each catch site (trap-error,
+   eval-kl, vm_exec_env callers in zinctest.c and main).  Their error_val
+   field holds a GC-allocated string (val_error in vm_throw).  Under
+   precise-only roots (4a.6 flip) with no conservative C-stack scan, each
+   catch site must explicitly root the error value (or a copy) after
+   setjmp returns non-zero so the message string stays alive across any
+   collection between the allocation and the site's use of cf.error_val. */
 CatchFrame *vm_catch_chain = NULL;
 
 static void vm_throw(const char *msg) {
@@ -1045,7 +1047,7 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
             int env_len = handler.lambda.env_len;
             int new_env_len = env_len + 1;
-            gc_root_push_value(&err);        /* root err across GC_VALUE_ARRAY */
+            gc_root_push_value(&err);        /* S3: root err (copy of cf.error_val) across GC_VALUE_ARRAY */
             Value *henv = GC_VALUE_ARRAY(new_env_len);
             if (env_len > 0)
                 memcpy(henv, handler.lambda.env, env_len * sizeof(Value));
@@ -2025,6 +2027,7 @@ static void meta_repl(void) {
             vm_catch_chain = &cf;
             volatile Value result; memset((void*)&result, 0, sizeof(result));
             result.tag = VAL_NIL;
+            gc_root_push_value_volatile(&result); /* S3: root result across loop body */
             int err = 0;
             if (setjmp(cf.buf) == 0) {
                 if (is_defun) {
@@ -2066,6 +2069,7 @@ static void meta_repl(void) {
                 printf("=> ");
                 print_shen(result);
             }
+            gc_root_pop();  /* S3: result */
             cur = *cur.cons.cdr;
         }
         free(line);
@@ -2293,7 +2297,9 @@ static void run_bytecode_file(const char *label, const char *src) {
     vm_catch_chain = &cf;
     if (setjmp(cf.buf)) {
         vm_catch_chain = cf.parent;
+        gc_root_push_value(&cf.error_val);   /* S3: root error message */
         printf("ERROR: "); print_value(cf.error_val); printf("\n");
+        gc_root_pop();  /* S3: cf.error_val */
     } else {
         Value result = vm_exec(code, len);
         vm_catch_chain = cf.parent;
@@ -2394,6 +2400,7 @@ int main(int argc, char **argv) {
                                     env_init, init.lambda.env_len + 1);
                     }
                     vm_catch_chain = cf.parent;
+                    /* S3: cf.error_val never read at this site (error swallowed). No root needed. */
                 }
                 printf("Shen ready.\n\n");
                 fflush(stdout);
@@ -2423,6 +2430,7 @@ int main(int argc, char **argv) {
                                     env_repl, repl.lambda.env_len + 1);
                     }
                     vm_catch_chain = cf.parent;
+                    /* S3: cf.error_val never read at this site (error swallowed). No root needed. */
                 }
                 repl_mode = 0;
 
