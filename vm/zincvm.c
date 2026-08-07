@@ -52,7 +52,13 @@
 
 #include "zincvm.h"
 
-/* ---- GC scanning functions (called by gc.c collect() scavenger) ---- */
+/* ---- GC scanning functions (called by gc.c scavenger) ----
+ *
+ * gc_scan_value and gc_evacuate are mode-agnostic: they serve both full
+ * collect (evacuate to next_space) and nursery scavenge (nursery→old-gen),
+ * dispatched by gc_move via in_scavenge.  gc_scan_value evacuates all
+ * GC-managed pointers within a Value; gc_evacuate updates a single pointer
+ * slot via gc_move. */
 
 /* gc_move is implemented in gc.c */
 void *gc_move(void *p);

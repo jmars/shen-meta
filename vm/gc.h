@@ -63,9 +63,7 @@ void *gc_move(void *p);
 int gc_in_nursery(void *p);
 
 /* Old-gen predicate: true iff p's page is in the live old-gen semi-space
- * (space == current_space).  Note this tests the space tag, not the address
- * range: under pin-in-place a promoted nursery page keeps its nursery-range
- * address but its space becomes current_space.  Used by the write barrier. */
+ * (space == current_space). */
 int gc_in_oldgen(void *p);
 
 /* Write-barrier remembered set: records old-gen vector element arrays
@@ -80,10 +78,9 @@ void gc_dirty_vectors_clear(void);
 extern long gc_dirty_vectors_fired;
 
 /* Instrumentation counters (GC Phase 2 Step 4 stress tests in zincvm.c).
- * gc_nursery_scavenge_count increments once per real scavenge (excludes
- * the exhausted-nursery short-circuit return).  gc_nursery_pages_reclaimed
- * accumulates the number of pages reset back to the free boundary each
- * time the bump cursor is rewound. */
+ * gc_nursery_scavenge_count increments once per real scavenge.
+ * gc_nursery_pages_reclaimed accumulates NURSERY_PAGES each scavenge
+ * (under 4b.2 copying scavenge the nursery is fully reclaimed every cycle). */
 extern long gc_nursery_scavenge_count;
 extern long gc_nursery_pages_reclaimed;
 
@@ -95,6 +92,11 @@ extern long gc_full_collect_count;
  * semi-space.  Read by compaction tests to prove objects move (pages
  * shrink when live objects are packed into to-space instead of pinned). */
 long gc_allocatedpages(void);
+
+/* Nursery instrumentation accessors (Phase 4b.2). */
+int  gc_nursery_is_empty(void);
+long gc_nursery_capacity_pages(void);
+int  gc_nursery_no_other_space(void);
 
 /* ---- precise-root API (Phase 3/4) --------------------------------- */
 

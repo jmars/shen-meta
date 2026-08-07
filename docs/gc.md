@@ -277,12 +277,21 @@ None of these are live bugs under the additive-pinning 4a invariant (the
 conservative scan still pins everything reachable on the C stack), which is why
 the foundation is safe to ship/push at the end of 4a.
 
-**Phase 4b — copy instead of pin = sliding compaction (PENDING).** Once roots
-are precise, `collect()` evacuates root-reachable objects instead of pinning
-them; compaction falls out of `move_internal`'s bump-into-`next_space` for free.
-`collect_nursery()` copies survivors to old-gen instead of pin-in-place, which
-deletes `pin_nursery_page`, the `other_space` scan, and the one-shot nursery
-degradation. `dirty_vectors` stay correct via the existing clear-on-flip.
+**Phase 4b — copy instead of pin = sliding compaction (DONE: 4b.1 + 4b.2).** Once
+roots are precise, `collect()` evacuates root-reachable objects instead of pinning
+them; compaction falls out of `move_internal`'s bump-into-`next_space` for free
+(4b.1). `collect_nursery()` is now a COPYING scavenge (4b.2): it evacuates nursery
+survivors to old-gen instead of pinning them in place, deleting `pin_nursery_page`,
+the `other_space` scan, the pinned-bitmap subsystem, and the one-shot nursery
+degradation. During a scavenge `next_space == current_space` (no flip), so
+`gc_move`'s to-space short-circuit leaves old-gen objects in place while nursery
+objects fall through to `move_internal`. The Cheney drain is fed by an
+`allocatepage` gating fix (`current_space != next_space || in_scavenge`) that queues
+freshly-copied destination pages. After the drain ALL nursery pages are reset to
+`NURSERY` and the bump cursor rewound — the nursery is fully reusable every cycle.
+`dirty_vectors` stay correct via the existing clear-on-scavenge-end. Verified by
+zinctest Tests 9-13 (fully-reclaimed, copy-not-pin, deep-500-node-graph, no
+other_space, cyclic-old-gen-no-infinite-loop).
 
 **Phase 4c — BiBOP size-class pages (PENDING, optional).** Size classes
 `Value`=40B, `Instr`=64B, `CallFrame`=48B (build-verified `_Static_assert`s in

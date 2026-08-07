@@ -93,13 +93,12 @@ static void run_test(const char *label, const char *bytecode, int show_code) {
  *
  * The nursery is a 2MB bump allocator (NURSERY_PAGES=4096, PAGEBYTES=512).
  * gc_alloc's fast path bumps nursery_cur; when the bump cursor can't fit a
- * request AND at least one page is still tagged NURSERY, it calls
- * collect_nursery() once.  We allocate a burst of GC_TYPE_RAW objects (no
- * interior pointers, thus safe for any root-scanning path) until the
- * gc_nursery_scavenge_count instrumentation counter advances past `target`.
+ * request, it calls collect_nursery().  We allocate a burst of GC_TYPE_RAW
+ * objects (no interior pointers, thus safe for any root-scanning path) until
+ * the gc_nursery_scavenge_count instrumentation counter advances past `target`.
  *
- * A hard cap bounds the loop so we never spin forever if the nursery has
- * already been permanently exhausted (all pages promoted). */
+ * Under 4b.2 copying scavenge the nursery is fully reclaimed every cycle,
+ * so a scavenge always fires eventually. */
 static int force_nursery_scavenge(long target) {
     long cap = 200000;
     while (gc_nursery_scavenge_count < target && cap-- > 0) {
@@ -108,9 +107,6 @@ static int force_nursery_scavenge(long target) {
         char *p = (char *)gc_alloc_atomic(64);
         (void)p;
     }
-    /* Return whether we actually forced the nursery to scavenge (counter
-     * advanced to >= target).  If the nursery was already fully promoted
-     * (all pages old-gen) before we started, no scavenge can fire. */
     return gc_nursery_scavenge_count >= target;
 }
 
@@ -166,23 +162,7 @@ static int gc_nursery_tests(void) {
            gc_nursery_scavenge_count, gc_nursery_pages_reclaimed);
     fflush(stdout);
 
-    /* On the FULL OS bundle, loading 1600+ closures can promote EVERY nursery
-     * page before this block runs.  Once all pages are old-gen, gc_alloc's
-     * exhausted-nursery guard (first_free_nursery_page() > nursery_last) skips
-     * collect_nursery() entirely, so no scavenge can ever fire again — the
-     * nursery is permanently a dead one-shot lane.  In that state the scavenge
-     * stress tests cannot run; this is the accepted v1 fast-lane-degradation
-     * behavior (see docs/gc.md "Step 4 decision").  Detect it here and skip
-     * the whole block rather than report a spurious failure. */
-    if (!force_nursery_scavenge(gc_nursery_scavenge_count + 1)) {
-        printf("  nursery already fully promoted during load (scavenges fired=0) — "
-               "scavenge stress tests SKIPPED\n");
-        printf("  (accepted fast-lane degradation; validated on the reduced bundle)\n");
-        printf("GC nursery tests: SKIPPED (nursery exhausted at load)\n");
-        return 0;
-    }
-
-    /* ---- Test 1: survivor correctness (pin-in-place) ---- */
+    /* ---- Test 1: survivor correctness (copying scavenge) ---- */
     {
         /* Build a small chain of Values held in C-locals.  We allocate raw
          * numbers first, then a cons chain referencing them, so the chain is
@@ -195,7 +175,7 @@ static int gc_nursery_tests(void) {
 
         /* Force a scavenge.  The chain's cells live in the nursery and are
          * reachable via the precise-root shadow stack, so collect_nursery
-         * pins them in place. */
+         * copies them to old-gen. */
         long before = gc_nursery_scavenge_count;
         force_nursery_scavenge(before + 1);
         long delta = gc_nursery_scavenge_count - before;
@@ -209,11 +189,16 @@ static int gc_nursery_tests(void) {
                    (chain.cons.cdr->cons.car->number == 22);
         ok = ok && (chain.cons.cdr->cons.cdr->cons.car->tag == VAL_NUMBER) &&
                    (chain.cons.cdr->cons.cdr->cons.car->number == 33);
+        /* Under 4b.2 copying scavenge, survivors are evacuated to old-gen. */
+        ok = ok && gc_in_oldgen(chain.cons.car) && !gc_in_nursery(chain.cons.car);
+        ok = ok && gc_in_oldgen(chain.cons.cdr);
+        ok = ok && gc_in_oldgen(chain.cons.cdr->cons.car);
         if (!ok) {
             printf("  [1] survivor correctness FAILED (scavenges fired=%ld)\n", delta);
             failed = 1;
         } else {
-            printf("  [1] survivor correctness passed — chain intact after %ld scavenge(s)\n", delta);
+            printf("  [1] survivor correctness passed — chain intact after %ld scavenge(s), "
+                   "evacuated to old-gen\n", delta);
         }
         gc_root_pop();  /* chain */
     }
@@ -221,12 +206,10 @@ static int gc_nursery_tests(void) {
     /* ---- Test 2: capacity reuse ---- */
     {
         /* We want to overflow the nursery so a scavenge fires and the bump
-         * cursor is rewound to the first still-NURSERY page, proving the lane
-         * is reusable when the live set turns over.  Allocate dead 64B objects
+         * cursor is rewound to the nursery start, proving the lane is fully
+         * reusable under 4b.2 copying scavenge.  Allocate dead 64B objects
          * (references dropped immediately) until the pages_reclaimed counter
-         * increments — i.e. until a scavenge has actually rewound the cursor.
-         * Stopping the moment reclamation is observed avoids false-positive
-         * pinning under any root-pinning path (precise or conservative). */
+         * increments — i.e. until a scavenge has actually reclaimed pages. */
         long before_rc = gc_nursery_pages_reclaimed;
         long cap = 200000;
         while (gc_nursery_pages_reclaimed == before_rc && cap-- > 0) {
@@ -236,8 +219,11 @@ static int gc_nursery_tests(void) {
         int scavenged = (gc_nursery_pages_reclaimed > before_rc);
         long reclaimed = gc_nursery_pages_reclaimed - before_rc;
 
+        /* Under 4b.2, each scavenge reclaims exactly NURSERY_PAGES. */
+        int full_reclaim = (reclaimed == gc_nursery_capacity_pages());
+
         /* After the burst, a fresh small allocation must land back in the
-         * nursery (bump cursor was reset), proving the lane is reusable. */
+         * nursery (bump cursor was reset to start), proving the lane is reusable. */
         char *probe = (char *)gc_alloc_atomic(64);
         int in_nursery = gc_in_nursery(probe);
 
@@ -250,16 +236,17 @@ static int gc_nursery_tests(void) {
 
         int ok = scavenged;                       /* a scavenge reclaimed pages */
         ok = ok && reclaimed > 0;
+        ok = ok && full_reclaim;                  /* exactly NURSERY_PAGES reclaimed */
         ok = ok && in_nursery;                    /* cursor reset */
         ok = ok && keep_ok;
         if (!ok) {
             printf("  [2] capacity reuse FAILED (pages_reclaimed +%ld, "
-                   "probe_in_nursery=%d, keep_in_nursery=%d)\n",
-                   reclaimed, in_nursery, keep_ok);
+                   "full_reclaim=%d, probe_in_nursery=%d, keep_in_nursery=%d)\n",
+                   reclaimed, full_reclaim, in_nursery, keep_ok);
             failed = 1;
         } else {
-            printf("  [2] capacity reuse passed — +%ld pages reclaimed, "
-                   "nursery reusable after turnover\n", reclaimed);
+            printf("  [2] capacity reuse passed — +%ld pages reclaimed "
+                   "(full nursery), reusable after turnover\n", reclaimed);
         }
     }
 
@@ -268,7 +255,8 @@ static int gc_nursery_tests(void) {
         /* Allocate a nursery Value, then an old-gen object that points to it.
          * The old-gen object is allocated via gc_alloc_oldgen so it never goes
          * through the nursery.  We store the nursery pointer inside the old-gen
-         * object; a scavenge must find it via the old-gen OBJECT-page scan. */
+         * object; a scavenge must find it via the dirty-vectors scan or the
+         * old-gen OBJECT-page scan and copy the nursery object to old-gen. */
         Value nv = val_number(777);
         Value *nursery_val = GC_VALUE();
         *nursery_val = nv;
@@ -283,16 +271,18 @@ static int gc_nursery_tests(void) {
         long before = gc_nursery_scavenge_count;
         force_nursery_scavenge(before + 1);
 
-        /* The old-gen object must still reference the (pinned) nursery cell. */
+        /* The old-gen object must still reference the (now old-gen) cell. */
         int ok = (oldgen->tag == VAL_CONS);
         ok = ok && (oldgen->cons.car->tag == VAL_NUMBER);
         ok = ok && (oldgen->cons.car->number == 777);
+        /* Under 4b.2, the nursery cell was copied to old-gen. */
+        ok = ok && gc_in_oldgen(oldgen->cons.car) && !gc_in_nursery(oldgen->cons.car);
         if (!ok) {
             printf("  [3] cross-generational reference FAILED\n");
             failed = 1;
         } else {
             printf("  [3] cross-generational reference passed — old-gen->nursery "
-                   "reference survived scavenge\n");
+                   "reference survived scavenge (nursery object evacuated to old-gen)\n");
         }
         gc_root_pop();  /* oldgen */
         gc_root_pop();  /* nursery_val */
@@ -306,63 +296,71 @@ static int gc_nursery_tests(void) {
         gc_root_push_ptr((void**)&surv);  /* precise root across two scavenges */
 
         long before = gc_nursery_scavenge_count;
-        force_nursery_scavenge(before + 1);  /* scavenge #1 */
-        force_nursery_scavenge(before + 2);  /* scavenge #2 */
+        force_nursery_scavenge(before + 1);  /* scavenge #1 — copy to old-gen */
 
-        int ok = (surv->tag == VAL_NUMBER) && (surv->number == 4242);
+        /* After scavenge #1, the survivor must be in old-gen. */
+        int ok1 = gc_in_oldgen(surv) && !gc_in_nursery(surv);
+        void *ptr1 = surv;
+        ok1 = ok1 && (surv->tag == VAL_NUMBER) && (surv->number == 4242);
+
+        force_nursery_scavenge(before + 2);  /* scavenge #2 — old-gen untouched */
+
+        /* After scavenge #2, pointer unchanged (old-gen not re-evacuated). */
+        int ok = ok1 && (surv == ptr1);
+        ok = ok && (surv->tag == VAL_NUMBER) && (surv->number == 4242);
         if (!ok) {
-            printf("  [4] two-scavenge survival FAILED\n");
+            printf("  [4] two-scavenge survival FAILED (ok1=%d ptr_changed=%d)\n",
+                   ok1, surv != ptr1);
             failed = 1;
         } else {
-            printf("  [4] two-scavenge survival passed — nursery object survived "
-                   "two consecutive scavenges\n");
+            printf("  [4] two-scavenge survival passed — nursery object evacuated "
+                   "to old-gen, pointer stable across two scavenges\n");
         }
         gc_root_pop();  /* surv */
     }
 
     /* ---- Test 5: scavenge -> full collect -> scavenge ---- */
     {
-        /* Promote a nursery object (retained across a scavenge), then force a
-         * full collection (flips current_space, so the promoted nursery page
-         * becomes space==other_space), then scavenge again.  Exercises the
-         * "other_space" branch in collect_nursery that scans previously-
-         * promoted nursery OBJECT pages. */
+        /* Promote a nursery object (copied to old-gen across a scavenge),
+         * then force a full collection (flips current_space, so the
+         * promoted object's new pages survive), then scavenge again.
+         * Under 4b.2, the promoted object is in old-gen and survives
+         * both the full collect and the rescavenge. */
         Value nv = val_number(909);
         Value *promoted = GC_VALUE();
         *promoted = nv;
         gc_root_push_ptr((void**)&promoted);  /* precise root across scavenge+collect+rescavenge */
 
         long before = gc_nursery_scavenge_count;
-        force_nursery_scavenge(before + 1);  /* promote `promoted` */
+        force_nursery_scavenge(before + 1);  /* copy `promoted` to old-gen */
 
-        /* Force a full collection by allocation pressure: gc_alloc_oldgen
-         * triggers collect() once allocatedpages exceeds heappages/4 (the heap
-         * is 256MB, so the threshold is ~64MB of allocated old-gen).  Allocate
-         * well past that with dead raw chunks so the full collector fires and
-         * flips current_space.  `promoted` stays live via its precise root on
-         * the shadow stack, so its page is pinned and survives. */
+        /* Verify promoted is now in old-gen. */
+        int in_old = gc_in_oldgen(promoted) && !gc_in_nursery(promoted);
+
+        /* Force a full collection by allocation pressure. */
         {
             const size_t CHUNK = 4 * 1024 * 1024;   /* 4MB dead chunks */
-            /* 96MB total guarantees several full collects; raw chunks are
-             * unrooted so they are reclaimed by each collect and never exhaust
-             * the 256MB heap. */
             for (int i = 0; i < 24; i++) {
                 char *blob = (char *)gc_alloc_oldgen(CHUNK, GC_TYPE_RAW);
                 (void)blob;
             }
         }
 
-        /* Scavenge again — the previously-promoted nursery page must still be
-         * scanned correctly (now via the other_space branch). */
+        /* After full collect, promoted must still be in old-gen. */
+        int still_old = gc_in_oldgen(promoted) && !gc_in_nursery(promoted);
+
+        /* Scavenge again — promoted object is old-gen, untouched. */
         force_nursery_scavenge(gc_nursery_scavenge_count + 1);
 
-        int ok = (promoted->tag == VAL_NUMBER) && (promoted->number == 909);
+        int ok = in_old && still_old;
+        ok = ok && (promoted->tag == VAL_NUMBER) && (promoted->number == 909);
         if (!ok) {
-            printf("  [5] scavenge->full-collect->scavenge FAILED\n");
+            printf("  [5] scavenge->full-collect->scavenge FAILED "
+                   "(in_old=%d still_old=%d)\n", in_old, still_old);
             failed = 1;
         } else {
             printf("  [5] scavenge->full-collect->scavenge passed — promoted "
-                   "object survived full collect + rescavenge\n");
+                   "object survived full collect + rescavenge in old-gen\n");
         }
         gc_root_pop();  /* promoted */
     }
@@ -439,6 +437,8 @@ static int gc_nursery_tests(void) {
         ok6 = ok6 && (el0.tag == VAL_CONS)
                   && (el0.cons.car->tag == VAL_NUMBER)
                   && (el0.cons.car->number == 778899);
+        /* Under 4b.2, the nursery cons is evacuated to old-gen. */
+        ok6 = ok6 && gc_in_oldgen(el0.cons.car) && !gc_in_nursery(el0.cons.car);
         if (!ok6) {
             printf("  [6] write-barrier dirty_vectors FAILED "
                    "(number_no_fire=%d cons_fired=%d)\n",
@@ -446,7 +446,8 @@ static int gc_nursery_tests(void) {
             failed = 1;
         } else {
             printf("  [6] write-barrier dirty_vectors passed — address-> of "
-                   "nursery cons into old-gen vector survived scavenge via barrier\n");
+                   "nursery cons into old-gen vector survived scavenge via barrier "
+                   "(evacuated to old-gen)\n");
         }
         gc_root_pop();  /* cons_cell */
         gc_root_pop();  /* vec_slot */
@@ -518,30 +519,219 @@ static int gc_nursery_tests(void) {
         long pre_fired = gc_preemptive_scavenge_count - before_pre;
         long react_fired = gc_reactive_scavenge_count - before_react;
 
-        if (pre_fired == 0 && react_fired == 0) {
-            printf("  [7] pre-emptive triggers SKIPPED (nursery exhausted at load)\n");
+        /* Under 4b.2, the nursery is fully reclaimed each scavenge so the
+         * probe must always land in the nursery.  This is a hard requirement
+         * — no degradation path. */
+        int ok = (pre_fired >= 1) && (react_fired == 0);
+        char *probe = (char *)gc_alloc_atomic(64);
+        int in_nursery = probe ? gc_in_nursery(probe) : 0;
+        ok = ok && (in_nursery == 1);
+        if (!ok) {
+            printf("  [7] pre-emptive triggers FAILED "
+                   "(pre_fired=%ld react_fired=%ld in_nursery=%d)\n",
+                   pre_fired, react_fired, in_nursery);
+            failed = 1;
         } else {
-            /* The core Step 6 proof: the pre-emptive trigger fired and the
-             * reactive path never ran during the dead-alloc burst.  The probe
-             * location is informational only: under ZINCVM_DEBUG (or a
-             * retention-heavy load) more nursery pages may survive each
-             * scavenge, so the nursery may legitimately degrade to one-shot
-             * promotion and the probe lands in old-gen — that is the accepted
-             * degradation, not a trigger failure. */
-            int ok = (pre_fired >= 1) && (react_fired == 0);
-            char *probe = (char *)gc_alloc_atomic(64);
-            int in_nursery = probe ? gc_in_nursery(probe) : 0;
-            if (!ok) {
-                printf("  [7] pre-emptive triggers FAILED "
-                       "(pre_fired=%ld react_fired=%ld)\n",
-                       pre_fired, react_fired);
+            printf("  [7] pre-emptive triggers passed — %ld pre-emptive, "
+                   "0 reactive (probe in nursery=%d)\n",
+                   pre_fired, in_nursery);
+        }
+    }
+
+    /* ---- Test 9: nursery fully reclaimed each cycle (4b.2) ---- */
+    {
+        /* Loop 20×: allocate ~32K dead 64B objects to force a scavenge.
+         * After each scavenge, the nursery must be fully reclaimed. */
+        int ok9 = 1;
+        long last_reclaimed = gc_nursery_pages_reclaimed;
+        long ncap = gc_nursery_capacity_pages();
+        for (int cycle = 0; cycle < 20 && ok9; cycle++) {
+            long target = gc_nursery_scavenge_count + 1;
+            while (gc_nursery_scavenge_count < target) {
+                char *p = (char *)gc_alloc_atomic(64);
+                (void)p;
+            }
+            /* After scavenge, nursery must be fully reclaimed. */
+            if (!gc_nursery_is_empty()) {
+                ok9 = 0;
+                printf("  [9] cycle %d: nursery not empty after scavenge\n", cycle);
+            }
+            long reclaimed = gc_nursery_pages_reclaimed - last_reclaimed;
+            if (reclaimed != ncap) {
+                ok9 = 0;
+                printf("  [9] cycle %d: reclaimed %ld pages, expected %ld\n",
+                       cycle, reclaimed, ncap);
+            }
+            last_reclaimed = gc_nursery_pages_reclaimed;
+        }
+        if (!ok9) {
+            printf("  [9] nursery fully reclaimed each cycle FAILED\n");
+            failed = 1;
+        } else {
+            printf("  [9] nursery fully reclaimed each cycle passed — "
+                   "20 scavenges, nursery empty + %ld pages reclaimed each time\n",
+                   ncap);
+        }
+    }
+
+    /* ---- Test 10: copy not pin (4b.2) ---- */
+    {
+        /* Allocate a GC_VALUE in nursery, root via ROOT_PTR, force scavenge.
+         * Assert root's pointer is now gc_in_oldgen() && !gc_in_nursery(). */
+        Value *root_val = GC_VALUE();
+        *root_val = val_number(0x4B2);
+        gc_root_push_ptr((void**)&root_val);
+
+        force_nursery_scavenge(gc_nursery_scavenge_count + 1);
+
+        int ok10 = gc_in_oldgen(root_val) && !gc_in_nursery(root_val);
+        ok10 = ok10 && (root_val->tag == VAL_NUMBER) && (root_val->number == 0x4B2);
+        void *first_ptr = root_val;
+
+        /* Allocate another nursery object, scavenge again, assert first
+         * survivor unmoved (same pointer, still old-gen). */
+        Value *nv2 = GC_VALUE();
+        *nv2 = val_number(4242);
+        gc_root_push_ptr((void**)&nv2);
+
+        force_nursery_scavenge(gc_nursery_scavenge_count + 1);
+
+        ok10 = ok10 && (root_val == first_ptr);  /* unchanged */
+        ok10 = ok10 && gc_in_oldgen(root_val) && !gc_in_nursery(root_val);
+
+        gc_root_pop();  /* nv2 */
+        gc_root_pop();  /* root_val */
+
+        if (!ok10) {
+            printf("  [10] copy not pin FAILED\n");
+            failed = 1;
+        } else {
+            printf("  [10] copy not pin passed — nursery object evacuated to "
+                   "old-gen, pointer stable after second scavenge\n");
+        }
+    }
+
+    /* ---- Test 11: deep nursery graph (4b.2 allocatepage gating proof) ---- */
+    {
+        /* Build a 500-node cons chain in nursery, root head via ROOT_VALUE,
+         * force ONE scavenge, walk chain — every cell in old-gen and intact.
+         * Proves the allocatepage-gating fix (Cheney drain through destination
+         * pages scans copied survivors' bodies for further nursery refs). */
+        Value chain = val_nil();
+        gc_root_push_value(&chain);
+        for (int i = 499; i >= 0; i--)
+            chain = val_cons(val_number(i), chain);
+
+        force_nursery_scavenge(gc_nursery_scavenge_count + 1);
+
+        int ok11 = 1;
+        int count = 0;
+        Value cur = chain;
+        while (cur.tag == VAL_CONS && ok11) {
+            if (!gc_in_oldgen(cur.cons.car) || gc_in_nursery(cur.cons.car)) {
+                ok11 = 0;
+                printf("  [11] node %d car not in old-gen\n", count);
+            }
+            if (cur.cons.car->tag != VAL_NUMBER || cur.cons.car->number != count) {
+                ok11 = 0;
+                printf("  [11] node %d value mismatch (expected %d, got %ld)\n",
+                       count, count,
+                       cur.cons.car ? (long)cur.cons.car->number : -1);
+            }
+            cur = *cur.cons.cdr;
+            count++;
+        }
+        ok11 = ok11 && (count == 500);
+
+        gc_root_pop();  /* chain */
+
+        if (!ok11) {
+            printf("  [11] deep nursery graph FAILED (count=%d)\n", count);
+            failed = 1;
+        } else {
+            printf("  [11] deep nursery graph passed — 500-node chain evacuated "
+                   "to old-gen in one scavenge (%d cells intact)\n", count);
+        }
+    }
+
+    /* ---- Test 12: no other_space in nursery (4b.2) ---- */
+    {
+        int ok12 = gc_nursery_no_other_space();
+        if (!ok12) {
+            printf("  [12] no other_space FAILED — nursery page has other_space tag\n");
+            failed = 1;
+        } else {
+            printf("  [12] no other_space passed — no nursery page has other_space\n");
+        }
+    }
+
+    /* ---- Test 13: cyclic old-gen structure (4b.2 infinite-loop detector) ---- */
+    {
+        /* Create a 2-cell cyclic old-gen structure and trigger a scavenge.
+         * Detects if gc_move queues old-gen pages without dedup, leading to infinite loop. */
+        printf("  [13] building 2-cell cyclic old-gen structure...\n");
+        fflush(stdout);
+
+        Value *cell1 = (Value *)gc_alloc_oldgen(sizeof(Value), GC_TYPE_VALUE);
+        Value *cell2 = (Value *)gc_alloc_oldgen(sizeof(Value), GC_TYPE_VALUE);
+        Value *num1  = (Value *)gc_alloc_oldgen(sizeof(Value), GC_TYPE_VALUE);
+        Value *num2  = (Value *)gc_alloc_oldgen(sizeof(Value), GC_TYPE_VALUE);
+
+        *cell1 = val_nil();
+        *cell2 = val_nil();
+        *num1  = val_number(1);
+        *num2  = val_number(2);
+
+        cell1->tag = VAL_CONS;
+        cell1->cons.car = num1;
+        cell1->cons.cdr = cell2;
+
+        cell2->tag = VAL_CONS;
+        cell2->cons.car = num2;
+        cell2->cons.cdr = cell1;
+
+        /* Root all values so they survive the scavenge */
+        gc_root_push_value(cell1);
+        gc_root_push_value(cell2);
+        gc_root_push_value(num1);
+        gc_root_push_value(num2);
+
+        /* Force a scavenge with 5-second alarm */
+        long before = gc_nursery_scavenge_count;
+        signal(SIGALRM, alarm_handler);
+        alarm(5);
+        if (setjmp(alarm_jmp)) {
+            alarm(0);
+            printf("  [13] TIMEOUT: infinite loop on cyclic old-gen (BLOCKER)!\n");
+            failed = 1;
+        } else {
+            long target = before + 1;
+            while (gc_nursery_scavenge_count < target) {
+                char *p = (char *)gc_alloc_atomic(64);
+                (void)p;
+            }
+            alarm(0);
+
+            /* Verify the cycle is still intact */
+            int ok13 = (cell1->tag == VAL_CONS && cell2->tag == VAL_CONS);
+            ok13 = ok13 && (cell1->cons.car->tag == VAL_NUMBER && cell1->cons.car->number == 1);
+            ok13 = ok13 && (cell2->cons.car->tag == VAL_NUMBER && cell2->cons.car->number == 2);
+            ok13 = ok13 && (cell1->cons.cdr == cell2 && cell2->cons.cdr == cell1);
+            ok13 = ok13 && gc_in_oldgen(cell1) && gc_in_oldgen(cell2);
+            ok13 = ok13 && gc_in_oldgen(num1) && gc_in_oldgen(num2);
+
+            if (!ok13) {
+                printf("  [13] cyclic old-gen FAILED (cycle corrupted or not in old-gen)\n");
                 failed = 1;
             } else {
-                printf("  [7] pre-emptive triggers passed — %ld pre-emptive, "
-                       "0 reactive (probe in nursery=%d)\n",
-                       pre_fired, in_nursery);
+                printf("  [13] cyclic old-gen passed — cycle intact, no infinite loop\n");
             }
         }
+
+        gc_root_pop();  /* num2 */
+        gc_root_pop();  /* num1 */
+        gc_root_pop();  /* cell2 */
+        gc_root_pop();  /* cell1 */
     }
 
     printf(failed ? "GC nursery tests FAILED\n" : "GC nursery tests all passed\n");

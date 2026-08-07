@@ -115,37 +115,7 @@ static int    *reg_global_table_len = NULL;
 static Instr **reg_traced_code      = NULL;
 static int    *reg_traced_code_len  = NULL;
 
-/* ---- pinned-page bitmap ------------------------------------------- */
-
-static uint64_t *pinned_bits;
-static size_t    pinned_bits_words;
-
-static int page_is_pinned(uintptr_t page) {
-    if (!pinned_bits) return 0;
-    if (page < firstheappage || page > lastheappage) return 0;
-    size_t idx = page - firstheappage;
-    return (pinned_bits[idx / 64] >> (idx % 64)) & 1;
-}
-
-static void page_set_pinned(uintptr_t page) {
-    if (!pinned_bits) return;
-    if (page < firstheappage || page > lastheappage) return;
-    size_t idx = page - firstheappage;
-    pinned_bits[idx / 64] |= (uint64_t)1 << (idx % 64);
-}
-
-static void pinned_clear_all(void) {
-    if (pinned_bits)
-        memset(pinned_bits, 0, pinned_bits_words * sizeof(uint64_t));
-}
-
-static void pinned_clear_nursery(void) {
-    if (!pinned_bits) return;
-    for (uintptr_t p = nursery_first; p <= nursery_last; p++) {
-        size_t idx = p - firstheappage;
-        pinned_bits[idx / 64] &= ~((uint64_t)1 << (idx % 64));
-    }
-}
+/* pinned-page bitmap removed (4b.2 — copying scavenge, no pin-in-place) */
 
 /* ---- nursery / old-gen predicates --------------------------------- */
 
@@ -155,25 +125,11 @@ int gc_in_nursery(void *p) {
 }
 
 /* gc_in_oldgen: true iff p's page is in the live old-gen semi-space
- * (space == current_space).  Under pin-in-place, a nursery page promoted
- * by a scavenge keeps its nursery-range ADDRESS but its space becomes
- * current_space, so the correct old-gen test is the space tag, NOT the
- * address range (a page > nursery_last would miss promoted-in-place
- * arrays, which is exactly the case the write barrier must cover). */
+ * (space == current_space). */
 int gc_in_oldgen(void *p) {
     uintptr_t page = GCP_to_PAGE(p);
     return (page >= firstheappage && page <= lastheappage &&
             space[page] == current_space);
-}
-
-/* first_free_nursery_page: return the first page in the nursery
- * region that still has space==NURSERY, or nursery_last+1 if the
- * entire nursery has been promoted. */
-static uintptr_t first_free_nursery_page(void) {
-    uintptr_t pg = nursery_first;
-    while (pg <= nursery_last && space[pg] != NURSERY)
-        pg++;
-    return pg;
 }
 
 /* ---- write-barrier remembered set (Phase 2 Step 5) --------------- */
@@ -226,7 +182,7 @@ static void  collect_nursery(void);
 static void  allocatepage(uintptr_t pages);
 static void *gcalloc_internal(size_t bytes, int type_tag);
 static void *move_internal(uintptr_t *cp, int type_tag);
-static void  gc_scan_roots(int use_nursery);
+static void  gc_scan_roots(void);
 
 /* ---- Cheney queue ------------------------------------------------- */
 
@@ -244,46 +200,6 @@ static void queue(uintptr_t page) {
         gc_link[page] = 0;
         queue_tail = page;
     }
-}
-
-/* ---- pin (nursery only — full collect uses gc_move evacuation) ---- */
-
-/* pin_nursery_page: pin a nursery page in place (no copy, no flip).
- * Walks backward to find the OBJECT (head) page, then forward through
- * all CONTINUED successors, promoting every page from NURSERY to
- * current_space.  Only the OBJECT page is queued for scanning. */
-static void pin_nursery_page(uintptr_t page) {
-    if (page < nursery_first || page > nursery_last) return;
-    if (space[page] != NURSERY) return;
-
-    /* Walk backward to the OBJECT (head) page */
-    uintptr_t head = page;
-    while (head > nursery_first && type_page[head] == CONTINUED)
-        head--;
-
-    /* Pin the head page */
-    space[head] = current_space;
-    page_set_pinned(head);
-    queue(head);
-    allocatedpages++;
-
-    /* Walk forward, pinning CONTINUED successors */
-    uintptr_t p = head + 1;
-    while (p <= nursery_last && type_page[p] == CONTINUED &&
-           space[p] == NURSERY) {
-        space[p] = current_space;
-        page_set_pinned(p);
-        allocatedpages++;
-        p++;
-    }
-
-    /* Defensive-only: the nursery fast path is gated so a single-page
-     * object is the maximum that can ever be allocated in the nursery
-     * (gc.c gc_alloc: total <= PAGEBYTES).  Multi-page objects fall
-     * through to gcalloc_internal / old-gen and can never land in the
-     * nursery, so type_page is never CONTINUED in the nursery range and
-     * the forward walk above never executes.  Kept for symmetry with
-     * pin_page's forward walk, not because nursery objects can span pages. */
 }
 
 /* ---- typed scanning helpers (called from collect) ------------------ */
@@ -330,12 +246,11 @@ static void collect(void) {
     next_space = (current_space == 1) ? 2 : 1;
     allocatedpages = 0;
     queue_head = 0;
-    pinned_clear_all();
     gc_dirty_vectors_clear();
 
     /* ---- root set ---- */
 
-    gc_scan_roots(0);
+    gc_scan_roots();
 
     /* ---- Cheney scavenge ---- */
 
@@ -414,139 +329,62 @@ static void collect(void) {
     sigprocmask(SIG_SETMASK, &old_sig_set, NULL);
 }
 
-/* ---- nursery collection (Phase 2 Step 3 — pin-in-place) ------------- */
-
-/* Root-scan dispatcher for the nursery scavenge: routes nursery pages
- * to pin_nursery_page and old-gen pages directly to the Cheney queue. */
-static void nursery_root_pin(uintptr_t page) {
-    if (page < firstheappage || page > lastheappage) return;
-    if (page >= nursery_first && page <= nursery_last) {
-        if (space[page] == NURSERY) {
-            pin_nursery_page(page);
-        } else if (space[page] != 0) {
-            /* Already promoted (current_space or the other
-             * semi-space from a prior cycle).  Queue for scanning
-             * so we find this object's refs into new nursery pages. */
-            queue(page);
-        }
-    } else if (space[page] == current_space) {
-        queue(page);
-    }
-}
-
-/* gc_pin_value: pin all GC-managed pages reachable from a Value's
- * interior pointers.  Mirrors gc_scan_value's field list exactly.
- * Nursery-only — used by collect_nursery's root scan (4b.1).
- * Full-collect root scan uses gc_scan_value (evacuation) instead. */
-static void gc_pin_value(Value *v) {
-    switch (v->tag) {
-    case VAL_CONS:
-        if (v->cons.car)   nursery_root_pin(GCP_to_PAGE(v->cons.car));
-        if (v->cons.cdr)   nursery_root_pin(GCP_to_PAGE(v->cons.cdr));
-        break;
-    case VAL_LAMBDA:
-        if (v->lambda.code) nursery_root_pin(GCP_to_PAGE(v->lambda.code));
-        if (v->lambda.env)  nursery_root_pin(GCP_to_PAGE(v->lambda.env));
-        break;
-    case VAL_VECTOR:
-        if (v->vector.data) nursery_root_pin(GCP_to_PAGE(v->vector.data));
-        break;
-    case VAL_STRING:
-        if (v->str.data)    nursery_root_pin(GCP_to_PAGE(v->str.data));
-        break;
-    case VAL_ERROR:
-        if (v->error.message) nursery_root_pin(GCP_to_PAGE(v->error.message));
-        break;
-    /* VAL_NUMBER, VAL_SYMBOL, VAL_BOOLEAN, VAL_NIL, VAL_MARK,
-     * VAL_PRIM, VAL_STREAM contain no GC-managed pointers */
-    default:
-        break;
-    }
-}
+/* ---- nursery collection (Phase 4b.2 — copying scavenge) ------------- */
 
 /* gc_scan_roots: walk the precise-root shadow stack + typed walkers.
  * This is the SOLE authoritative root source; there is no conservative
  * C-stack scan or extra_roots fallback.
  *
- * use_nursery=1 → nursery_root_pin (for collect_nursery — pin-in-place).
- * use_nursery=0 → EVACUATE roots into next_space (full collect — 4b.1
- *   sliding compaction).  gc_scan_value/gc_evacuate update the root
- *   slots in place; the Cheney drain recursively evacuates all reachable
- *   objects.  Nursery pointers within evacuated old-gen objects are
- *   returned unchanged by gc_move (nursery is untouched during full
- *   collect). */
-static void gc_scan_roots(int use_nursery) {
+ * Roots are EVACUATED: gc_scan_value/gc_evacuate update root slots in
+ * place.  During a full collect (in_scavenge=0), nursery pointers are
+ * returned unchanged by gc_move (nursery is untouched).  During a nursery
+ * scavenge (in_scavenge=1), nursery objects are copied to old-gen via
+ * gc_move→move_internal.  The Cheney drain recursively scans all
+ * reachable objects. */
+static void gc_scan_roots(void) {
     /* 1. Shadow stack entries */
     for (size_t i = 0; i < shadow_len; i++) {
         GcRoot *r = &shadow_stack[i];
-        if (use_nursery) {
-            /* ---- nursery scavenge: pin in place ---- */
-            switch (r->kind) {
-            case ROOT_PTR: {
-                void *p = *(void **)r->slot;
-                if (p) nursery_root_pin(GCP_to_PAGE(p));
-                break;
-            }
-            case ROOT_VALUE:
-                gc_pin_value((Value *)r->slot);
-                break;
-            case ROOT_VALUE_VOLATILE: {
-                volatile Value *vs = (volatile Value *)r->slot;
-                Value tmp = *vs;
-                gc_pin_value(&tmp);
-                break;
-            }
-            case ROOT_VALUE_ARRAY: {
-                Value *base = (Value *)r->slot;
-                int n = *(r->np);
-                for (int j = 0; j < n; j++)
-                    gc_pin_value(&base[j]);
-                break;
-            }
-            }
-        } else {
-            /* ---- full collect: evacuate roots ---- */
-            switch (r->kind) {
-            case ROOT_PTR: {
-                /* ROOT_PTR must point at an object HEAD (see gc.h).  An
-                 * interior pointer into a multi-page object would make
-                 * gc_move read a garbage header at *(ptr-1) — UB / heap
-                 * corruption.  Cheap defense: a head page is never
-                 * CONTINUED (only tail pages are). */
-                void *p = *(void **)r->slot;
-                if (p) {
-                    uintptr_t pg = GCP_to_PAGE(p);
-                    if (pg >= firstheappage && pg <= lastheappage &&
-                        type_page[pg] == CONTINUED) {
-                        fprintf(stderr,
-                                "gc: ROOT_PTR points into a multi-page object "
-                                "tail (page %lu) — interior pointer as root; "
-                                "only object HEAD pointers are valid roots\n",
-                                (unsigned long)pg);
-                        exit(1);
-                    }
+        switch (r->kind) {
+        case ROOT_PTR: {
+            /* ROOT_PTR must point at an object HEAD (see gc.h).  An
+             * interior pointer into a multi-page object would make
+             * gc_move read a garbage header at *(ptr-1) — UB / heap
+             * corruption.  Cheap defense: a head page is never
+             * CONTINUED (only tail pages are). */
+            void *p = *(void **)r->slot;
+            if (p) {
+                uintptr_t pg = GCP_to_PAGE(p);
+                if (pg >= firstheappage && pg <= lastheappage &&
+                    type_page[pg] == CONTINUED) {
+                    fprintf(stderr,
+                            "gc: ROOT_PTR points into a multi-page object "
+                            "tail (page %lu) — interior pointer as root; "
+                            "only object HEAD pointers are valid roots\n",
+                            (unsigned long)pg);
+                    exit(1);
                 }
-                gc_evacuate((void **)r->slot);
-                break;
             }
-            case ROOT_VALUE:
-                gc_scan_value((Value *)r->slot);
-                break;
-            case ROOT_VALUE_VOLATILE: {
-                volatile Value *vs = (volatile Value *)r->slot;
-                Value tmp = *vs;
-                gc_scan_value(&tmp);
-                *vs = tmp;
-                break;
-            }
-            case ROOT_VALUE_ARRAY: {
-                Value *base = (Value *)r->slot;
-                int n = *(r->np);
-                for (int j = 0; j < n; j++)
-                    gc_scan_value(&base[j]);
-                break;
-            }
-            }
+            gc_evacuate((void **)r->slot);
+            break;
+        }
+        case ROOT_VALUE:
+            gc_scan_value((Value *)r->slot);
+            break;
+        case ROOT_VALUE_VOLATILE: {
+            volatile Value *vs = (volatile Value *)r->slot;
+            Value tmp = *vs;
+            gc_scan_value(&tmp);
+            *vs = tmp;
+            break;
+        }
+        case ROOT_VALUE_ARRAY: {
+            Value *base = (Value *)r->slot;
+            int n = *(r->np);
+            for (int j = 0; j < n; j++)
+                gc_scan_value(&base[j]);
+            break;
+        }
         }
     }
 
@@ -554,40 +392,35 @@ static void gc_scan_roots(int use_nursery) {
     if (reg_global_table && reg_global_table_len) {
         GlobalEntry *gt = (GlobalEntry *)reg_global_table;
         int n = *reg_global_table_len;
-        for (int i = 0; i < n; i++) {
-            if (use_nursery)
-                gc_pin_value(&gt[i].closure);
-            else
-                gc_scan_value(&gt[i].closure);
-        }
+        for (int i = 0; i < n; i++)
+            gc_scan_value(&gt[i].closure);
     }
 
     /* 3. Typed walker: traced_code Instr arrays */
     if (reg_traced_code && reg_traced_code_len) {
         int n = *reg_traced_code_len;
         for (int i = 0; i < n; i++) {
-            if (reg_traced_code[i]) {
-                if (use_nursery)
-                    nursery_root_pin(GCP_to_PAGE(reg_traced_code[i]));
-                else
-                    gc_evacuate((void **)&reg_traced_code[i]);
-            }
+            if (reg_traced_code[i])
+                gc_evacuate((void **)&reg_traced_code[i]);
         }
     }
 }
 
-/* collect_nursery: no-flip pin-in-place nursery scavenge.
+/* collect_nursery: copying nursery scavenge.
  *
- * Does NOT swap semi-spaces, does NOT reset allocatedpages, does NOT
- * clear old-gen pinned bits.  Roots are scanned via gc_scan_roots(1)
- * (precise shadow stack + typed walkers — the sole authoritative root
- * source), then the write-barrier dirty-vectors remembered set
- * (Phase 2 Step 5) is scanned inline for old-gen→nursery references.
- * Nursery survivors are pinned in place (space ← current_space).
- * Finally the bump cursor is reset to the first still-NURSERY page. */
+ * Does NOT swap semi-spaces (current_space == next_space throughout).
+ * Roots are scanned via gc_scan_roots() (precise shadow stack + typed
+ * walkers).  Nursery survivors are COPIED to old-gen via gc_move →
+ * move_internal, which allocates destination pages in next_space
+ * (== current_space) and writes forwarding pointers in the nursery
+ * source headers.  The write-barrier dirty-vectors remembered set is
+ * scanned inline for old-gen→nursery references.
+ *
+ * After the Cheney drain, ALL nursery pages are reset to NURSERY and
+ * the bump cursor is rewound to the nursery start — the nursery is
+ * fully reusable every cycle. */
 static void collect_nursery(void) {
     sigset_t   old_sig_set;
-    uintptr_t  saved_allocatedpages;   /* for post-scavenge assertion */
 
     /* Guard against recursive entry */
     if (in_scavenge) {
@@ -613,30 +446,15 @@ static void collect_nursery(void) {
 
     /* No semi-space swap; no reset of allocatedpages */
 
-    /* Short-circuit: if the nursery has no NURSERY-tagged pages at all,
-     * there are no nursery objects to evacuate and no old-gen→nursery
-     * references to scan.  Just reset the bump cursor and return. */
-    if (first_free_nursery_page() > nursery_last) {
-        nursery_cur = nursery_end;
-        in_scavenge = 0;
-        sigprocmask(SIG_SETMASK, &old_sig_set, NULL);
-        return;
-    }
-
-    /* Count this as a real scavenge (past the exhausted-nursery short-circuit). */
+    /* Count this as a real scavenge. */
     gc_nursery_scavenge_count++;
-
-    /* Clear only the nursery portion of the pinned bitmap */
-    pinned_clear_nursery();
 
     /* Reset the Cheney queue */
     queue_head = 0;
 
-    saved_allocatedpages = allocatedpages;
-
     /* ---- root set ---- */
 
-    gc_scan_roots(1);
+    gc_scan_roots();
 
     /* ---- scan dirty old-gen vectors (write-barrier remembered set) ---- */
     if (dirty_vectors_overflow) {
@@ -659,35 +477,16 @@ static void collect_nursery(void) {
         }
     }
 
-    /* ---- queue previously-promoted nursery pages ---- */
-    /* Nursery pages promoted in a prior scavenge cycle (before a
-     * full collect flipped current_space) have space == other_space.
-     * They contain live objects that may reference newly-allocated
-     * nursery pages and must be scanned. */
-    {
-        uintptr_t other_space = (current_space == 1) ? 2 : 1;
-        for (uintptr_t pg = nursery_first; pg <= nursery_last; pg++) {
-            if (space[pg] == other_space && type_page[pg] == OBJECT)
-                queue(pg);
-        }
-    }
-
     /* ---- Cheney scavenge ---- */
-    /* Nursery pages stop at nursery_cur (the allocation frontier);
-     * old-gen pages stop at freep (the old-gen allocation frontier). */
+    /* Under 4b.2 copying scavenge, nursery objects are copied to old-gen
+     * and the destination pages are queued via allocatepage.  The drain
+     * processes old-gen pages; nursery pages are never queued. */
 
     while (queue_head != 0) {
         uintptr_t qpg  = queue_head;
-        int is_nursery = (qpg >= nursery_first && qpg <= nursery_last);
         uintptr_t *cp  = PAGE_to_GCP(qpg);
-        uintptr_t *limit;
 
-        if (is_nursery)
-            limit = (uintptr_t *)nursery_cur;
-        else
-            limit = freep;
-
-        while (GCP_to_PAGE(cp) == qpg && cp != limit) {
+        while (GCP_to_PAGE(cp) == qpg && cp != freep) {
             uintptr_t hw = HEADER_WORDS(*cp);
             int ty = HEADER_TYPE(*cp);
 
@@ -740,55 +539,15 @@ static void collect_nursery(void) {
         queue_head = gc_link[queue_head];
     }
 
-    /* ---- reset nursery bump cursor ---- */
+    /* ---- reset nursery: full reclaim ---- */
+    /* Under copying scavenge, survivors have been copied to old-gen.
+     * Reset ALL nursery pages to NURSERY and rewind the bump cursor
+     * to the nursery start — the nursery is fully reusable. */
     {
-        uintptr_t pg = first_free_nursery_page();
-        char *new_cur;
-        if (pg <= nursery_last)
-            new_cur = (char *)PAGE_to_GCP(pg);
-        else
-            new_cur = nursery_end;
-        /* Pages freed by rewinding the cursor back to the first free page.
-         * The cursor only ever moves backward here (to the first page that is
-         * still NURSERY), so reclaimed = old cursor - new cursor. */
-        if (new_cur < nursery_cur)
-            gc_nursery_pages_reclaimed += (long)((nursery_cur - new_cur) / PAGEBYTES);
-        nursery_cur = new_cur;
-    }
-
-    /* ---- assertions ---- */
-
-    /* Invariant 1: every nursery page is NURSERY, current_space, or
-     * the other semi-space.  The "other" semi-space (1 or 2, whichever
-     * is not current_space) holds nursery pages that were promoted in
-     * a previous nursery scavenge before a full collect flipped
-     * current_space.  These pages are still live and must be accepted. */
-    {
-        uintptr_t other_space = (current_space == 1) ? 2 : 1;
-        for (uintptr_t pg = nursery_first; pg <= nursery_last; pg++) {
-            if (space[pg] != NURSERY &&
-                space[pg] != current_space &&
-                space[pg] != other_space) {
-                fprintf(stderr,
-                        "collect_nursery: invariant violation: "
-                        "nursery page %lu has space=%lu "
-                        "(expected %lu=NURSERY, %lu=current, or %lu=other)\n",
-                        (unsigned long)pg, (unsigned long)space[pg],
-                        (unsigned long)NURSERY, (unsigned long)current_space,
-                        (unsigned long)other_space);
-                exit(1);
-            }
-        }
-    }
-
-    /* Invariant 2: allocatedpages never shrinks during a scavenge */
-    if (allocatedpages < saved_allocatedpages) {
-        fprintf(stderr,
-                "collect_nursery: invariant violation: "
-                "allocatedpages shrank from %lu to %lu\n",
-                (unsigned long)saved_allocatedpages,
-                (unsigned long)allocatedpages);
-        exit(1);
+        for (uintptr_t pg = nursery_first; pg <= nursery_last; pg++)
+            space[pg] = NURSERY;
+        gc_nursery_pages_reclaimed += NURSERY_PAGES;
+        nursery_cur = (char *)PAGE_to_GCP(nursery_first);
     }
 
     gc_dirty_vectors_clear();
@@ -933,13 +692,11 @@ retry:
     allpages = heappages;
 
     /* Scan cyclically from freepage looking for `pages` consecutive
-     * free (not in current_space, not in next_space, not nursery,
-     * not pinned) pages. */
+     * free (not in current_space, not in next_space, not nursery) pages. */
     while (allpages--) {
         if (space[freepage] != current_space &&
             space[freepage] != next_space &&
-            space[freepage] != NURSERY &&
-            !page_is_pinned(freepage))
+            space[freepage] != NURSERY)
         {
             if (free++ == 0)
                 firstpage = freepage;
@@ -947,7 +704,7 @@ retry:
             if (free == pages) {
                 freep = PAGE_to_GCP(firstpage);
 
-                if (current_space != next_space)
+                if (current_space != next_space || in_scavenge)
                     queue(firstpage);
 
                 freewords = pages * PAGEWORDS;
@@ -1036,17 +793,29 @@ void *gc_move(void *p) {
         return p;
 
     /* Already in to-space? */
-    if (space[page] == next_space)
+    if (space[page] == next_space) {
+        /* During a nursery scavenge, old-gen objects (space==current_space==next_space)
+         * must be queued for scanning — their bodies may contain nursery pointers
+         * that need evacuation.  During a full collect, the Cheney queue already
+         * covers all to-space pages. */
+        if (in_scavenge) queue(page);
         return p;
+    }
 
-    /* Nursery object: pin in place, never copy.  During a nursery
-     * scavenge (in_scavenge set), promote still-NURSERY pages to
-     * current_space so they survive.  During a full collect the
-     * nursery is untouched — just return p. */
+    /* Nursery object: copy to old-gen during a nursery scavenge,
+     * leave untouched during a full collect. */
     if (gc_in_nursery(p)) {
-        if (in_scavenge && space[page] == NURSERY)
-            pin_nursery_page(page);
-        return p;
+        if (!in_scavenge) return p;          /* full collect: nursery untouched */
+        if (space[page] != NURSERY) {
+            /* Already promoted this scavenge OR old-gen in nursery range */
+            uintptr_t header = cp[-1];
+            if (FORWARDED(header)) return (void *)header;   /* already evacuated */
+            return p;                                       /* old-gen, stay */
+        }
+        /* Nursery survivor: copy to old-gen (current_space), leave forwarding ptr. */
+        uintptr_t header = cp[-1];
+        if (FORWARDED(header)) return (void *)header;        /* re-visit via two refs */
+        return move_internal(cp, HEADER_TYPE(header));
     }
 
     header = cp[-1];
@@ -1142,19 +911,11 @@ void gc_init(uintptr_t heap_size) {
     freepage      = firstheappage + NURSERY_PAGES;   /* start after nursery */
     allocatedpages = 0;
     queue_head     = 0;
-
-    /* Pinned-page bitmap */
-    pinned_bits_words = (heap_mmap_size / PAGEBYTES + 63) / 64;
-    pinned_bits = calloc(pinned_bits_words, sizeof(uint64_t));
-    if (!pinned_bits) {
-        fprintf(stderr, "gc_init: pinned bitmap alloc failed\n");
-        exit(1);
-    }
 }
 
 __attribute__((noinline))
 void *gc_alloc(size_t bytes, int type_tag) {
-    /* ---- nursery fast path (Phase 2 Step 3) ---- */
+    /* ---- nursery fast path (Phase 4b.2 — copying scavenge) ---- */
     /* The nursery bump path only handles SINGLE-page objects.  A multi-page
      * alloc (total > PAGEBYTES) must not go through the nursery: the bump
      * allocator writes the header and memsets the body across its whole page
@@ -1173,7 +934,7 @@ void *gc_alloc(size_t bytes, int type_tag) {
         /* Pre-emptive nursery scavenge: fire when free space drops below
          * NURSERY_SCAVENGE_FREE_LOWATER, BEFORE the bump cursor is exhausted.
          * This decouples the scavenge trigger from the reactive path. */
-        if (!in_scavenge && first_free_nursery_page() <= nursery_last &&
+        if (!in_scavenge &&
             (size_t)(nursery_end - nursery_cur) <= NURSERY_SCAVENGE_FREE_LOWATER) {
             collect_nursery();
             nursery_tried = 1;
@@ -1181,14 +942,6 @@ void *gc_alloc(size_t bytes, int type_tag) {
         }
 
     nursery_retry:
-        /* Skip promoted (non-NURSERY) pages that were pinned by a
-         * prior collection.  This keeps the bump cursor on free space. */
-        while (nursery_cur < nursery_end) {
-            uintptr_t pg = GCP_to_PAGE(nursery_cur);
-            if (pg > nursery_last) break;
-            if (space[pg] == NURSERY) break;
-            nursery_cur = (char *)PAGE_to_GCP(pg + 1);
-        }
 
         /* No-straddle guard: if this allocation would cross a nursery page
          * boundary, bump the cursor to the next page start and re-skip
@@ -1223,10 +976,9 @@ void *gc_alloc(size_t bytes, int type_tag) {
             void *body = header + 1;
             nursery_cur += total;
 
-            /* Set type_page markers for multi-page nursery objects.
-             * Mirrors allocatepage's old-gen CONTINUED logic so that
-             * pin_nursery_page's backward/forward walk correctly
-             * identifies all pages of a large object. */
+            /* Set type_page markers for the nursery object.
+             * Nursery objects are single-page (total <= PAGEBYTES) so the
+             * forward loop never executes.  Kept for metadata consistency. */
             {
                 uintptr_t first_page = GCP_to_PAGE(header);
                 uintptr_t last_page  = GCP_to_PAGE((uintptr_t)nursery_cur - 1);
@@ -1238,13 +990,8 @@ void *gc_alloc(size_t bytes, int type_tag) {
             return body;
         }
 
-        /* Nursery full — collect and retry once.
-         * Only call collect_nursery() if the nursery actually has
-         * NURSERY-tagged pages to scavenge.  Once all nursery pages
-         * are promoted, the nursery is permanently exhausted and every
-         * subsequent collect_nursery() would be a wasted full old-gen
-         * scan — skip straight to the old-gen path. */
-        if (!nursery_tried && first_free_nursery_page() <= nursery_last) {
+        /* Nursery full — collect and retry once. */
+        if (!nursery_tried) {
             collect_nursery();
             nursery_tried = 1;
             gc_reactive_scavenge_count++;
@@ -1282,6 +1029,28 @@ void *gc_alloc_oldgen(size_t bytes, int type_tag) {
 
 long gc_allocatedpages(void) {
     return (long)allocatedpages;
+}
+
+/* Nursery instrumentation accessors (Phase 4b.2). */
+
+int gc_nursery_is_empty(void) {
+    /* Under copying scavenge, after a scavenge all nursery pages are
+     * NURSERY-tagged.  (nursery_cur may have advanced past the start
+     * due to post-scavenge allocations — check only page tags.) */
+    for (uintptr_t pg = nursery_first; pg <= nursery_last; pg++)
+        if (space[pg] != NURSERY) return 0;
+    return 1;
+}
+
+long gc_nursery_capacity_pages(void) {
+    return NURSERY_PAGES;
+}
+
+int gc_nursery_no_other_space(void) {
+    uintptr_t other = (current_space == 1) ? 2 : 1;
+    for (uintptr_t pg = nursery_first; pg <= nursery_last; pg++)
+        if (space[pg] == other) return 0;
+    return 1;
 }
 
 /* ---- precise-root API (Phase 4a) --------------------------------- */
