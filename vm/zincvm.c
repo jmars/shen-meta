@@ -1681,13 +1681,14 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
         if (pc < 0 || pc >= cur_len) {
             if (frames_sp > 0) {
                 CallFrame *cf = &frame_stack[--frames_sp];
-                
-                
-                
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                 env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
                 va_free(&stack);
                 stack = cf->stack;
+                /* Release stale GC pointers in the popped slot so the full
+                 * CALLFRAME_ARRAY scan (gc.c) does not keep dead frame envs /
+                 * stacks reachable until the slot is reused. */
+                cf->env = NULL; cf->stack.data = NULL; cf->stack.len = 0;
                 continue;
             }
             break;
@@ -1727,12 +1728,11 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
                 va_pop(&stack);
                 if (frames_sp > 0) {
                     CallFrame *cf = &frame_stack[--frames_sp];
-                    
-                
-                
                     cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                     env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
                     stack = cf->stack;
+                    /* Release stale GC pointers in the popped slot (see above). */
+                    cf->env = NULL; cf->stack.data = NULL; cf->stack.len = 0;
                     va_push(&stack, acc);  /* push return value to caller stack */
                 } else goto done;
             } else if (stack.len > 0) { env_push(&env, &env_len, &env_cap, va_pop(&stack)); pc++; }
@@ -1808,13 +1808,12 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
         case OP_RETURN: {
             if (frames_sp > 0) {
                 CallFrame *cf = &frame_stack[--frames_sp];
-                
-                
-                
                 cur_code = cf->code; cur_len = cf->code_len; pc = cf->pc;
                 env = cf->env; env_len = cf->env_len; env_cap = cf->env_cap;
                 va_free(&stack);
                 stack = cf->stack;
+                /* Release stale GC pointers in the popped slot (see above). */
+                cf->env = NULL; cf->stack.data = NULL; cf->stack.len = 0;
                 va_push(&stack, acc);  /* push return value to caller stack */
             } else goto done;
             break;
