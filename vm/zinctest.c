@@ -883,11 +883,13 @@ int main(int argc, char **argv) {
                     Value bc = val_cons(num_sym, val_cons(n42, nil));
 
                     gc_root_push_value(&tli);
+                    gc_root_push_value(&bc);  /* root bc across GC_VALUE_ARRAY */
                     Value *env2 = GC_VALUE_ARRAY(tli.lambda.env_len + 1);
                     if (tli.lambda.env_len > 0)
                         memcpy(env2, tli.lambda.env, tli.lambda.env_len * sizeof(Value));
                     env2[tli.lambda.env_len] = bc;
-                    gc_root_pop();
+                    gc_root_pop();  /* bc */
+                    gc_root_pop();  /* tli */
 
                     /* Trace Test B — disabled */
                     /* trace_counter = 0; trace_limit = 800; */

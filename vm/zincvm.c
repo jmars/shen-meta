@@ -195,9 +195,13 @@ Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
     v.tag = VAL_LAMBDA;
     v.lambda.code = code; v.lambda.code_len = code_len;
     if (env_len > 0) {
+        gc_root_push_ptr((void**)&code);   /* root code across GC_VALUE_ARRAY */
+        gc_root_push_ptr((void**)&env);    /* root env across GC_VALUE_ARRAY */
         v.lambda.env = GC_VALUE_ARRAY(env_len);
         memcpy(v.lambda.env, env, env_len * sizeof(Value));
         v.lambda.env_len = env_len;
+        gc_root_pop();  /* env */
+        gc_root_pop();  /* code */
     } else { v.lambda.env = NULL; v.lambda.env_len = 0; }
     return v;
 }
@@ -375,6 +379,12 @@ Value global_get(const char *name) {
 
 /* CatchFrame is in zincvm.h */
 
+/* FIXME(4a.6-flip): CatchFrames are stack-allocated at each catch site
+   (trap-error, eval-kl, vm_exec_env callers in zinctest.c and main).  Their
+   error_val field holds a GC-allocated string.  Today the conservative C-stack
+   scan pins them; after the flip to precise-only roots, each CatchFrame must
+   be registered as a precise root (e.g. via gc_root_push_value on &cf.error_val
+   after setjmp).  Until then, the conservative scan masks this gap. */
 CatchFrame *vm_catch_chain = NULL;
 
 static void vm_throw(const char *msg) {
@@ -450,8 +460,11 @@ static Value marshal_to_tagged(Value v) {
            recursion on [cons X Y] by calling extract-kl on X and Y directly.
            Recursive marshalling creates deeply nested structures that the
            compiled interp patterns can't match. */
-        return val_cons(val_symbol("cons"),
+        gc_root_push_value(&v);  /* root v across nested val_cons allocs */
+        Value result = val_cons(val_symbol("cons"),
                         val_cons(*v.cons.car, val_cons(*v.cons.cdr, val_nil())));
+        gc_root_pop();
+        return result;
     }
     case VAL_NIL:
         return val_cons(val_symbol("cons"), val_nil());
@@ -484,14 +497,22 @@ static Value demarshal_from_tagged(Value tagged) {
         return *cdr.cons.car;
     }
     if (strcmp(tag, "cons") == 0) {
+        gc_root_push_value(&tagged);  /* root tagged across recursive call allocs */
         Value cdr = *tagged.cons.cdr;
-        if (cdr.tag == VAL_NIL) return val_nil();  /* [cons] — empty list */
+        if (cdr.tag == VAL_NIL) { gc_root_pop(); return val_nil(); }  /* [cons] — empty list */
         /* [cons X Y] — recursively demarshal car and cdr */
         Value tagged_car = *cdr.cons.car;
         Value tagged_cdr = *cdr.cons.cdr;
         Value actual_cdr = *tagged_cdr.cons.car;
-        return val_cons(demarshal_from_tagged(tagged_car),
-                        demarshal_from_tagged(actual_cdr));
+        Value r1 = demarshal_from_tagged(tagged_car);
+        gc_root_push_value(&r1);     /* root r1 across demarshal of actual_cdr */
+        Value r2 = demarshal_from_tagged(actual_cdr);
+        gc_root_push_value(&r2);     /* root r2 across val_cons alloc */
+        Value out = val_cons(r1, r2);
+        gc_root_pop();  /* r2 */
+        gc_root_pop();  /* r1 */
+        gc_root_pop();  /* tagged */
+        return out;
     }
     return tagged;  /* unknown tag */
 }
@@ -1012,10 +1033,12 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
             int env_len = handler.lambda.env_len;
             int new_env_len = env_len + 1;
+            gc_root_push_value(&err);        /* root err across GC_VALUE_ARRAY */
             Value *henv = GC_VALUE_ARRAY(new_env_len);
             if (env_len > 0)
                 memcpy(henv, handler.lambda.env, env_len * sizeof(Value));
             henv[env_len] = err;
+            gc_root_pop();  /* err */
             /* Pop roots BEFORE calling handler — if handler's vm_exec_env
                raises a simple-error (longjmps to cf.parent), the pops
                would be skipped.  All handler interior-pointers have been
@@ -1573,9 +1596,11 @@ static Value lookup_env(int n, Value *env, int env_len) {
 static void env_push(Value **env, int *env_len, int *env_cap, Value v) {
     if (*env_len >= *env_cap) {
         int new_cap = *env_cap ? (*env_cap) * 2 : 4;
+        gc_root_push_value(&v);            /* root v across GC_VALUE_ARRAY */
         Value *new_env = GC_VALUE_ARRAY(new_cap);
         if (*env_len > 0) memcpy(new_env, *env, *env_len * sizeof(Value));
         *env = new_env; *env_cap = new_cap;
+        gc_root_pop();
     }
     (*env)[(*env_len)++] = v;
 }
@@ -1592,30 +1617,35 @@ int trace_counter = -1;
 int trace_limit = 0;
 
 Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) {
-    gc_root_push_ptr((void**)&code);      /* root code across va_init/GC_VALUE_ARRAY allocs */
-    ValueArray stack; va_init(&stack);
+    /* Push all root slots BEFORE any allocation.  &env, &stack.data, and &acc
+       are pushed early (while still NULL/nil) so gc_scan_roots reads the
+       CURRENT slot value at collect time — they will be reassigned across
+       gc_alloc calls below.  NULL slots pin nothing, so pushing early is safe. */
+    gc_root_push_ptr((void**)&code);       /* root code across allocs */
+    gc_root_push_ptr((void**)&init_env);   /* root init_env across allocs */
+    ValueArray stack;
     Value *env = NULL; int env_len = 0, env_cap = 0;
-    gc_root_push_ptr((void**)&init_env);  /* root init_env across GC_VALUE_ARRAY below */
+    Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
+    gc_root_push_ptr((void**)&env);         /* ROOT_PTR — stable slot for env */
+    gc_root_push_ptr((void**)&stack.data);  /* ROOT_PTR — stable slot for stack.data */
+    gc_root_push_value(&acc);               /* ROOT_VALUE — stable slot for acc */
+    va_init(&stack);                        /* now safe: all slots above are rooted */
     if (init_env_len > 0 && init_env) {
         env_cap = init_env_len;
         env = GC_VALUE_ARRAY(env_cap);
         memcpy(env, init_env, init_env_len * sizeof(Value));
         env_len = init_env_len;
     }
-    Value acc; memset(&acc, 0, sizeof(acc)); acc.tag = VAL_NIL;
     CallFrame *frame_stack = (CallFrame*)gc_alloc_oldgen(CALL_STACK_DEPTH * sizeof(CallFrame), GC_TYPE_CALLFRAME_ARRAY);
     if (!frame_stack) {
-        gc_root_pop(); gc_root_pop();      /* init_env, code */
+        gc_root_pop(); gc_root_pop(); gc_root_pop(); gc_root_pop(); gc_root_pop(); /* acc, stack.data, env, init_env, code */
         va_free(&stack); return acc;
     }
     memset(frame_stack, 0, CALL_STACK_DEPTH * sizeof(CallFrame));
     int frames_sp = 0;
     int pc = 0; Instr *cur_code = code; int cur_len = code_len;
     int instr_count = 0;
-    gc_root_push_value(&acc);              /* ROOT_VALUE */
-    gc_root_push_ptr((void**)&env);         /* ROOT_PTR — Value** */
-    gc_root_push_ptr((void**)&stack.data);  /* ROOT_PTR — Value** */
-    gc_root_push_ptr((void**)&cur_code);    /* ROOT_PTR — Instr** */
+    gc_root_push_ptr((void**)&cur_code);   /* ROOT_PTR — Instr** */
     gc_root_push_ptr((void**)&frame_stack); /* ROOT_PTR — CallFrame** */
     #define INSTR_HARD_LIMIT 500000000
 
@@ -1709,24 +1739,21 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
                     fprintf(stderr, "runtime: apply missing pushmark\n"); goto done;
                 }
                 va_pop(&stack);
+                gc_root_push_value_array(argbuf, &nargs);  /* root argbuf before any alloc below */
 
                 if (frames_sp >= CALL_STACK_DEPTH) { goto done; }
                 CallFrame *cf = &frame_stack[frames_sp++];
                 cf->code = cur_code; cf->code_len = cur_len; cf->pc = pc + 1;
                 cf->env = env; cf->env_len = env_len; cf->env_cap = env_cap;
                 cf->stack = stack; va_init(&stack);
-                
-                
-                
-                va_init(&stack);
+
                 env = NULL; env_len = 0; env_cap = 0;
 
                 int lambda_env_len = acc.lambda.env_len;
                 int new_env_len = lambda_env_len + nargs;
-                gc_root_push_value_array(argbuf, &nargs);
                 Value *ne = GC_VALUE_ARRAY(new_env_len);
-                /* acc.lambda.env stays reachable via the conservative stack
-                 * scan — safe to read after gcalloc. */
+                /* acc.lambda.env stays reachable via the precise-root shadow
+                 * stack (&acc is rooted in vm_exec_env prologue). */
                 cur_code = acc.lambda.code; cur_len = acc.lambda.code_len;
                 Value *lambda_env = acc.lambda.env;
                 if (lambda_env_len > 0 && lambda_env) {
@@ -1735,7 +1762,7 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
                 for (int i = 0; i < nargs; i++)
                     ne[lambda_env_len + i] = argbuf[i];
                 env = ne; env_len = new_env_len; env_cap = new_env_len;
-                gc_root_pop();
+                gc_root_pop();  /* argbuf */
                 pc = 0;
             } else if (acc.tag == VAL_PRIM) {
                 /* Function already popped; pop mark before args if present */
@@ -1852,7 +1879,7 @@ Value vm_exec_env(Instr *code, int code_len, Value *init_env, int init_env_len) 
         }
     }
 done:
-    /* 7 pops: code + init_env + acc + env + stack.data + cur_code + frame_stack */
+    /* 7 pops (LIFO): frame_stack, cur_code, acc, stack.data, env, init_env, code */
     gc_root_pop(); gc_root_pop(); gc_root_pop(); gc_root_pop(); gc_root_pop();
     gc_root_pop(); gc_root_pop();
     va_free(&stack);
