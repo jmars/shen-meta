@@ -1381,7 +1381,17 @@ void gc_init(uintptr_t heap_size, void *stack_base) {
 __attribute__((noinline))
 void *gc_alloc(size_t bytes, int type_tag) {
     /* ---- nursery fast path (Phase 2 Step 3) ---- */
-    if (bytes <= NURSERY_BYTES / 8) {
+    /* The nursery bump path only handles SINGLE-page objects.  A multi-page
+     * alloc (total > PAGEBYTES) must not go through the nursery: the bump
+     * allocator writes the header and memsets the body across its whole page
+     * range without checking space[] on intermediate pages, so it can
+     * straddle a page already promoted to current_space (holding a live
+     * closure's code array) and zero it.  Multi-page allocs fall through to
+     * gcalloc_internal (old-gen), where allocatepage finds contiguous free
+     * pages and never writes to a promoted neighbor.  This is where
+     * multi-page objects end up after their first scavenge anyway. */
+    if (bytes <= NURSERY_BYTES / 8 &&
+        (((bytes + WORDBYTES - 1) / WORDBYTES + 1) * WORDBYTES) <= PAGEBYTES) {
         uintptr_t words = (bytes + WORDBYTES - 1) / WORDBYTES + 1;
         size_t total = words * WORDBYTES;
         int nursery_tried = 0;
