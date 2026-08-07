@@ -25,9 +25,8 @@ enum {
 /* ---- public API ---- */
 
 /* Initialise the collector.  heap_size is in bytes (must be a multiple of
- * PAGEBYTES=512).  stack_base should be the address of a local variable in
- * the outermost frame (typically main's &argc or similar). */
-void  gc_init(uintptr_t heap_size, void *stack_base);
+ * PAGEBYTES=512). */
+void  gc_init(uintptr_t heap_size);
 
 /* Allocate zeroed memory that may contain GC-managed pointers.  `type_tag`
  * tells the collector how to scan the object's body.  May trigger a
@@ -42,11 +41,6 @@ void *gc_alloc_oldgen(size_t bytes, int type_tag);
 /* Shorthand for gc_alloc(bytes, GC_TYPE_RAW).  For char buffers, error
  * messages, and other blobs that contain no GC-managed pointers. */
 void *gc_alloc_atomic(size_t bytes);
-
-/* Register a memory range for conservative root scanning.  Every
- * sizeof(uintptr_t)-aligned word in the range is checked as a potential
- * heap pointer and the containing page is pinned (not moved). */
-void  gc_set_extra_roots(void *start, size_t size);
 
 /* ---- functions implemented in zincvm.c (need full type defs) ---- */
 

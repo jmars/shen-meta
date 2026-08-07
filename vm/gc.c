@@ -1,16 +1,14 @@
 /*
- * gc.c — Cheney mostly-copying collector (Phase 1: single-space)
+ * gc.c — Cheney mostly-copying collector
  *
- * Replaces the uniform pointer-count scan of a Bartlett-style collector with
- * a type-tag dispatch so the scavenger calls typed scanning functions
+ * Type-tag dispatch scavenger calling typed scanning functions
  * (gc_scan_value / gc_evacuate) provided by zincvm.c.
  *
  * Design notes:
  * - HEADER_PTRS repurposed as HEADER_TYPE (0-4, see gc.h)
  * - gc_alloc zeros the entire object body (not just pointer slots)
- * - No grow/shrink — fixed heap; OOM prints diagnostic and exits
- * - No global_ptr array (zincvm uses extra_roots for global_table)
- * - Public API: gc_alloc, gc_alloc_atomic, gc_init, gc_move
+ * - Roots are precise-only: shadow stack + typed walkers.
+ *   No conservative C-stack scan, no extra_roots fallback.
  * - gc_alloc marked __attribute__((noinline)) to spill registers
  * - SIGALRM blocked during collection (zincvm uses alarm for test timeouts)
  */
@@ -20,7 +18,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <setjmp.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include "zincvm.h"
@@ -55,11 +52,7 @@
  * Decouples the nursery trigger from the reactive not-enough-room path. */
 #define NURSERY_SCAVENGE_FREE_LOWATER  (NURSERY_BYTES / 8)
 
-#define STACKINC  sizeof(uintptr_t)
-
 /* ---- static state ------------------------------------------------- */
-
-static uintptr_t *stackbase;
 
 static uintptr_t  firstheappage;
 static uintptr_t  lastheappage;
@@ -127,32 +120,6 @@ static int    *reg_traced_code_len  = NULL;
 static uint64_t *pinned_bits;
 static size_t    pinned_bits_words;
 
-#ifdef GC_ROOTS_DIFF
-static uint64_t *precise_pinned;         /* pages pinned by precise roots */
-static int       gc_diff_phase = 0;     /* 0=off, 1=precise, 2=conservative */
-static long      gc_diff_missed = 0;    /* pages pinned only by conservative scan */
-static uintptr_t gc_diff_missed_pages[16]; /* first few missed page #s */
-static int       gc_diff_missed_count = 0;
-
-static void gc_diff_record_page(uintptr_t page) {
-    if (page < firstheappage || page > lastheappage) return;
-    size_t idx = page - firstheappage;
-    if (gc_diff_phase == 1) {
-        precise_pinned[idx / 64] |= (uint64_t)1 << (idx % 64);
-    } else if (gc_diff_phase == 2) {
-        if (!((precise_pinned[idx / 64] >> (idx % 64)) & 1)) {
-            gc_diff_missed++;
-            /* Dedupe for the report array */
-            int found = 0;
-            for (int i = 0; i < gc_diff_missed_count; i++)
-                if (gc_diff_missed_pages[i] == page) { found = 1; break; }
-            if (!found && gc_diff_missed_count < 16)
-                gc_diff_missed_pages[gc_diff_missed_count++] = page;
-        }
-    }
-}
-#endif
-
 static int page_is_pinned(uintptr_t page) {
     if (!pinned_bits) return 0;
     if (page < firstheappage || page > lastheappage) return 0;
@@ -209,23 +176,6 @@ static uintptr_t first_free_nursery_page(void) {
     return pg;
 }
 
-/* ---- extra roots -------------------------------------------------- */
-
-#define MAX_EXTRA_ROOTS 8
-static struct { void *start; size_t size; } extra_roots[MAX_EXTRA_ROOTS];
-static int n_extra_roots = 0;
-
-void gc_set_extra_roots(void *start, size_t size) {
-    if (n_extra_roots >= MAX_EXTRA_ROOTS) {
-        fprintf(stderr, "gc_set_extra_roots: too many ranges (max %d)\n",
-                MAX_EXTRA_ROOTS);
-        exit(1);
-    }
-    extra_roots[n_extra_roots].start = start;
-    extra_roots[n_extra_roots].size  = size;
-    n_extra_roots++;
-}
-
 /* ---- write-barrier remembered set (Phase 2 Step 5) --------------- */
 
 /* Dirty vectors: old-gen vector element arrays that may now contain
@@ -268,10 +218,6 @@ void gc_dirty_vectors_clear(void) {
  * Lets gc_nursery_tests() assert deterministically that address-> of a
  * nursery-referencing value into an old-gen vector fires the barrier. */
 long gc_dirty_vectors_fired = 0;
-
-/* ---- register-spill jmp_buf --------------------------------------- */
-
-static jmp_buf gc_reg_buf;
 
 /* ---- forward declarations ----------------------------------------- */
 
@@ -323,17 +269,11 @@ static void pin_page(uintptr_t page) {
             allocatedpages++;
             space[page] = next_space;
             page_set_pinned(page);
-#ifdef GC_ROOTS_DIFF
-            gc_diff_record_page(page);
-#endif
             page--;
         }
         space[page] = next_space;
         allocatedpages++;
         page_set_pinned(page);
-#ifdef GC_ROOTS_DIFF
-        gc_diff_record_page(page);
-#endif
         queue(page);
 
         /* Forward-walk CONTINUED tail pages of the same multi-page
@@ -353,9 +293,6 @@ static void pin_page(uintptr_t page) {
             space[t] = next_space;
             allocatedpages++;
             page_set_pinned(t);
-#ifdef GC_ROOTS_DIFF
-            gc_diff_record_page(t);
-#endif
             t++;
         }
     }
@@ -377,9 +314,6 @@ static void pin_nursery_page(uintptr_t page) {
     /* Pin the head page */
     space[head] = current_space;
     page_set_pinned(head);
-#ifdef GC_ROOTS_DIFF
-    gc_diff_record_page(head);
-#endif
     queue(head);
     allocatedpages++;
 
@@ -389,9 +323,6 @@ static void pin_nursery_page(uintptr_t page) {
            space[p] == NURSERY) {
         space[p] = current_space;
         page_set_pinned(p);
-#ifdef GC_ROOTS_DIFF
-        gc_diff_record_page(p);
-#endif
         allocatedpages++;
         p++;
     }
@@ -420,13 +351,7 @@ static void evac_instr(Instr *in) {
 /* ---- collector ---------------------------------------------------- */
 
 static void collect(void) {
-    uintptr_t *fp;
-    uintptr_t  i;
     sigset_t   old_sig_set;
-
-    /* spill callee-saved registers to the stack so the conservative
-     * C-stack scan can find them */
-    (void)setjmp(gc_reg_buf);
 
     /* Block SIGALRM during collection and restore the prior mask afterwards:
      * the VM uses alarm() for test timeouts and a signal during collection
@@ -460,83 +385,7 @@ static void collect(void) {
 
     /* ---- root set ---- */
 
-#ifdef GC_ROOTS_DIFF
-    /* Reset diff state */
-    memset(precise_pinned, 0, pinned_bits_words * sizeof(uint64_t));
-    gc_diff_missed = 0;
-    gc_diff_missed_count = 0;
-
-    /* Phase 1: precise roots only */
-    gc_diff_phase = 1;
     gc_scan_roots(0);
-    gc_diff_phase = 2;
-
-    /* Phase 2: conservative C-stack scan + extra roots */
-    for (fp = (uintptr_t *)(&fp);
-         fp <= stackbase;
-         fp = (uintptr_t *)((char *)fp + STACKINC))
-    {
-        pin_page(GCP_to_PAGE(*fp));
-    }
-
-    for (i = 0; i < (uintptr_t)n_extra_roots; i++) {
-        uintptr_t *p   = (uintptr_t *)extra_roots[i].start;
-        uintptr_t *end = (uintptr_t *)((char *)extra_roots[i].start +
-                                       extra_roots[i].size);
-        for (; p < end; p++) {
-            pin_page(GCP_to_PAGE(*p));
-        }
-    }
-
-    gc_diff_phase = 0;
-
-    /* Diagnostic report */
-    {
-        uintptr_t pinned_count = 0;
-        if (pinned_bits) {
-            for (size_t bi = 0; bi < pinned_bits_words; bi++) {
-                uint64_t w = pinned_bits[bi];
-                while (w) { pinned_count += (w & 1); w >>= 1; }
-            }
-        }
-        fprintf(stderr, "GC_ROOTS_DIFF: collect(): conservative pinned pages = %zu, "
-                "precise roots = %zu, "
-                "global_table_len = %d, num_traced = %d\n",
-                (size_t)pinned_count, shadow_len,
-                reg_global_table_len ? *reg_global_table_len : 0,
-                reg_traced_code_len ? *reg_traced_code_len : 0);
-        if (gc_diff_missed == 0) {
-            fprintf(stderr, "GC_ROOTS_DIFF: P_cons subset P_prec (no missed roots)\n");
-        } else {
-            fprintf(stderr, "GC_ROOTS_DIFF: %ld pages pinned only by conservative scan (list):",
-                    gc_diff_missed);
-            for (int di = 0; di < gc_diff_missed_count; di++)
-                fprintf(stderr, " %lu", (unsigned long)gc_diff_missed_pages[di]);
-            fprintf(stderr, "\n");
-        }
-    }
-#else
-    /* 1. conservative C-stack scan */
-    for (fp = (uintptr_t *)(&fp);
-         fp <= stackbase;
-         fp = (uintptr_t *)((char *)fp + STACKINC))
-    {
-        pin_page(GCP_to_PAGE(*fp));
-    }
-
-    /* 2. extra root ranges (global_table, traced_code, etc.) */
-    for (i = 0; i < (uintptr_t)n_extra_roots; i++) {
-        uintptr_t *p   = (uintptr_t *)extra_roots[i].start;
-        uintptr_t *end = (uintptr_t *)((char *)extra_roots[i].start +
-                                       extra_roots[i].size);
-        for (; p < end; p++) {
-            pin_page(GCP_to_PAGE(*p));
-        }
-    }
-
-    /* 3. Precise roots (additive pinning — 4a invariant) */
-    gc_scan_roots(0);
-#endif
 
     /* ---- Cheney scavenge ---- */
 
@@ -630,15 +479,9 @@ static void nursery_root_pin(uintptr_t page) {
             /* Already promoted (current_space or the other
              * semi-space from a prior cycle).  Queue for scanning
              * so we find this object's refs into new nursery pages. */
-#ifdef GC_ROOTS_DIFF
-            gc_diff_record_page(page);
-#endif
             queue(page);
         }
     } else if (space[page] == current_space) {
-#ifdef GC_ROOTS_DIFF
-        gc_diff_record_page(page);
-#endif
         queue(page);
     }
 }
@@ -696,7 +539,8 @@ static void gc_pin_value(Value *v, int use_nursery) {
 
 /* gc_scan_roots: walk the precise-root shadow stack + typed walkers,
  * pinning all referenced pages.  ADDITIVE only — never evacuates
- * (4a invariant).  Called AFTER the conservative scan.
+ * (4a invariant).  This is the SOLE authoritative root source;
+ * there is no conservative C-stack scan or extra_roots fallback.
  * use_nursery=1 → nursery_root_pin (for collect_nursery);
  * use_nursery=0 → pin_page (for collect). */
 static void gc_scan_roots(int use_nursery) {
@@ -754,14 +598,13 @@ static void gc_scan_roots(int use_nursery) {
 /* collect_nursery: no-flip pin-in-place nursery scavenge.
  *
  * Does NOT swap semi-spaces, does NOT reset allocatedpages, does NOT
- * clear old-gen pinned bits.  Roots (C stack + extra_roots) are scanned
- * conservatively, then the write-barrier dirty-vectors remembered set
+ * clear old-gen pinned bits.  Roots are scanned via gc_scan_roots(1)
+ * (precise shadow stack + typed walkers — the sole authoritative root
+ * source), then the write-barrier dirty-vectors remembered set
  * (Phase 2 Step 5) is scanned inline for old-gen→nursery references.
  * Nursery survivors are pinned in place (space ← current_space).
  * Finally the bump cursor is reset to the first still-NURSERY page. */
 static void collect_nursery(void) {
-    uintptr_t *fp;
-    uintptr_t  i;
     sigset_t   old_sig_set;
     uintptr_t  saved_allocatedpages;   /* for post-scavenge assertion */
 
@@ -770,9 +613,6 @@ static void collect_nursery(void) {
         fprintf(stderr, "collect_nursery: re-entered during scavenge\n");
         exit(1);
     }
-
-    /* Spill callee-saved registers to the stack */
-    (void)setjmp(gc_reg_buf);
 
     /* Block SIGALRM during collection */
     {
@@ -815,80 +655,7 @@ static void collect_nursery(void) {
 
     /* ---- root set ---- */
 
-#ifdef GC_ROOTS_DIFF
-    /* Reset diff state */
-    memset(precise_pinned, 0, pinned_bits_words * sizeof(uint64_t));
-    gc_diff_missed = 0;
-    gc_diff_missed_count = 0;
-
-    /* Phase 1: precise roots only */
-    gc_diff_phase = 1;
     gc_scan_roots(1);
-    gc_diff_phase = 2;
-
-    /* Phase 2: conservative C-stack scan + extra roots */
-    for (fp = (uintptr_t *)(&fp);
-         fp <= stackbase;
-         fp = (uintptr_t *)((char *)fp + STACKINC))
-    {
-        nursery_root_pin(GCP_to_PAGE(*fp));
-    }
-
-    for (i = 0; i < (uintptr_t)n_extra_roots; i++) {
-        uintptr_t *p   = (uintptr_t *)extra_roots[i].start;
-        uintptr_t *end = (uintptr_t *)((char *)extra_roots[i].start +
-                                       extra_roots[i].size);
-        for (; p < end; p++) {
-            nursery_root_pin(GCP_to_PAGE(*p));
-        }
-    }
-
-    gc_diff_phase = 0;
-
-    /* Diagnostic report */
-    {
-        uintptr_t pinned_count = 0;
-        if (pinned_bits) {
-            for (size_t bi = 0; bi < pinned_bits_words; bi++) {
-                uint64_t w = pinned_bits[bi];
-                while (w) { pinned_count += (w & 1); w >>= 1; }
-            }
-        }
-        if (gc_diff_missed == 0) {
-            fprintf(stderr, "GC_ROOTS_DIFF: collect_nursery(): P_cons subset P_prec (no missed roots) "
-                    "(total pinned=%zu, precise roots=%zu)\n",
-                    (size_t)pinned_count, shadow_len);
-        } else {
-            fprintf(stderr, "GC_ROOTS_DIFF: collect_nursery(): %ld pages pinned only by conservative scan (list):",
-                    gc_diff_missed);
-            for (int di = 0; di < gc_diff_missed_count; di++)
-                fprintf(stderr, " %lu", (unsigned long)gc_diff_missed_pages[di]);
-            fprintf(stderr, " (total pinned=%zu, precise roots=%zu)\n",
-                    (size_t)pinned_count, shadow_len);
-        }
-    }
-#else
-    /* 1. Conservative C-stack scan */
-    for (fp = (uintptr_t *)(&fp);
-         fp <= stackbase;
-         fp = (uintptr_t *)((char *)fp + STACKINC))
-    {
-        nursery_root_pin(GCP_to_PAGE(*fp));
-    }
-
-    /* 2. Extra root ranges (global_table, traced_code, etc.) */
-    for (i = 0; i < (uintptr_t)n_extra_roots; i++) {
-        uintptr_t *p   = (uintptr_t *)extra_roots[i].start;
-        uintptr_t *end = (uintptr_t *)((char *)extra_roots[i].start +
-                                       extra_roots[i].size);
-        for (; p < end; p++) {
-            nursery_root_pin(GCP_to_PAGE(*p));
-        }
-    }
-
-    /* 3. Precise roots (additive pinning — 4a invariant) */
-    gc_scan_roots(1);
-#endif
 
     /* ---- scan dirty old-gen vectors (write-barrier remembered set) ---- */
     if (dirty_vectors_overflow) {
@@ -1312,7 +1079,7 @@ void *gc_move(void *p) {
 
 /* ---- public API --------------------------------------------------- */
 
-void gc_init(uintptr_t heap_size, void *stack_base) {
+void gc_init(uintptr_t heap_size) {
     char *heap;
     uintptr_t i;
     uintptr_t page_count;
@@ -1322,9 +1089,7 @@ void gc_init(uintptr_t heap_size, void *stack_base) {
     /* Reserve a larger mmap than the initial heap so we can grow logically
      * without mremap.  The extra VAS costs nothing on Linux (lazy commit).
      * Reserve 4GB to give the heap room to grow through several doublings
-     * (256MB → 512MB → 1GB → 2GB → 4GB) without needing mremap at all.
-     * Even with conservative stack scan false positives inflating the live
-     * set during deep call chains, 4GB is plenty of headroom. */
+     * (256MB → 512MB → 1GB → 2GB → 4GB) without needing mremap at all. */
     heap_mmap_size = (heap_size * 16 > (4096ULL * 1024 * 1024))
                      ? heap_size * 16 + PAGEBYTES - 1
                      : 4096ULL * 1024 * 1024 + PAGEBYTES - 1;
@@ -1391,8 +1156,6 @@ void gc_init(uintptr_t heap_size, void *stack_base) {
     nursery_cur = (char *)PAGE_to_GCP(nursery_first);
     nursery_end = (char *)PAGE_to_GCP(nursery_last + 1);
 
-    stackbase = (uintptr_t *)stack_base;
-
     current_space = 1;
     next_space    = 1;
     freepage      = firstheappage + NURSERY_PAGES;   /* start after nursery */
@@ -1406,16 +1169,6 @@ void gc_init(uintptr_t heap_size, void *stack_base) {
         fprintf(stderr, "gc_init: pinned bitmap alloc failed\n");
         exit(1);
     }
-
-#ifdef GC_ROOTS_DIFF
-    precise_pinned = calloc(pinned_bits_words, sizeof(uint64_t));
-    if (!precise_pinned) {
-        fprintf(stderr, "gc_init: precise_pinned bitmap alloc failed\n");
-        exit(1);
-    }
-#endif
-
-    n_extra_roots = 0;
 }
 
 __attribute__((noinline))

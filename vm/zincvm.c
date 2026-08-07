@@ -40,8 +40,10 @@
 #include "gc.h"
 
 /* Cheney GC: mostly-copying semi-space collector.  gc_alloc returns
- * zeroed memory.  Call gc_init() once before any allocation, and
- * gc_set_extra_roots() for global data that the collector must trace. */
+ * zeroed memory.  Call gc_init() once before any allocation.
+ * Roots are precise-only (shadow stack via gc_root_push_* /
+ * gc_register_global_table / gc_register_traced_code); there is no
+ * conservative C-stack scan or extra_roots mechanism. */
 /* GC_VALUE, GC_STR, GC_VALUE_ARRAY, and value types are in zincvm.h */
 
 /* ------------------------------------------------------------------ */
@@ -641,6 +643,16 @@ static int exec_primitive_valid(const char *name) {
     return 0;
 }
 
+/* exec_primitive: dispatch a C primitive by name.
+ *
+ * Audit note (4a.6): several primitives here pop a Value from the stack,
+ * then read an interior pointer (str.data, error.message) from that popped
+ * Value across a gc_alloc call in a helper (val_string_from, etc.).  The
+ * popped Value is dead as a C local by that point — it must have been
+ * separately rooted via gc_root_push_value BEFORE the pop, or its interior
+ * pointer will be dangling under precise-only roots (no conservative stack
+ * scan to accidentally keep it alive).  Search for gc_root_push_value in
+ * this function to confirm coverage of all such popped-Value→alloc pairs. */
 static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
     /* --- Type predicates --- */
     if (strcmp(name, "symbol?") == 0) {
@@ -2293,15 +2305,11 @@ static void run_bytecode_file(const char *label, const char *src) {
 #ifndef ZINCTEST
 int main(int argc, char **argv) {
     init_globals();
-    {
-        /* stack_base: a local in main, so the C-stack scan in collect()
-         * knows where the root of the call stack is. */
-        uintptr_t stack_base;
-        gc_init(256UL * 1024 * 1024, &stack_base);
-    }
-    /* Register BSS/static data the GC must scan conservatively */
-    gc_set_extra_roots(global_table, sizeof(global_table));
-    gc_set_extra_roots(traced_code, sizeof(traced_code));
+    gc_init(256UL * 1024 * 1024);
+
+    /* Register typed walkers so gc_scan_roots traces global_table
+     * closures and traced_code Instr arrays.  These replace the
+     * former extra_roots conservative scan of the same BSS/static data. */
     gc_register_global_table(global_table, &global_table_len);
     gc_register_traced_code(traced_code, &num_traced);
 

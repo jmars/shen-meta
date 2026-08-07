@@ -93,7 +93,7 @@ static void run_test(const char *label, const char *bytecode, int show_code) {
  * gc_alloc's fast path bumps nursery_cur; when the bump cursor can't fit a
  * request AND at least one page is still tagged NURSERY, it calls
  * collect_nursery() once.  We allocate a burst of GC_TYPE_RAW objects (no
- * interior pointers, so conservative stack scan can't mis-pin them) until the
+ * interior pointers, thus safe for any root-scanning path) until the
  * gc_nursery_scavenge_count instrumentation counter advances past `target`.
  *
  * A hard cap bounds the loop so we never spin forever if the nursery has
@@ -183,9 +183,11 @@ static int gc_nursery_tests(void) {
         Value b = val_number(22);
         Value c = val_number(33);
         Value chain = val_cons(a, val_cons(b, val_cons(c, val_nil())));
+        gc_root_push_value(&chain);  /* precise root across scavenge */
 
         /* Force a scavenge.  The chain's cells live in the nursery and are
-         * reachable from the C stack, so collect_nursery pins them in place. */
+         * reachable via the precise-root shadow stack, so collect_nursery
+         * pins them in place. */
         long before = gc_nursery_scavenge_count;
         force_nursery_scavenge(before + 1);
         long delta = gc_nursery_scavenge_count - before;
@@ -205,6 +207,7 @@ static int gc_nursery_tests(void) {
         } else {
             printf("  [1] survivor correctness passed — chain intact after %ld scavenge(s)\n", delta);
         }
+        gc_root_pop();  /* chain */
     }
 
     /* ---- Test 2: capacity reuse ---- */
@@ -214,9 +217,8 @@ static int gc_nursery_tests(void) {
          * is reusable when the live set turns over.  Allocate dead 64B objects
          * (references dropped immediately) until the pages_reclaimed counter
          * increments — i.e. until a scavenge has actually rewound the cursor.
-         * Allocating a fixed huge burst would instead let conservative C-stack
-         * false positives pin every page, permanently exhausting the nursery;
-         * stopping the moment reclamation is observed avoids that. */
+         * Stopping the moment reclamation is observed avoids false-positive
+         * pinning under any root-pinning path (precise or conservative). */
         long before_rc = gc_nursery_pages_reclaimed;
         long cap = 200000;
         while (gc_nursery_pages_reclaimed == before_rc && cap-- > 0) {
@@ -267,6 +269,9 @@ static int gc_nursery_tests(void) {
         Value *oldgen = (Value *)gc_alloc_oldgen(sizeof(Value), GC_TYPE_VALUE);
         *oldgen = val_cons(*nursery_val, val_nil());
 
+        gc_root_push_ptr((void**)&nursery_val);  /* precise root across scavenge */
+        gc_root_push_ptr((void**)&oldgen);       /* precise root across scavenge */
+
         long before = gc_nursery_scavenge_count;
         force_nursery_scavenge(before + 1);
 
@@ -281,6 +286,8 @@ static int gc_nursery_tests(void) {
             printf("  [3] cross-generational reference passed — old-gen->nursery "
                    "reference survived scavenge\n");
         }
+        gc_root_pop();  /* oldgen */
+        gc_root_pop();  /* nursery_val */
     }
 
     /* ---- Test 4: two-scavenge survival ---- */
@@ -288,6 +295,7 @@ static int gc_nursery_tests(void) {
         Value nv = val_number(4242);
         Value *surv = GC_VALUE();
         *surv = nv;
+        gc_root_push_ptr((void**)&surv);  /* precise root across two scavenges */
 
         long before = gc_nursery_scavenge_count;
         force_nursery_scavenge(before + 1);  /* scavenge #1 */
@@ -301,6 +309,7 @@ static int gc_nursery_tests(void) {
             printf("  [4] two-scavenge survival passed — nursery object survived "
                    "two consecutive scavenges\n");
         }
+        gc_root_pop();  /* surv */
     }
 
     /* ---- Test 5: scavenge -> full collect -> scavenge ---- */
@@ -313,6 +322,7 @@ static int gc_nursery_tests(void) {
         Value nv = val_number(909);
         Value *promoted = GC_VALUE();
         *promoted = nv;
+        gc_root_push_ptr((void**)&promoted);  /* precise root across scavenge+collect+rescavenge */
 
         long before = gc_nursery_scavenge_count;
         force_nursery_scavenge(before + 1);  /* promote `promoted` */
@@ -321,8 +331,8 @@ static int gc_nursery_tests(void) {
          * triggers collect() once allocatedpages exceeds heappages/4 (the heap
          * is 256MB, so the threshold is ~64MB of allocated old-gen).  Allocate
          * well past that with dead raw chunks so the full collector fires and
-         * flips current_space.  `promoted` stays live in a C-local, so its page
-         * is pinned and survives. */
+         * flips current_space.  `promoted` stays live via its precise root on
+         * the shadow stack, so its page is pinned and survives. */
         {
             const size_t CHUNK = 4 * 1024 * 1024;   /* 4MB dead chunks */
             /* 96MB total guarantees several full collects; raw chunks are
@@ -346,6 +356,7 @@ static int gc_nursery_tests(void) {
             printf("  [5] scavenge->full-collect->scavenge passed — promoted "
                    "object survived full collect + rescavenge\n");
         }
+        gc_root_pop();  /* promoted */
     }
 
     /* ---- Test 6: write-barrier dirty_vectors survival ---- */
@@ -366,8 +377,11 @@ static int gc_nursery_tests(void) {
         Value *cons_cell = gc_alloc(sizeof(Value), GC_TYPE_VALUE);
         *cons_cell = val_cons(*vec_slot, val_nil());
 
+        gc_root_push_ptr((void**)&vec_slot);   /* precise root across scavenges */
+        gc_root_push_ptr((void**)&cons_cell);  /* precise root across scavenges */
+
         /* Scavenge #1: promote the vector's element array to old-gen.
-         * cons_cell is a C-local → pinned. */
+         * cons_cell is on the precise-root shadow stack — pinned. */
         long before6 = gc_nursery_scavenge_count;
         force_nursery_scavenge(before6 + 1);
 
@@ -426,6 +440,8 @@ static int gc_nursery_tests(void) {
             printf("  [6] write-barrier dirty_vectors passed — address-> of "
                    "nursery cons into old-gen vector survived scavenge via barrier\n");
         }
+        gc_root_pop();  /* cons_cell */
+        gc_root_pop();  /* vec_slot */
     }
 
     /* ---- Test 8: multi-page old-gen object tail-page retention ----
@@ -436,9 +452,12 @@ static int gc_nursery_tests(void) {
      * memset (zeroed) by a subsequent allocation, clobbering the still-live
      * object body.  pin_page's forward-walk of CONTINUED tails fixes it.
      *
-     * The object's body pointer is held ONLY in a C local (NOT on the
-     * precise-root shadow stack), so reachability flows through the
-     * conservative C-stack scan, exercising pin_page. */
+     * The object's body pointer is held on the precise-root shadow stack
+     * (gc_root_push_ptr).  gc_scan_roots routes the head through pin_page,
+     * which forward-walks CONTINUED tails to pin them too.  If that forward
+     * walk were broken, the tail pages would be reclaimed and the test
+     * would fail — the root path still exercises the pin_page forward-walk
+     * that this regression test exists to verify. */
     {
         /* N chosen so the VALUE_ARRAY spans exactly 3 pages:
          * words = ceil(N*40/8)+1, PAGEBYTES=512 / WORDBYTES=8 => 64 words/page.
@@ -452,16 +471,19 @@ static int gc_nursery_tests(void) {
          * lingers on this frame (see t8_fill comment). */
         t8_fill(body, N);
 
+        gc_root_push_ptr((void**)&body);  /* precise root across full-collect burst */
+
         /* Force full collections by allocation pressure (same technique as
          * Test 5) and wrap the free-page cursor around the heap (see
-         * t8_burst).  `body`'s head page is pinned by the conservative
-         * C-stack scan; only pin_page's forward-walk pins its tail pages.
+         * t8_burst).  `body`'s head page is pinned via its precise root on
+         * the shadow stack; only pin_page's forward-walk pins its tail pages.
          * We must NOT read `body` during the burst: that would leave a
          * tail-page pointer on the stack and pin the tails via the backward
          * walk, masking the bug. */
         t8_burst();
 
         int first_bad = t8_verify(body, N);
+        gc_root_pop();  /* body */
         if (first_bad >= 0) {
             printf("  [8] multi-page old-gen tail retention FAILED (slot %d "
                    "clobbered)\n", first_bad);
@@ -495,10 +517,10 @@ static int gc_nursery_tests(void) {
             /* The core Step 6 proof: the pre-emptive trigger fired and the
              * reactive path never ran during the dead-alloc burst.  The probe
              * location is informational only: under ZINCVM_DEBUG (or a
-             * retention-heavy load) the conservative stack scan pins more
-             * nursery pages, so the nursery may legitimately degrade to
-             * one-shot promotion and the probe lands in old-gen — that is the
-             * accepted degradation, not a trigger failure. */
+             * retention-heavy load) more nursery pages may survive each
+             * scavenge, so the nursery may legitimately degrade to one-shot
+             * promotion and the probe lands in old-gen — that is the accepted
+             * degradation, not a trigger failure. */
             int ok = (pre_fired >= 1) && (react_fired == 0);
             char *probe = (char *)gc_alloc_atomic(64);
             int in_nursery = probe ? gc_in_nursery(probe) : 0;
@@ -648,20 +670,13 @@ done:
 /* ------------------------------------------------------------------ */
 
 int main(int argc, char **argv) {
-    uintptr_t stack_base;
-
     init_globals();
 
-    {
-        /* stack_base: a local in main, so the C-stack scan in collect()
-         * knows where the root of the call stack is. */
-        gc_init(256UL * 1024 * 1024, &stack_base);
-    }
-    /* Register BSS/static data the GC must scan conservatively.
-       Must happen before ANY allocation (built-in tests, bundle load,
-       --trace scan below all GC-allocate). */
-    gc_set_extra_roots(global_table, sizeof(global_table));
-    gc_set_extra_roots(traced_code, sizeof(traced_code));
+    gc_init(256UL * 1024 * 1024);
+
+    /* Register typed walkers so gc_scan_roots traces global_table
+     * closures and traced_code Instr arrays.  These replace the
+     * former extra_roots conservative scan of the same BSS/static data. */
     gc_register_global_table(global_table, &global_table_len);
     gc_register_traced_code(traced_code, &num_traced);
 
