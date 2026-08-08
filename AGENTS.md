@@ -73,7 +73,7 @@ are `ZINCVM_DEBUG`-only. In RELEASE they are **compiled out entirely** — the
 enclosing `if (cond) PRIM_TYPE_ERROR(...)` (no comparison, no type check, no
 runtime cost). This is safe ONLY for a type-safe bundle: the canonical bundle
 (`make bundle` → `globals.csexp`) is the **reduced self-contained interpreter**
-(meta-interpreter + type-safe `.kl` base), which never passes bad types. The full
+(meta-interpreter + safe-subset helpers), which never passes bad types. The full
 Shen OS bundle (`make bundle-full` → `globals-full.csexp`) is type-unsafe
 (`shen.initialise` does `+ - * /` on non-numbers) and CANNOT run on the guard-free
 release VM — it segfaults; run it with `./zincvm-debug globals-full.csexp`.
@@ -207,7 +207,7 @@ and `pos` out-of-bounds inside `trap-error` (semantic, needed for `strlen`/end-o
 - `pr` writes raw string to a stream; `(stoutput)` is stdout
 - ~1216 closures in the FULL OS bundle (~1.4MB; ~1.6MB with prefix aliases) —
   `make bundle-full` → `globals-full.csexp`. The canonical **reduced**
-  self-contained bundle (`make bundle` → `globals.csexp`) is ~786 closures / ~0.5MB.
+  self-contained bundle (`make bundle` → `globals.csexp`) is ~340 closures / ~0.33MB.
 - All 24 KLambda files loaded (full bundle): core through shen-scheme-extensions + stlib + init
 
 ### Shen module system & package prefixing

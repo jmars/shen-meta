@@ -178,3 +178,6 @@
 
 (define safe.eval-kl
   A -> (%% eval-kl A))
+
+(define safe.variable?
+  V -> (%% variable? V))

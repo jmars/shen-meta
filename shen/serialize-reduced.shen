@@ -34,6 +34,7 @@
 (shen-load "shen/interp.shen")
 (shen-load "shen/toplevel.shen")
 (shen-load "shen/load.shen")
+(shen-load "shen/os-helpers.shen")
 
 \* === Safe-wrapper aliases: point short names to our-compiled safe.N closures ===
    serialize.shen (full bundle) relies on interp.shen's set-toplevel calls for
@@ -87,7 +88,8 @@
    [/ safe./]
    [+ safe.+]
    [address-> safe.address->]
-   [eval-kl safe.eval-kl]])
+   [eval-kl safe.eval-kl]
+   [variable? safe.variable?]])
 (define install-safe-aliases
   [] -> aliases-installed
   [[Short Safe] | Rest] -> (do
@@ -97,34 +99,16 @@
 (install-safe-aliases (value safe-alias-pairs))
 (tc +)
 
-\* REDUCED bundle: the self-contained meta-interpreter + type-safe Shen OS
-   base .kl only.  Skips the heavy / type-unsafe Shen OS components (yacc,
-   prolog, sequent, t-star, stlib, init, extensions) which crash the
-   guard-free release C VM during shen.initialise.
+\* REDUCED bundle: the self-contained meta-interpreter + safe-subset
+   helpers.  Skips ALL Shen OS .kl code.  The 6 list/utility helpers
+   (append, reverse, empty?, assoc, element?, variable?) are type-safe
+   Shen in shen/os-helpers.shen (+ safe.variable? in primitives.shen),
+   compiled by our own full-arity shen->kl compiler.
    
    Because the release C VM compiles out all primitive type guards, the
    shipped bundle MUST only ever run type-safe code.  This reduced set is
    exactly that: the proven type-safe meta-interpreter plus the type-safe
-   KLambda base it can run without C-level checks.  The load/eval
-   infrastructure is bundled (set-toplevel below) so the interpreter can
-   ALSO load and compile further type-safe .kl source at runtime —
-   "closing the loop" by compiling KL through the interpreter itself. *\
-
-\* Type-safe .kl base (no heavy OS). *\
-(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/core.kl")
-(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/declarations.kl")
-(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/types.kl")
-(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/macros.kl")
-(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/load.kl")
-(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/toplevel.kl")
-(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/sys.kl")
-(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/dict.kl")
-(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/track.kl")
-(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/reader.kl")
-(interp-load-raw "vendor/ShenOSKernel-41.2/klambda/writer.kl")
-(interp-load-raw "shen/overrides-pure.kl")
-
-\* Load shen/util.shen via shen-load above (full-arity compiler). *\
+   helpers it needs.  NO Shen OS .kl; all code our own safe subset. *\
 
 \* Add shen. prefix aliases for unprefixed closures. *\
 (tc -)

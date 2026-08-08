@@ -1665,6 +1665,15 @@ int main(int argc, char **argv) {
             printf("eval-kl chain (marshal → extract-kl → kl->zinc → toplevel-interp → demarshal) works.\n");
             printf("Bundled file I/O works — safe wrappers + P[4:s]open chain functional.\n");
 
+            /* Verify the variable? fix: global-table variable? (now safe.variable?)
+             * must return true for symbol X. */
+            {
+                global_set("dv", val_symbol("X"));
+                run_test_timeout("global-var-true",
+                    "(mg[2:s]dvg[9:s]variable?p)", 0, 5);
+                fflush(stdout);
+            }
+
             /* GC stress: allocate 50000 cons cells */
             printf("\n--- GC stress: allocating 50000 cons cells ---\n");
             fprintf(stderr, "[gc-stress] starting...\n");
