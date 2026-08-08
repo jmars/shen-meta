@@ -1600,11 +1600,12 @@ int main(int argc, char **argv) {
              *
              * This proves the metacircular compiler produces correct, executable
              * ZINC bytecode — the core of the self-compilation fixed-point
-             * property.  (Lambdas cannot be round-tripped through the current
-             * marshal→extract-kl chain because marshal wraps cdrs as single
-             * elements and extract-kl unwraps them one level short, corrupting
-             * the KLambda structure for forms with specific arity like lambda.
-             * Application forms with known primitives are unaffected.) */
+             * property.  (A bare (lambda X X) is NOT used here: driving kl->zinc's
+             * general lambda path requires normalize/debruijn with a properly
+             * scoped variable, which this direct C harness does not set up.  This
+             * is a harness limitation, NOT a marshal→extract-kl defect — an
+             * independent trace of marshal_to_tagged + extract-kl shows lambdas
+             * round-trip correctly.) */
                 printf("\n--- Test F: Self-compilation ((+ 1 2) compiled via kl->zinc, executed via toplevel-interp) ---\n"); fflush(stdout);
                 {
                 /* Construct KLambda: (+ 1 2) = cons('+', cons(1, cons(2, nil))) */
