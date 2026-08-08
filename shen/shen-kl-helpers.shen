@@ -40,7 +40,8 @@
 
 (define beta-substitute-list
   Var Expr [] -> []
-  Var Expr [H | T] -> [(beta-substitute Var Expr H) | (beta-substitute-list Var Expr T)])
+  Var Expr [H | T] -> [(beta-substitute Var Expr H) | (beta-substitute-list Var Expr T)]
+  Var Expr X -> (beta-substitute Var Expr X))
 
 \* alpha-convert: rename lambda/let bound variables to fresh gensyms. *\
 
@@ -132,30 +133,169 @@
   [T] -> T
   [T1 | Rest] -> [and T1 (rectify-test Rest)])
 
-\* cond-form: wrap compiled clauses in cond, or unwrap single true clause. *\
+\* fail-form?: true if X is either the symbol fail or the list [fail]. *\
+
+(define fail-form?
+  X -> (if (= X (intern "fail")) true
+          (if (cons? X)
+              (if (= (hd X) (intern "fail"))
+                  (empty? (tl X))
+                  false)
+              false)))
+
+\* ===== Body Rewriter (consifies list literals) ===== *\
+
+(define shen->kl-body
+  X -> (if (cons? X) (shen->kl-form X) X))
+
+(define shen->kl-form
+  [lambda Arg Body]   -> [lambda Arg (shen->kl-body Body)]
+  [let V E B]         -> [let V (shen->kl-body E) (shen->kl-body B)]
+  [protect X]         -> (shen->kl-body X)
+  [/. Arg Body]       -> (shen->kl-shorthand Arg Body)
+  []                  -> []
+  X                   -> (if (cons? X) (shen-kl-expr X) X))
+
+(define shen-kl-expr
+  [] -> []
+  [H | R] -> (if (shen-kl-app-head? H)
+                 [(shen->kl-body H) | (shen-kl-app-args R)]
+                 (let Split (shen-kl-split-tail R)
+                   [cons (shen->kl-body H) (shen-kl-build-tail Split)]))
+  X -> X)
+
+(define shen-kl-app-head?
+  H -> (if (symbol? H)
+           (let S (str H)
+             (if (= S "") false
+                 (let Ch (string->n (pos S 0))
+                   (not (and (>= Ch 65) (<= Ch 90))))))
+           false))
+
+(define shen-kl-var-head?
+  H -> (if (symbol? H)
+           (let S (str H)
+             (if (= S "") false
+                 (let Ch (string->n (pos S 0))
+                   (and (>= Ch 65) (<= Ch 90)))))
+           false))
+
+(define shen-kl-split-tail
+  [] -> [[] []]
+  [X | R] -> (if (shen-kl-var-head? X)
+                 (let Inner (shen-kl-split-tail R)
+                   [[X | (hd Inner)] | (tl Inner)])
+                 [[] [X | R]])
+  X -> [[] X])
+
+(define shen-kl-build-tail
+  [[] Suffix] -> (shen-kl-expr Suffix)
+  [[H | R] Suffix] -> [cons (shen->kl-body H) (shen-kl-build-tail [R Suffix])])
+
+(define shen-kl-app-args
+  [] -> []
+  [X | R] -> [(shen->kl-body X) | (shen-kl-app-args R)]
+  X -> (shen->kl-body X))
+
+(define shen->kl-shorthand
+  Arg Body -> (if (cons? Arg)
+                  (shen->kl-shorthand-args Arg Body)
+                  [lambda Arg (shen->kl-body Body)]))
+
+(define shen->kl-shorthand-args
+  [A]       Body -> [lambda A (shen->kl-body Body)]
+  [A | Rest] Body -> [lambda A (shen->kl-shorthand-args Rest Body)])
+
+\* cond-form: wrap compiled clauses in cond, or unwrap single true clause.
+   Each compiled clause is (@p [Test Body] Guarded) — a cons pair.
+   For unguarded-only functions, extracts [Test Body] and uses cond. *\
 
 (define cond-form
-  [[true Body]] -> Body
-  Clauses -> [cond | Clauses])
+  Compiled -> (let Clauses (map-hd Compiled)
+                (if (and (cons? Clauses) (empty? (tl Clauses))
+                         (= (hd (hd Clauses)) true))
+                    (hd (tl (hd Clauses)))
+                    [cond | Clauses])))
 
-\* compile-clause: compile one clause's patterns + body + guard into [Test Body]. *\
+\* map-hd: extract the hd (the [Test Body]) from each (@p [Test Body] _) tuple. *\
+
+(define map-hd
+  [] -> []
+  [C | Rest] -> [(fst C) | (map-hd Rest)])
+
+\* has-guarded?: true if any compiled clause uses <-.
+   Each compiled clause is (@p [Test Body] Guarded); Guarded = snd. *\
+
+(define has-guarded?
+  [] -> false
+  [C | Rest] -> (if (snd C) true (has-guarded? Rest)))
+
+\* build-guarded-dispatch: build right-nested if tree from compiled clauses.
+   Each clause is (@p [Test Body] Guarded); fst=[Test Body], snd=Guarded.
+   For -> (Guarded=false): (if Test Body REST).
+   For <- (Guarded=true): (if Test (let TMP Body
+     (if (= TMP fail) REST TMP)) REST).
+   Base case: simple-error. *\
+
+(define build-guarded-dispatch
+  [] Name -> [simple-error (cn "no matching clause: " (str Name))]
+  [C | Rest] Name ->
+    (let Test (hd (fst C))
+      (let Body (hd (tl (fst C)))
+        (let Guarded (snd C)
+          (let DispatchRest (build-guarded-dispatch Rest Name)
+            (if Guarded
+                (let TmpVar (newvar)
+                  [if Test
+                       [let TmpVar Body
+                         [if [= TmpVar fail] DispatchRest TmpVar]]
+                       DispatchRest])
+                [if Test Body DispatchRest]))))))
+
+\* compile-clause: compile one clause's patterns + body + guard into
+   (@p [Test Body] Guarded).
+   For a guarded (<-) clause whose body is (if Cond RHS (fail)), fold the
+   condition into the test (eliminating fail, which throws on the C VM) and
+   emit RHS as the body.  Guarded is retained so the caller can choose the
+   dispatch form, but a folded clause is emitted with the condition already
+   in the test. *\
 
 (define compile-clause
   C Params -> (let Pats (fst C)
                 (let BodyGuard (snd C)
                   (let Body (fst BodyGuard)
-                    (let Guard (snd BodyGuard)
-                      (let AlphaBody (alpha-convert Body)
-                        (let Compiled (compile-patterns Pats Params [] [])
-                          (let Tests (hd Compiled)
-                            (let Subs (hd (tl Compiled))
-                              (let SubBody (apply-subs Subs AlphaBody)
-                                (let AllTests (if (empty? Guard)
-                                                 Tests
-                                                 (append Tests [(apply-subs Subs Guard)]))
-                                  [(rectify-test AllTests) SubBody])))))))))))
+                    (let GuardGuarded (snd BodyGuard)
+                      (let Guard (fst GuardGuarded)
+                        (let Guarded (snd GuardGuarded)
+                          (let AlphaBody (alpha-convert Body)
+                            (let Compiled (compile-patterns Pats Params [] [])
+                              (let Tests (hd Compiled)
+                                (let Subs (hd (tl Compiled))
+                                  (let SubBody (apply-subs Subs AlphaBody)
+                                    (let GuardTest (if (empty? Guard)
+                                                      []
+                                                      [(apply-subs Subs Guard)])
+                                      (let Folded (fold-guard-body Guarded SubBody Subs)
+                                        (let KLBody (shen->kl-body (tl Folded))
+                                          (let AllTests (append Tests (append GuardTest (hd Folded)))
+                                            (@p [(rectify-test AllTests) KLBody] Guarded)))))))))))))))))
 
-\* compile-clauses: compile each clause to a [Test Body] pair. *\
+\* fold-guard-body: for a guarded (<-) clause, if the body is (if Cond RHS (fail)),
+   return [ExtraTest RHS] so the condition is folded into the test and the body
+   becomes RHS (fail eliminated).  Otherwise return [[] Body] unchanged.
+   ExtraTest may be [] or [Cond-substituted]. *\
+
+(define fold-guard-body
+  Guarded Body Subs ->
+    (if (and Guarded (cons? Body)
+             (= (hd Body) (intern "if"))
+             (cons? (tl Body)) (cons? (tl (tl Body))) (cons? (tl (tl (tl Body))))
+             (fail-form? (hd (tl (tl (tl Body)))))
+             (empty? (tl (tl (tl (tl Body))))))
+        [[(apply-subs Subs (hd (tl Body)))] | (apply-subs Subs (hd (tl (tl Body))))]
+        [[] Body]))
+
+\* compile-clauses: compile each clause to an (@p [Test Body] Guarded) pair. *\
 
 (define compile-clauses
   [] Params -> []
@@ -187,46 +327,58 @@
   N [_ | Rest] -> (kl-drop (- N 1) Rest)
   N [] -> (simple-error "kl-drop: not enough elements"))
 
-\* split-at-top-arrow: split a flat rule list at the FIRST -> (top level).
-   Returns [Pats AfterArrow] — Pats is the first clause's patterns. *\
+\* rule-arrow?: true if X is -> or <- (clause separators). *\
+
+(define rule-arrow?
+  X -> (if (= X (intern "->")) true
+         (if (= X (intern "<-")) true false)))
+
+\* split-at-top-arrow: split a flat rule list at the FIRST -> or <- (top level).
+   Returns [Pats [Sep AfterArrow]] — Pats is the first clause's patterns,
+   Sep is the separator symbol. *\
 
 (define split-at-top-arrow
-  [] -> (simple-error "no -> in define")
-  [H | Rest] -> (if (= H (intern "->"))
-                    [[] Rest]
+  [] -> (simple-error "no arrow in define")
+  [H | Rest] -> (if (rule-arrow? H)
+                    [[] [H | Rest]]
                     (let SplitRest (split-at-top-arrow Rest)
                       [[H | (hd SplitRest)] | (tl SplitRest)])))
 
-\* parse-clause: given a clause's patterns and the list AFTER its ->, return
-   [Clause Remainder] where Clause = (@p Pats (@p Body Guard)) and Remainder
-   is the flat list of subsequent clauses.  The body is the single element
-   right after ->; a following 'where' introduces the guard. *\
+\* parse-clause: given a clause's patterns, the separator (-> or <-), and
+   the list AFTER it, return
+   [Clause Remainder] where Clause = (@p Pats (@p Body (@p Guard Guarded?)))
+   and Remainder is the flat list of subsequent clauses.  Guarded? is true
+   for <-, false for ->. *\
 
 (define parse-clause
-  Pats AfterArrow ->
+  Pats Sep AfterArrow ->
     (if (empty? AfterArrow)
-        (simple-error "malformed clause: no body after ->")
+        (simple-error "malformed clause: no body after arrow")
         (let Body (hd AfterArrow)
           (let AfterBody (tl AfterArrow)
             (if (and (cons? AfterBody) (= (hd AfterBody) (intern "where")))
                 (let GuardList (tl AfterBody)
                   (if (empty? GuardList)
                       (simple-error "malformed clause: where with no guard")
-                      (@p (@p Pats (@p Body (hd GuardList))) (tl GuardList))))
-                (@p (@p Pats (@p Body [])) AfterBody))))))
+                      [(@p Pats (@p Body (@p (hd GuardList) (= Sep (intern "<-")))))
+                       | (tl GuardList)]))
+                [(@p Pats (@p Body (@p [] (= Sep (intern "<-"))))) | AfterBody])))))
 
 \* parse-clauses-arity: parse clauses after the first, each with `Arity`
-   patterns.  Returns a list of (@p Pats (@p Body Guard)) clauses. *\
+   patterns.  Returns a list of (@p Pats (@p Body (@p Guard Guarded?))) clauses. *\
 
 (define parse-clauses-arity
   [] Arity -> []
   L Arity ->
     (let Pats (kl-take Arity L)
       (let AfterPats (kl-drop Arity L)
-        (if (and (cons? AfterPats) (= (hd AfterPats) (intern "->")))
-            (let Clause (parse-clause Pats (tl AfterPats))
-              [(fst Clause) | (parse-clauses-arity (snd Clause) Arity)])
-            (simple-error "malformed define: expected -> after patterns")))))
+        (if (and (cons? AfterPats) (rule-arrow? (hd AfterPats)))
+            (let Sep (hd AfterPats)
+              (let Result (parse-clause Pats Sep (tl AfterPats))
+                (let Clause (hd Result)
+                  (let Remainder (tl Result)
+                    [Clause | (parse-clauses-arity Remainder Arity)]))))
+            (simple-error "malformed define: expected -> or <- after patterns")))))
 
 \* parse-clauses: parse a flat rule list into a list of clauses.  The first
    clause fixes the arity; the rest are parsed with that arity. *\
@@ -236,9 +388,14 @@
   L ->
     (let Split (split-at-top-arrow L)
       (let FirstPats (hd Split)
-        (let Arity (my-length FirstPats)
-          (let FirstClause (parse-clause FirstPats (hd (tl Split)))
-            [(fst FirstClause) | (parse-clauses-arity (snd FirstClause) Arity)])))))
+        (let SepAfter (hd (tl Split))
+          (let Sep (hd SepAfter)
+            (let AfterArrow (tl SepAfter)
+              (let Arity (my-length FirstPats)
+                (let Result (parse-clause FirstPats Sep AfterArrow)
+                  (let FirstClause (hd Result)
+                    (let Remainder (tl Result)
+                      [FirstClause | (parse-clauses-arity Remainder Arity)]))))))))))
 
 \* check-arity: all clauses must have the same number of patterns. *\
 
@@ -252,7 +409,8 @@
                                (check-arity-h Name Arity Rest)
                                (simple-error (cn "arity error in " (str Name)))))
 
-\* compile-define-h: parse clauses, check arity, compile patterns, emit defun. *\
+\* compile-define-h: parse clauses, check arity, compile patterns, emit defun.
+   Uses nested-if dispatch for functions with <- clauses, cond otherwise. *\
 
 (define compile-define-h
   Name Rules -> (let Clauses (parse-clauses Rules)
@@ -279,7 +437,7 @@
 
 (define has-rule-arrow
   []     -> false
-  [X | R] -> (if (= X (intern "->")) true (has-rule-arrow R))
+  [X | R] -> (if (rule-arrow? X) true (has-rule-arrow R))
   _      -> false)
 
 (define compile-define
