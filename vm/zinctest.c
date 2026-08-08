@@ -1747,12 +1747,42 @@ int main(int argc, char **argv) {
                     }
                     fflush(stdout);
 
-                    /* Verify the loaded closure my-add is usable: (my-add 2 3) → 5.
-                     * pushmark, number 3, number 2, global my-add, apply. */
-                    run_test_timeout("probe-my-add", "(mn[1:n]3n[1:n]2g[6:s]my-addp)", 0, 30);
+                    /* Verify the loaded closures are usable through the
+                     * metacircular interp.  The defuns land in the interp's Shen
+                     * global-table (namespace 2), NOT the C VM global_table[],
+                     * so raw C bytecode [global my-add] can't reach them.
+                     * Instead drive them through eval-kl: build (my-add 2 3) as
+                     * a cons list, store in a C global, pass to the eval-kl
+                     * primitive (marshal → extract-kl → kl->zinc →
+                     * toplevel-interp; interp resolves [global my-add] via
+                     * lookup-global → namespace 2).  Expect 5. */
+                    {
+                        Value add_sym = val_symbol("my-add");
+                        Value n2 = val_number(2), n3 = val_number(3), nil = val_nil();
+                        Value add_args = val_cons(n3, nil);            /* (3) */
+                        add_args = val_cons(n2, add_args);             /* (2 3) */
+                        Value add_expr = val_cons(add_sym, add_args);  /* (my-add 2 3) */
+                        global_set("*evadd*", add_expr);
+                        run_test_timeout("probe-my-add-evalkl",
+                            "(g[7:s]*evadd*P[7:s]eval-kl)", 0, 30);
 
-                    /* Verify my-id: (my-id 42) → 42. pushmark, number 42, global my-id, apply. */
-                    run_test_timeout("probe-my-id", "(mn[2:n]42g[5:s]my-idp)", 0, 30);
+                        /* (my-id 42) → 42. */
+                        Value id_sym = val_symbol("my-id");
+                        Value n42 = val_number(42);
+                        Value id_args = val_cons(n42, nil);            /* (42) */
+                        Value id_expr = val_cons(id_sym, id_args);     /* (my-id 42) */
+                        global_set("*evid*", id_expr);
+                        run_test_timeout("probe-my-id-evalkl",
+                            "(g[6:s]*evid*P[7:s]eval-kl)", 0, 30);
+
+                        /* Diagnostic: does lookup-global find my-add after load?
+                         * Interprets whether the defun actually got compiled. */
+                        {
+                            Value lg = call_bundled_1("lookup-global", val_symbol("my-add"));
+                            printf("  lookup-global my-add → "); print_value(lg);
+                            printf(" (tag=%d)\n", lg.tag); fflush(stdout);
+                        }
+                    }
                     fflush(stdout);
                 }
 #endif
