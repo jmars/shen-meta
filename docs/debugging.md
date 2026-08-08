@@ -55,19 +55,39 @@ cosmocc -Wall -Wextra -O2 -I vm -DZINCTEST -DZINC_TEST_OS_LOAD \
 
 ## Open investigation — precise-root-miss
 
-**Symptom:** `interp-load-raw` / `interp-eval-all` return the **symbol `or`**
-instead of `loaded`; `appterm non-lambda` fires on a symbol. Trace-dependent:
-adding `--trace interp-load-raw` makes it succeed.
+**✅ RESOLVED — it was NOT a GC bug.** The root cause was a **compiler bug**:
+n-ary `and`/`or` were not expanded by `kmacros` (see below). The GC tooling
+correctly ruled out collector corruption (`gc_check_closure` never fired); the
+failure was a wrong-value, not a missed root.
 
-### What the tooling established (important)
+**Original symptom (pre-fix):** `interp-load-raw` / `interp-eval-all` returned
+the **symbol `or`** instead of `loaded`; `appterm non-lambda` fired on a symbol.
+Trace-dependent: adding `--trace interp-load-raw` made it succeed.
+
+### Root cause (resolved)
+
+`kmacros` in `shen/normalize.shen` only expanded 2-arg `[and X Y]`/`[or X Y]`.
+Bundled source uses n-ary forms — `read-atom-chars` (`load.shen:108`) has a
+5-arg `(or ...)`, `parse-atom` (`load.shen:124`) a 3-arg `(and ...)`. These fell
+through to the general `[X | Y]` rule and compiled to `[global or]`/`[global and]`
++ apply. `or`/`and` are not C primitives, so `global_get` returned the symbol,
+giving `appterm non-lambda` returning symbol `or`. This surfaced only when the
+OS-load probe first exercised `read-file-raw` (built-in tests use the YACC
+parser, not `read-file-raw`).
+
+**Fix (commit `98f98bb`):** added n-ary `and`/`or` rules to `kmacros`
+(normalize.shen). Rebuilt `globals.csexp` via
+`vendor/shen-scheme/bin/shen-scheme script shen/serialize-reduced.shen`.
+`read-atom-chars`/`parse-atom` now compile to `if`/`jmpf` chains; `make test`
+34/34; OS-load probe PASSES (`read-file-raw` → parse list, `interp-load-raw` →
+`loaded`).
+
+### What the GC tooling established (during the hunt)
 
 - **`gc_check_closure` does NOT fire** (0 GC-CHECK lines). Every closure's
   `Instr`/env array header is structurally valid at `APPLY`/`APPTERM` entry.
-- **Therefore the bug is NOT "a closure's code array got collected/freed."** It is
-  a **wrong-value** result — a closure **resolves to the symbol `or`** somewhere in
-  the metacircular interp path (a stale/wrong pointer, or `lookup-global`/`assoc`
-  returning the wrong entry). This redirects the hypothesis away from a torn
-  `Instr` array toward a value-on-stack/env/frame resolving wrong.
+  This correctly ruled out "code array collected/freed" and pointed at a
+  wrong-value instead — which turned out to be the n-ary `or`/`and` compilation.
 - Probe run: 54 collections (42 NURSERY + 12 FULL); triggers 42 PREEMPTIVE, 11
   ALLOC, 1 THRESHOLD (no REACTIVE/LASTRESORT). `shadow_depth` mostly 0–2 during
   bundle load, spiking to 45 at one FULL collection in the deep recursion.
@@ -75,7 +95,17 @@ adding `--trace interp-load-raw` makes it succeed.
   clean, `read-file-raw` **first corruption**; downstream stages fail only because
   `read-file-raw` already corrupted.
 
-### Next debugging steps
+### Still open / follow-up
+
+- `probe-my-add` (C VM `global my-add` bytecode) returns symbol `my-add`, not `5`.
+  **Expected, not a bug** — it's the two-namespace split (see AGENTS.md): a
+  runtime-loaded defun lives in the interp's Shen `global-table`, not the C VM
+  native `global_table[]`. To call it, drive through `eval-kl`/`interp`, not raw
+  `global` bytecode.
+- The GC tooling (3 flags) remains in place and is now available for *genuine*
+  GC work (nursery churn, old-gen compaction) if it ever arises.
+
+### Next debugging steps (superseded by the resolution — kept for reference)
 
 1. Use `--gc-verbose`/`--gc-dump-roots` to correlate the first bad collection with
    the shadow-stack contents at that point.

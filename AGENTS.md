@@ -210,6 +210,74 @@ and `pos` out-of-bounds inside `trap-error` (semantic, needed for `strlen`/end-o
   self-contained bundle (`make bundle` → `globals.csexp`) is ~340 closures / ~0.33MB.
 - All 24 KLambda files loaded (full bundle): core through shen-scheme-extensions + stlib + init
 
+### Two global namespaces (critical to understand)
+
+There are **two separate global namespaces**, and confusing them is the #1 source
+of "why can't the C VM see my closure?" bugs:
+
+1. **C VM native `global_table[]`** (`vm/zincvm.c`). Populated by
+   `parse_bundle` from the bundle `((name code) ...)` and by `init_globals`
+   (C primitives, `safe.X` wrappers, `*stinput*`/`*stoutput*`/`*sterror*`,
+   keywords). Read by the `[global X]` opcode (`OP_GLOBAL` → `global_get`).
+   This is what raw C bytecode `g[6:s]foo` reaches.
+2. **Metacircular interp's Shen `global-table`** (`shen/interp.shen:6`,
+   `(set global-table [])`). A Shen **variable** holding an assoc list
+   `[name . closure]`. The interp resolves `[global G]` **not** via the C VM
+   table but via `lookup-global` (`interp.shen:8`) which reads
+   `(value global-table)`. `interp-eval`/`interp-load`/`interp-load-raw`
+   (`toplevel.shen`/`load.shen`) `(set global-table (cons [Name Closure] ...))`
+   to register a compiled defun.
+
+**Which one does a loaded `.kl` defun land in?** The Shen `global-table`
+(namespace 2) — NOT the C VM `global_table[]` (namespace 1). The C-level
+`set` primitive (`zincvm.c:1227`) writes into `global_table["global-table"]`,
+so the interp's list is *stored as* a C global named `"global-table"`, but a
+runtime-loaded closure (`shen.foo`) is **not** its own C global entry.
+
+Consequences:
+- C bytecode `[global shen.foo] apply` (namespace 1) will NOT find a
+  runtime-loaded closure — `global_get` falls back to `val_symbol`, giving
+  "apply non-callable"/`appterm non-lambda`.
+- To call a runtime-loaded closure, drive it **through the metacircular interp**:
+  `eval-kl`, `toplevel-interp`, or a bundled closure that resolves names via
+  `lookup-global`. The metacircular interp sees namespace 2.
+- A bundled closure that must call a loaded OS function references it via
+  `[global X]` **in its own bytecode**, which the interp resolves via
+  `lookup-global` (namespace 2) when it executes that bytecode. So bundled code
+  reaching OS closures works *as long as execution flows through the interp*.
+
+**Debugging a wrong-value `or`/`appterm non-lambda` at runtime?** First check
+whether the closure you're calling is in the C VM table or only the Shen
+`global-table`. A `[global X]` reaching a non-primitive, non-registered name
+returns the symbol `X` — not an error. If you see the symbol coming back as a
+"result", you are reading the wrong namespace.
+
+**How the metacircular interp loads a `.kl` file at runtime** (the OS-load path):
+1. `interp-load-raw Path` (`load.shen:11`) reads the file via `read-file-raw`
+   (namespace-independent: just parses KLambda s-expressions).
+2. `interp-eval-all` (`load.shen:14`) feeds each parsed form to
+   `interp-eval-safe` (`trap-error`-wrapped).
+3. `interp-eval` (`toplevel.shen:9`) matches `[defun Name Args Body]`,
+   compiles via `kl->zinc (defun->lambda ...)` → `toplevel-interp`, and stores
+   `[Name Closure]` into the interp's `global-table` (namespace 2). Returns
+   `loaded` on success (`interp-eval-all` returns `loaded`).
+4. Because this all runs as bundled bytecode **on the C VM**, the deep recursion
+   (`read-file-raw → parse-exprs → parse-expr → parse-list → … → strlen-acc`)
+   exercises the precise-root shadow stack. The reduced bundle MUST be able to
+   compile every form it reads (see n-ary `and`/`or` fix below) or a form
+   compiles to `[global or]` and the load returns symbol `or` instead of
+   `loaded`.
+
+### n-ary `and`/`or` (compiler gotcha that broke runtime `.kl` load)
+
+`kmacros` in `normalize.shen` must expand **n-ary** `and`/`or`, not just 2-arg:
+`read-atom-chars` uses a 5-arg `(or ...)`, `parse-atom` a 3-arg `(and ...)`.
+The 2-arg-only rules let these fall through to the general `[X | Y]` rule and
+compile to `[global or]`/`[global and]` + apply, which resolve to symbols at
+runtime → `appterm non-lambda` returning symbol `or`. This surfaced only when
+the OS-load probe first exercised `read-file-raw` (the built-in tests use the
+YACC parser, not `read-file-raw`). See the n-ary rules in `normalize.shen`.
+
 ### Shen module system & package prefixing
 
 - The Shen package system prefixes ALL symbols (definitions AND references) with
