@@ -1239,6 +1239,9 @@ comp_done:
 /* ------------------------------------------------------------------ */
 
 int main(int argc, char **argv) {
+    volatile char stack_top_marker;
+    gc_set_stack_top(((uintptr_t)&stack_top_marker + GC_PAGEBYTES - 1) & ~(GC_PAGEBYTES - 1));
+
     init_globals();
 
     gc_init(256UL * 1024 * 1024);
@@ -1257,6 +1260,8 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--gc-verbose") == 0)          gc_set_verbose(1);
         if (strcmp(argv[i], "--gc-check-closures") == 0)   gc_set_check_closures(1);
         if (strcmp(argv[i], "--gc-dump-roots") == 0)       gc_set_dump_roots(1);
+        if (strcmp(argv[i], "--gc-stale-scan") == 0)       gc_set_stale_scan(1);
+        else if (strcmp(argv[i], "--gc-log") == 0 && i + 1 < argc) { gc_set_log(argv[++i]); }
     }
 
     if (argc > 1) {

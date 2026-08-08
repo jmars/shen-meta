@@ -64,6 +64,8 @@ gcdebug: zinctest-debug
 	@echo "  --gc-verbose         per-collection stats: [GC NURSERY/FULL #N] trigger/shadow_depth/live/free"
 	@echo "  --gc-check-closures  validate code/env headers on each closure entry (APPLY/APPTERM)"
 	@echo "  --gc-dump-roots      dump the precise-root shadow stack at each collection"
+	@echo "  --gc-stale-scan      scan the C stack for pointers into dead old-gen/nursery space"
+	@echo "  --gc-log <path>      write opt-in GC diagnostics to <path> instead of stderr"
 	@echo "  --trace <name>       (existing) trace a closure's bytecode execution"
 	@echo ""
 	@echo "Example: ./zinctest globals.csexp --gc-verbose --gc-check-closures --gc-dump-roots"

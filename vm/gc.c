@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <errno.h>
 #include <sys/mman.h>
 #include "zincvm.h"
 
@@ -99,36 +100,52 @@ static long gc_collect_seq    = 0;   /* per-collection sequence (nursery+fits) *
 static int  gc_verbose        = 0;
 static int  gc_check_closures = 0;
 static int  gc_dump_roots     = 0;
+static int  gc_stale_scan     = 0;
+static uintptr_t gc_stack_top = 0;   /* page-aligned top of the C stack (main) */
+static FILE *gc_log_fp        = NULL;
 
 void gc_set_verbose(int on)        { gc_verbose        = on; }
 void gc_set_check_closures(int on) { gc_check_closures = on; }
 void gc_set_dump_roots(int on)     { gc_dump_roots     = on; }
+void gc_set_stale_scan(int on)     { gc_stale_scan     = on; }
+void gc_set_stack_top(uintptr_t top) { gc_stack_top    = top; }
+void gc_set_log(const char *path) {
+    gc_log_fp = fopen(path, "w");
+    if (!gc_log_fp) {
+        fprintf(stderr, "gc: cannot open log %s: %s\n", path, strerror(errno));
+        exit(1);
+    }
+}
+
+/* All opt-in diagnostic output routes through this; defaults to stderr.
+ * Fatal error exits and the ROOT_PTR interior-pointer fatal stay on stderr. */
+#define GC_LOG (gc_log_fp ? gc_log_fp : stderr)
 
 /* gc_check_closure: validate a closure's code/env headers are on live pages
  * with the expected type tags.  No-op unless gc_check_closures is set.  Uses
  * the static page/space/current_space state directly (all in this TU). */
 void gc_check_closure(Value *cl, const char *where) {
     if (!gc_check_closures) return;
-    if (!cl) { fprintf(stderr, "GC-CHECK %s: NULL Value pointer\n", where); return; }
+    if (!cl) { fprintf(GC_LOG, "GC-CHECK %s: NULL Value pointer\n", where); return; }
     if (cl->tag != VAL_LAMBDA) {
-        fprintf(stderr, "GC-CHECK %s: tag=%d (not VAL_LAMBDA=%d)\n",
+        fprintf(GC_LOG, "GC-CHECK %s: tag=%d (not VAL_LAMBDA=%d)\n",
                 where, (int)cl->tag, (int)VAL_LAMBDA);
         return;
     }
     Instr *code = cl->lambda.code;
     if (code == NULL) {
-        fprintf(stderr, "GC-CHECK %s: lambda.code == NULL\n", where);
+        fprintf(GC_LOG, "GC-CHECK %s: lambda.code == NULL\n", where);
         return;
     }
     uintptr_t pg = GCP_to_PAGE(code);
     if (pg < firstheappage || pg > lastheappage) {
-        fprintf(stderr, "GC-CHECK %s: code ptr=%p page=%lu out of heap [%lu,%lu]\n",
+        fprintf(GC_LOG, "GC-CHECK %s: code ptr=%p page=%lu out of heap [%lu,%lu]\n",
                 where, (void *)code, (unsigned long)pg,
                 (unsigned long)firstheappage, (unsigned long)lastheappage);
         return;
     }
     if (space[pg] != NURSERY && space[pg] != current_space) {
-        fprintf(stderr, "GC-CHECK %s: code ptr=%p page=%lu space=%lu "
+        fprintf(GC_LOG, "GC-CHECK %s: code ptr=%p page=%lu space=%lu "
                 "(expected NURSERY=%d or current=%lu)\n",
                 where, (void *)code, (unsigned long)pg,
                 (unsigned long)space[pg], NURSERY, (unsigned long)current_space);
@@ -136,13 +153,13 @@ void gc_check_closure(Value *cl, const char *where) {
     }
     uintptr_t chdr = ((uintptr_t *)code)[-1];
     if (FORWARDED(chdr)) {
-        fprintf(stderr, "GC-CHECK %s: code ptr=%p header FORWARDED (fwd=0x%lx)\n",
+        fprintf(GC_LOG, "GC-CHECK %s: code ptr=%p header FORWARDED (fwd=0x%lx)\n",
                 where, (void *)code, (unsigned long)chdr);
         return;
     }
     int cty = HEADER_TYPE(chdr);
     if (cty != GC_TYPE_INSTR_ARRAY) {
-        fprintf(stderr, "GC-CHECK %s: code ptr=%p header type=%d "
+        fprintf(GC_LOG, "GC-CHECK %s: code ptr=%p header type=%d "
                 "(expected GC_TYPE_INSTR_ARRAY=%d)\n",
                 where, (void *)code, cty, GC_TYPE_INSTR_ARRAY);
         return;
@@ -150,14 +167,14 @@ void gc_check_closure(Value *cl, const char *where) {
     if (cl->lambda.env != NULL) {
         uintptr_t epg = GCP_to_PAGE(cl->lambda.env);
         if (epg < firstheappage || epg > lastheappage) {
-            fprintf(stderr, "GC-CHECK %s: env ptr=%p page=%lu out of heap "
+            fprintf(GC_LOG, "GC-CHECK %s: env ptr=%p page=%lu out of heap "
                     "[%lu,%lu]\n", where, (void *)cl->lambda.env,
                     (unsigned long)epg, (unsigned long)firstheappage,
                     (unsigned long)lastheappage);
             return;
         }
         if (space[epg] != NURSERY && space[epg] != current_space) {
-            fprintf(stderr, "GC-CHECK %s: env ptr=%p page=%lu space=%lu "
+            fprintf(GC_LOG, "GC-CHECK %s: env ptr=%p page=%lu space=%lu "
                     "(expected NURSERY=%d or current=%lu)\n",
                     where, (void *)cl->lambda.env, (unsigned long)epg,
                     (unsigned long)space[epg], NURSERY, (unsigned long)current_space);
@@ -166,7 +183,7 @@ void gc_check_closure(Value *cl, const char *where) {
         uintptr_t ehdr = ((uintptr_t *)cl->lambda.env)[-1];
         int ety = HEADER_TYPE(ehdr);
         if (ety != GC_TYPE_VALUE_ARRAY) {
-            fprintf(stderr, "GC-CHECK %s: env ptr=%p header type=%d "
+            fprintf(GC_LOG, "GC-CHECK %s: env ptr=%p header type=%d "
                     "(expected GC_TYPE_VALUE_ARRAY=%d)\n",
                     where, (void *)cl->lambda.env, ety, GC_TYPE_VALUE_ARRAY);
             return;
@@ -310,6 +327,7 @@ static void  allocatepage(uintptr_t pages);
 static void *gcalloc_internal(size_t bytes, int type_tag);
 static void *move_internal(uintptr_t *cp, int type_tag);
 static void  gc_scan_roots(void);
+static void  gc_stale_scan_stack(uintptr_t old_space);
 
 /* ---- Cheney queue ------------------------------------------------- */
 
@@ -364,7 +382,7 @@ static void collect(const char *trigger) {
     gc_full_collect_count++;
     gc_collect_seq++;
     if (gc_verbose) {
-        fprintf(stderr, "[GC FULL #%ld] trigger=%s shadow_depth=%zu live_pages=%lu\n",
+        fprintf(GC_LOG, "[GC FULL #%ld] trigger=%s shadow_depth=%zu live_pages=%lu\n",
                 gc_collect_seq, trigger, shadow_len, (unsigned long)allocatedpages);
     }
 
@@ -565,8 +583,80 @@ static void collect(const char *trigger) {
 
     current_space = next_space;
 
+    /* Opt-in stale-reference scan: after the semi-space flip, the previous
+     * from-space (now dead) may still hold pointers from stale C-stack
+     * slots.  Purely observational; does NOT change collection semantics. */
+    if (gc_stale_scan && gc_stack_top) {
+        uintptr_t dead = (current_space == 1) ? 2 : 1;
+        gc_stale_scan_stack(dead);
+    }
+
     /* Restore the previous SIGALRM mask */
     sigprocmask(SIG_SETMASK, &old_sig_set, NULL);
+}
+
+/* ---- opt-in stale-reference scan (--gc-stale-scan) ------------------ */
+/* Walks the C stack region [current frame, gc_stack_top) looking for word
+ * values that point into the given dead old-gen semi-space `old_space` (or
+ * the nursery).  These are "stale references": GC-managed pointers left in
+ * dead C-stack slots that the precise-root shadow stack does NOT cover.
+ * Purely diagnostic — no mutation, no semantics change. */
+static void gc_stale_scan_stack(uintptr_t old_space) {
+    volatile char marker;
+    uintptr_t local = (uintptr_t)&marker;
+    uintptr_t top = gc_stack_top;
+    long hits = 0;
+    FILE *out = GC_LOG;
+    if (!top || local >= top) return;
+
+    /* Frame map: walk caller chain via frame pointers so each stale hit can
+     * be attributed to the C function that owns that stack slot (its return
+     * address → addr2line). -O0 debug builds keep frame pointers; on x86-64
+     * the saved frame ptr is at [fp] and the return address at [fp+8]. */
+    struct { uintptr_t start, end; uintptr_t ret; } fm[64];
+    int nf = 0;
+    uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
+    for (int lvl = 0; lvl < 64 && fp; lvl++) {
+        uintptr_t next = *((uintptr_t *)fp);           /* saved frame ptr */
+        uintptr_t ret  = *((uintptr_t *)fp + 1);       /* return address */
+        if (fp < top && nf < 64) {
+            fm[nf].start = fp;
+            fm[nf].end   = (next && next > fp) ? next : top;
+            fm[nf].ret   = ret;
+            nf++;
+        }
+        if (!next || next <= fp) break;                /* end of chain */
+        fp = next;
+    }
+
+    fprintf(out, "[GC STALE-SCAN #%ld] scanning stack [%p, %p) old_space=%lu frames=%d\n",
+            gc_collect_seq, (void *)local, (void *)top, (unsigned long)old_space, nf);
+    if (nf > 0) {
+        fprintf(out, "  FRAMES:\n");
+        for (int i = 0; i < nf; i++)
+            fprintf(out, "    frame[%d] [%p,%p) ret=%p\n", i,
+                    (void *)fm[i].start, (void *)fm[i].end, (void *)fm[i].ret);
+    }
+    for (uintptr_t *sp = (uintptr_t *)((local + sizeof(uintptr_t) - 1) & ~(sizeof(uintptr_t) - 1));
+         (uintptr_t)sp < top; sp++) {
+        uintptr_t w = *sp;
+        uintptr_t pg = GCP_to_PAGE(w);
+        if (pg < firstheappage || pg > lastheappage) continue;
+        if (space[pg] != old_space) continue;
+        uintptr_t hdr = ((uintptr_t *)w)[-1];
+        int fwd = FORWARDED(hdr);
+        long offset = (long)((uintptr_t)sp - local);
+        int owner = -1;
+        for (int i = 0; i < nf; i++)
+            if ((uintptr_t)sp >= fm[i].start && (uintptr_t)sp < fm[i].end) { owner = i; break; }
+        fprintf(out, "  STALE: stack=%p (local+%ld) frame=%d%s ptr=%p page=%lu %s hdr=0x%lx\n",
+                (void *)sp, offset, owner, owner >= 0 ? "": "(below-local)",
+                (void *)w, (unsigned long)pg, fwd ? "FORWARDED" : "dead-space",
+                (unsigned long)hdr);
+        hits++;
+    }
+    fprintf(out, "[GC STALE-SCAN #%ld] %ld potential stale references found\n",
+            gc_collect_seq, hits);
 }
 
 /* ---- nursery collection (Phase 4b.2 — copying scavenge) ------------- */
@@ -584,24 +674,39 @@ static void collect(const char *trigger) {
 static void gc_scan_roots(void) {
     /* 0. Root-set dump (opt-in --gc-dump-roots) */
     if (gc_dump_roots) {
-        fprintf(stderr, "[GC ROOTS %s #%ld] shadow_depth=%zu\n",
+        fprintf(GC_LOG, "[GC ROOTS %s #%ld] shadow_depth=%zu\n",
                 in_scavenge ? "NURSERY" : "FULL", gc_collect_seq, shadow_len);
         for (size_t i = 0; i < shadow_len; i++) {
             GcRoot *r = &shadow_stack[i];
-            fprintf(stderr, "  [%zu] kind=%d slot=%p", i, (int)r->kind, r->slot);
+            fprintf(GC_LOG, "  [%zu] kind=%d slot=%p", i, (int)r->kind, r->slot);
             if (r->kind == ROOT_PTR) {
                 void *p = *(void **)r->slot;
                 if (p) {
                     uintptr_t pg = GCP_to_PAGE(p);
                     int ty = (pg >= firstheappage && pg <= lastheappage)
                              ? HEADER_TYPE(((uintptr_t *)p)[-1]) : -1;
-                    fprintf(stderr, " -> obj=%p page=%lu hdr_type=%d",
+                    fprintf(GC_LOG, " -> obj=%p page=%lu hdr_type=%d",
                             p, (unsigned long)pg, ty);
+                    /* Root-liveness cross-check: a live root's object page
+                     * must be in the nursery or the active old-gen semi-space.
+                     * A page in the inactive (dead) semi-space means the root
+                     * was NOT evacuated by the preceding collection — a real
+                     * bug (stale root). */
+                    int live = (pg >= firstheappage && pg <= lastheappage)
+                             ? (space[pg] == NURSERY || space[pg] == current_space)
+                             : 0;
+                    if (!live) {
+                        fprintf(GC_LOG,
+                                " -> ** DEAD-SPACE ** (space=%lu current=%lu)",
+                                (unsigned long)(pg >= firstheappage && pg <= lastheappage
+                                                ? space[pg] : 0),
+                                (unsigned long)current_space);
+                    }
                 } else {
-                    fprintf(stderr, " -> obj=NULL");
+                    fprintf(GC_LOG, " -> obj=NULL");
                 }
             }
-            fprintf(stderr, "\n");
+            fprintf(GC_LOG, "\n");
         }
     }
 
@@ -725,7 +830,7 @@ static void collect_nursery(const char *trigger) {
     gc_nursery_scavenge_count++;
     gc_collect_seq++;
     if (gc_verbose) {
-        fprintf(stderr, "[GC NURSERY #%ld] trigger=%s shadow_depth=%zu nursery_free=%zu\n",
+        fprintf(GC_LOG, "[GC NURSERY #%ld] trigger=%s shadow_depth=%zu nursery_free=%zu\n",
                 gc_collect_seq, trigger, shadow_len, (size_t)(nursery_end - nursery_cur));
     }
 
@@ -829,6 +934,13 @@ static void collect_nursery(const char *trigger) {
             space[pg] = NURSERY;
         gc_nursery_pages_reclaimed += NURSERY_PAGES;
         nursery_cur = (char *)PAGE_to_GCP(nursery_first);
+    }
+
+    /* Opt-in stale-reference scan: after the nursery reset, stale C-stack
+     * slots may still point into the just-scavenged (now empty) nursery.
+     * Purely observational; no semantics change. */
+    if (gc_stale_scan && gc_stack_top) {
+        gc_stale_scan_stack(NURSERY);
     }
 
     gc_dirty_vectors_clear();

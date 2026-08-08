@@ -22,7 +22,9 @@ observability, no GC correctness/semantics change. Release build and default
 |---|---|---|
 | Per-collection stats | `--gc-verbose` | One line per collect: trigger, `shadow_depth`, `nursery_free` / `live_pages` |
 | Closure-header guard | `--gc-check-closures` | `gc_check_closure` validates every `VAL_LAMBDA` code/env header at `APPLY`/`APPTERM` entry |
-| Root-set dump | `--gc-dump-roots` | Dumps the shadow stack at each collection |
+| Root-set dump | `--gc-dump-roots` | Dumps the shadow stack at each collection (now cross-checks each root's pointee page liveness — flags `DEAD-SPACE` roots) |
+| Stale-ref scan | `--gc-stale-scan` | Walks the native C stack after each collection, flagging words that point into the just-abandoned old-gen semi-space or the nursery. `FORWARDED` header = smoking-gun root-miss (object moved, this ref not updated). Prints per-frame attribution so the owning C function can be resolved. |
+| GC log file | `--gc-log <path>` | Routes opt-in GC diagnostics to a file instead of interleaving with Shen `fn`/`run time` stderr noise |
 
 ### Where things live
 
@@ -108,6 +110,35 @@ pointer) was not rooted/updated during the deep recursion.
   (`space=2`) and `unknown op` (trace-sensitive: `\x00` vs `\x04` by traced
   closure). The `not` fix lets debruijn execute further, but a closure's `.code`
   is still corrupted mid-compile. The specific unrooted C local is not yet found.
+
+### Bug 2 — stale-scan localization (commit `---`)
+
+`--gc-stale-scan` now pinpoints the root-miss precisely. On the probe
+(`./zinctest-osload globals.csexp --gc-stale-scan --gc-check-closures --gc-log /tmp/gc.log`):
+
+- **108 scans** (one per collection; 42 NURSERY + 12 FULL + threshold), **509
+  FORWARDED + 637 dead-space** stale hits total. Most early hits are nursery
+  scavenges (`old_space=3`) — noisy, low-signal.
+- **The smoking gun:** the exact Instr page of the later `GC-CHECK` failure
+  (e.g. page `274537990562`, closure `.code=0x7fd77a934408`) appears as a
+  `FORWARDED` stale hit **8 bytes earlier** (`ptr=0x7fd77a934400`) at
+  **full collect #48** (`old_space=2`, dead old-gen semi-space), stack offset
+  `local+449`. So a nursery-resident (or otherwise unrooted) C local held an
+  interior `Instr*` into a live array; when full collect #48 evacuated that
+  array to the other semi-space, the local was NOT updated → stale `.code`.
+- Frame attribution: the stale slot sits in the frame chain
+  `gc_stale_scan_stack → collect → gc_alloc_oldgen → gc_nursery_tests → main`
+  (return addresses resolved via symtab). The unrooted interior pointer is
+  held across the full-collect's promotion/evacuation, most likely in a
+  `vm_exec_env`-driven helper (e.g. `val_cons`, `marshal_to_tagged`,
+  `deep_equal`, or an eval-kl wrapper) that keeps a `Value*`/`Instr*` local
+  alive across an allocating call without a `gc_root_push_*`.
+
+This confirms Bug 2 is a genuine precise-root-miss, localized to full-collect
+#48 during `interp-eval → kl->zinc → normalize → debruijn → zinc-c`. The fix
+is to find the specific C local (via the frame attribution) and root it with
+`gc_root_push_*` (or re-derive `acc.lambda.code`/`.env` after each allocating
+call). The stale-scan's frame map turns the root-miss into a nameable C site.
   Next: trace the exact collection (#51 FULL, THRESHOLD, shadow_depth=70 in the
   deep recursion) with `--gc-dump-roots` and find which closure's `.code` is
   left in the dead semi-space during `interp-eval → kl->zinc → normalize →
@@ -153,8 +184,7 @@ pointer) was not rooted/updated during the deep recursion.
 
 ## Deferred GC tooling items
 
-Not built. Higher cost, and not the right tool for the current wrong-value bug.
-Revisit only if the three tools above don't crack it.
+Not built. Revisit only if the tools above don't crack it.
 
 ### Deferred: real heap verifier (`--gc-verify`)
 

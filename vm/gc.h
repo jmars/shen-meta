@@ -13,6 +13,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* GC heap page size (bytes), matching gc.c's private PAGEBYTES.  Exposed
+ * here so callers (e.g. main()) can page-align stack-top markers without
+ * duplicating the magic 512. */
+#define GC_PAGEBYTES 512
+
 /* ---- type tags stored in the header's repurposed "ptrs" field ---- */
 enum {
     GC_TYPE_RAW             = 0,  /* char[] string/error data — no scan */
@@ -82,6 +87,9 @@ extern long gc_dirty_vectors_fired;
 void gc_set_verbose(int on);
 void gc_set_check_closures(int on);
 void gc_set_dump_roots(int on);
+void gc_set_stale_scan(int on);
+void gc_set_log(const char *path);
+void gc_set_stack_top(uintptr_t top);
 
 /* Validate a closure value's code/env headers for live-page + correct
  * type-tag.  No-op unless gc_set_check_closures(1) was called.  `where`
