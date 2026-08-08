@@ -53,18 +53,12 @@ cosmocc -Wall -Wextra -O2 -I vm -DZINCTEST -DZINC_TEST_OS_LOAD \
   --gc-verbose --gc-check-closures --gc-dump-roots
 ```
 
-## Open investigation — precise-root-miss
+## Open investigation — precise-root-miss (GC bug confirmed in compile path)
 
-**✅ RESOLVED — it was NOT a GC bug.** The root cause was a **compiler bug**:
-n-ary `and`/`or` were not expanded by `kmacros` (see below). The GC tooling
-correctly ruled out collector corruption (`gc_check_closure` never fired); the
-failure was a wrong-value, not a missed root.
+**Two distinct bugs.** The first (a compiler bug, below) was resolved; the second
+(a genuine precise-root-miss GC bug in the defun-compile path) is still open.
 
-**Original symptom (pre-fix):** `interp-load-raw` / `interp-eval-all` returned
-the **symbol `or`** instead of `loaded`; `appterm non-lambda` fired on a symbol.
-Trace-dependent: adding `--trace interp-load-raw` made it succeed.
-
-### Root cause (resolved)
+### Bug 1 (RESOLVED, commit `98f98bb`) — n-ary `and`/`or` compiler bug
 
 `kmacros` in `shen/normalize.shen` only expanded 2-arg `[and X Y]`/`[or X Y]`.
 Bundled source uses n-ary forms — `read-atom-chars` (`load.shen:108`) has a
@@ -75,35 +69,60 @@ giving `appterm non-lambda` returning symbol `or`. This surfaced only when the
 OS-load probe first exercised `read-file-raw` (built-in tests use the YACC
 parser, not `read-file-raw`).
 
-**Fix (commit `98f98bb`):** added n-ary `and`/`or` rules to `kmacros`
-(normalize.shen). Rebuilt `globals.csexp` via
-`vendor/shen-scheme/bin/shen-scheme script shen/serialize-reduced.shen`.
+**Fix:** added n-ary `and`/`or` rules to `kmacros` (normalize.shen). Rebuilt
+`globals.csexp` via `vendor/shen-scheme/bin/shen-scheme script shen/serialize-reduced.shen`.
 `read-atom-chars`/`parse-atom` now compile to `if`/`jmpf` chains; `make test`
-34/34; OS-load probe PASSES (`read-file-raw` → parse list, `interp-load-raw` →
-`loaded`).
+34/34; the **parse** path now works (`read-file-raw` returns the parse list).
+
+### Bug 2 (OPEN) — precise-root-miss GC corruption in the defun-compile path
+
+**Symptom:** compiling a `.kl` defun via `interp-load-raw` returns `loaded` but
+the defun is NOT actually stored — `lookup-global my-add` → `[error "global not
+found: my-add"]`. (`interp-eval-safe`'s `trap-error` swallows the per-form
+compile failure, so `interp-eval-all` still returns `loaded`.) `eval-kl` on the
+loaded name returns the input identity (its CatchFrame swallows the error).
+
+**Localization:** `interp-eval` on `[defun my-add [X Y] [+ X Y]]` →
+`kl->zinc (defun->lambda ...)` → the general lambda path (`kmacros →
+normalize-term → debruijn → zinc-c`) produces `runtime: unknown op '\x02'` —
+a corrupted Instr array. `--gc-check-closures` **now fires**: a closure applied
+at `APPLY` has `code ptr=... page=<garbage huge number> space=2` — the closure's
+`.code` pointer is stale/out-of-heap. This is a genuine precise-root-miss: an
+object was moved by GC but a C local holding the closure (its `.code` interior
+pointer) was not rooted/updated during the deep recursion.
+
+**Note on Bug 2's `gc_check_closure`:** it fires on `APPLY`/`APPTERM` entry, i.e.
+it validates closure headers when a closure is *called*. It does NOT validate
+the `.code` pointer *before* the corruption is used — but it catches the stale
+pointer at the first call, which is the smoking gun. The tooling is doing its
+job here.
 
 ### What the GC tooling established (during the hunt)
 
-- **`gc_check_closure` does NOT fire** (0 GC-CHECK lines). Every closure's
-  `Instr`/env array header is structurally valid at `APPLY`/`APPTERM` entry.
-  This correctly ruled out "code array collected/freed" and pointed at a
-  wrong-value instead — which turned out to be the n-ary `or`/`and` compilation.
+- Bug 1 (parse): `gc_check_closure` did NOT fire — every closure header was valid;
+  the failure was a wrong-value (`[global or]` → symbol `or`), not a root-miss.
+- Bug 2 (compile): `gc_check_closure` DOES fire — a closure's `.code` pointer is
+  stale/garbage (page number out of heap). A real root-miss during the
+  `interp-eval → kl->zinc → normalize → debruijn → zinc-c` recursion.
 - Probe run: 54 collections (42 NURSERY + 12 FULL); triggers 42 PREEMPTIVE, 11
   ALLOC, 1 THRESHOLD (no REACTIVE/LASTRESORT). `shadow_depth` mostly 0–2 during
   bundle load, spiking to 45 at one FULL collection in the deep recursion.
 - Isolation (5 direct-call probes): `strlen` clean (incl. 2nd call), `read-file-as-string`
-  clean, `read-file-raw` **first corruption**; downstream stages fail only because
-  `read-file-raw` already corrupted.
+  clean, `read-file-raw` first corruption (before the n-ary fix); downstream
+  stages fail only because `read-file-raw` already corrupted.
 
 ### Still open / follow-up
 
-- `probe-my-add` (C VM `global my-add` bytecode) returns symbol `my-add`, not `5`.
-  **Expected, not a bug** — it's the two-namespace split (see AGENTS.md): a
-  runtime-loaded defun lives in the interp's Shen `global-table`, not the C VM
-  native `global_table[]`. To call it, drive through `eval-kl`/`interp`, not raw
-  `global` bytecode.
-- The GC tooling (3 flags) remains in place and is now available for *genuine*
-  GC work (nursery churn, old-gen compaction) if it ever arises.
+- **Bug 2 (the real GC precise-root-miss)** is the blocker to runtime `.kl`
+  loading. The probe wiring is now correct (eval-kl → namespace 2); the failure
+  is purely the compile-path GC corruption. Next: find which C local holding a
+  closure's `.code` pointer is not rooted during `interp-eval → kl->zinc →
+  normalize → debruijn → zinc-c`, using `--gc-verbose`/`--gc-dump-roots`/`--gc-check-closures`.
+- The two-namespace split (AGENTS.md): runtime-loaded defuns live in the interp's
+  Shen `global-table` (namespace 2), not the C VM native `global_table[]`
+  (namespace 1). Drive loaded closures through `eval-kl`/`interp`, not raw
+  `global` bytecode. The probe now does this correctly.
+- The GC tooling (3 flags) is in place and actively used to catch Bug 2.
 
 ### Next debugging steps (superseded by the resolution — kept for reference)
 
