@@ -90,6 +90,10 @@ void gc_set_dump_roots(int on);
 void gc_set_stale_scan(int on);
 void gc_set_log(const char *path);
 void gc_set_stack_top(uintptr_t top);
+void gc_set_page_transition(int on);
+void gc_set_page_transition_watch(uintptr_t page);
+void gc_set_watch_alloc(uintptr_t addr);
+void gc_set_verify(int on);
 
 /* Validate a closure value's code/env headers for live-page + correct
  * type-tag.  No-op unless gc_set_check_closures(1) was called.  `where`

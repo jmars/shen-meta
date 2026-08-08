@@ -105,6 +105,12 @@ static int  gc_stale_scan     = 0;
 static uintptr_t gc_stack_top = 0;   /* page-aligned top of the C stack (main) */
 static FILE *gc_log_fp        = NULL;
 
+/* ---- opt-in tools added on top of the above (all pure diagnostics) ---- */
+static int      gc_page_transition = 0;       /* --gc-page-transition */
+static uintptr_t gc_page_transition_watch = 0; /* --gc-page-transition-watch (0 = watch all) */
+static uintptr_t gc_watch_alloc = 0;           /* --gc-watch-alloc (0 = off) */
+static int      gc_verify      = 0;           /* --gc-verify */
+
 void gc_set_verbose(int on)        { gc_verbose        = on; }
 void gc_set_check_closures(int on) { gc_check_closures = on; }
 void gc_set_dump_roots(int on)     { gc_dump_roots     = on; }
@@ -117,6 +123,18 @@ void gc_set_log(const char *path) {
         exit(1);
     }
 }
+
+void gc_set_page_transition(int on) { gc_page_transition = on; }
+void gc_set_page_transition_watch(uintptr_t page) {
+    gc_page_transition = 1;   /* watching a page implies transitions are on */
+    gc_page_transition_watch = page;
+}
+void gc_set_watch_alloc(uintptr_t addr) { gc_watch_alloc = addr; }
+void gc_set_verify(int on)              { gc_verify      = on; }
+
+/* Forward-declared so collect() (defined earlier) can call it.  Defined
+ * alongside the other opt-in helpers below gc_stale_scan_stack. */
+static void gc_verify_heap(const char *when);
 
 /* All opt-in diagnostic output routes through this; defaults to stderr.
  * Fatal error exits and the ROOT_PTR interior-pointer fatal stay on stderr. */
@@ -660,8 +678,56 @@ static void collect(const char *trigger) {
         gc_stale_scan_stack(dead);
     }
 
+    /* Opt-in heap-invariant verification (--gc-verify).  Purely diagnostic;
+     * never aborts, only logs. */
+    gc_verify_heap("post-collect");
+
     /* Restore the previous SIGALRM mask */
     sigprocmask(SIG_SETMASK, &old_sig_set, NULL);
+}
+
+/* ---- reusable C-stack backtrace helpers ---------------------------- */
+/* Walk the frame-pointer chain from the current frame up to the
+ * page-aligned top of the stack (gc_stack_top).  Captures (start,end,ret)
+ * per frame so callers can attribute stack slots / return addresses to the
+ * C function that owns them.  Shared by gc_stale_scan_stack (slot
+ * attribution) and gc_backtrace (page-transition / alloc diagnostics).
+ * Returns the number of frames captured.  -O0 debug builds keep frame
+ * pointers; on x86-64 the saved frame ptr is at [fp] and the return
+ * address at [fp+8]. */
+#define GC_BT_MAX_FRAMES 64
+
+typedef struct { uintptr_t start, end; uintptr_t ret; } GcFrameMap;
+
+static int gc_collect_frames(GcFrameMap *out, int max_frames) {
+    uintptr_t top = gc_stack_top;
+    if (!top) return 0;
+    int nf = 0;
+    uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
+    for (int lvl = 0; lvl < max_frames && fp; lvl++) {
+        uintptr_t next = *((uintptr_t *)fp);           /* saved frame ptr */
+        uintptr_t ret  = *((uintptr_t *)fp + 1);       /* return address */
+        if (fp < top && nf < max_frames) {
+            out[nf].start = fp;
+            out[nf].end   = (next && next > fp) ? next : top;
+            out[nf].ret   = ret;
+            nf++;
+        }
+        if (!next || next <= fp) break;                /* end of chain */
+        fp = next;
+    }
+    return nf;
+}
+
+/* Print the current C call stack as raw return addresses (no ELF symbol
+ * resolution — matches existing diagnostic behavior). */
+static void gc_backtrace(FILE *out) {
+    GcFrameMap fm[GC_BT_MAX_FRAMES];
+    int nf = gc_collect_frames(fm, GC_BT_MAX_FRAMES);
+    fprintf(out, "  frames=%d\n", nf);
+    for (int i = 0; i < nf; i++)
+        fprintf(out, "    frame[%d] [%p,%p) ret=%p\n", i,
+                (void *)fm[i].start, (void *)fm[i].end, (void *)fm[i].ret);
 }
 
 /* ---- opt-in stale-reference scan (--gc-stale-scan) ------------------ */
@@ -678,25 +744,10 @@ static void gc_stale_scan_stack(uintptr_t old_space) {
     FILE *out = GC_LOG;
     if (!top || local >= top) return;
 
-    /* Frame map: walk caller chain via frame pointers so each stale hit can
-     * be attributed to the C function that owns that stack slot (its return
-     * address → addr2line). -O0 debug builds keep frame pointers; on x86-64
-     * the saved frame ptr is at [fp] and the return address at [fp+8]. */
-    struct { uintptr_t start, end; uintptr_t ret; } fm[64];
-    int nf = 0;
-    uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
-    for (int lvl = 0; lvl < 64 && fp; lvl++) {
-        uintptr_t next = *((uintptr_t *)fp);           /* saved frame ptr */
-        uintptr_t ret  = *((uintptr_t *)fp + 1);       /* return address */
-        if (fp < top && nf < 64) {
-            fm[nf].start = fp;
-            fm[nf].end   = (next && next > fp) ? next : top;
-            fm[nf].ret   = ret;
-            nf++;
-        }
-        if (!next || next <= fp) break;                /* end of chain */
-        fp = next;
-    }
+    /* Frame map: shared walker attributes each stale hit to the C function
+     * that owns that stack slot (its return address → addr2line). */
+    GcFrameMap fm[GC_BT_MAX_FRAMES];
+    int nf = gc_collect_frames(fm, GC_BT_MAX_FRAMES);
 
     fprintf(out, "[GC STALE-SCAN #%ld] scanning stack [%p, %p) old_space=%lu frames=%d\n",
             gc_collect_seq, (void *)local, (void *)top, (unsigned long)old_space, nf);
@@ -726,6 +777,98 @@ static void gc_stale_scan_stack(uintptr_t old_space) {
     }
     fprintf(out, "[GC STALE-SCAN #%ld] %ld potential stale references found\n",
             gc_collect_seq, hits);
+}
+
+/* ---- opt-in page-transition log (--gc-page-transition) -------------- */
+/* Log every reclassification of a page's space[] slot (e.g. free→to-space
+ * during allocatepage).  Purely diagnostic. */
+static void gc_log_page_transition(uintptr_t page, int old_space, int new_space,
+                                   const char *where) {
+    if (!gc_page_transition) return;
+    if (gc_page_transition_watch && page != gc_page_transition_watch) return;
+    if (old_space == new_space) return;
+    fprintf(GC_LOG, "[GC PAGE-TRANSITION #%ld] page=%lu %d->%d where=%s\n",
+            gc_collect_seq, (unsigned long)page, old_space, new_space, where);
+    gc_backtrace(GC_LOG);
+}
+
+/* ---- opt-in allocation watcher (--gc-watch-alloc <addr>) ------------- */
+/* True iff an object whose body spans [body, body+body_bytes) covers the
+ * watched address.  Purely diagnostic. */
+static int gc_watch_hits(uintptr_t body, size_t body_bytes) {
+    return gc_watch_alloc &&
+           (uintptr_t)body <= gc_watch_alloc &&
+           gc_watch_alloc < (uintptr_t)body + body_bytes;
+}
+
+/* ---- opt-in heap verification (--gc-verify) ------------------------- */
+/* Walk the heap pages checking structural invariants.  Logs every violation
+ * (never aborts) and prints a summary line.  Purely diagnostic.
+ *
+ * Invariants:
+ *   1. a free page (space==0) must have type_page==0;
+ *   2. a CONTINUED page must not follow a FREE page (its multi-page object
+ *      always occupies contiguous, non-free pages in one space).
+ *
+ * The header walk (invariant 3, counts live objects) treats a FORWARDED or
+ * invalid-type header as a page boundary and stops there, mirroring the
+ * collector's own Cheney drain (which breaks at such headers).  This is
+ * intentional: the collector legitimately reuses stale from-space pages, so
+ * a live object may be followed by a leftover forwarding pointer that the
+ * drain treats as end-of-page — NOT corruption.  The collector retains OLD
+ * from-space pages tagged space==current_space whose head object was
+ * evacuated (forwarding pointer at offset 0); those stale pages are skipped.
+ * The walk stops at freep (the live-data boundary) so the trailing free
+ * region of the current allocation page is never misread as a header. */
+static void gc_verify_heap(const char *when) {
+    if (!gc_verify) return;
+    long pages = 0, objects = 0, errors = 0;
+    /* Diagnostic caps: bound the page walk and the per-page object count
+     * independently so a pathological heap cannot spin the verifier forever. */
+    const long max_pages = 1000000;
+    const long max_objects = 1000000;
+
+    for (uintptr_t pg = firstheappage; pg <= lastheappage && pages < max_pages; pg++) {
+        pages++;
+        int sp = (int)space[pg];
+        int tp = (int)type_page[pg];
+
+        /* Invariant 1: free page must be untagged */
+        if (sp == 0 && tp != 0) {
+            fprintf(GC_LOG,
+                    "[GC VERIFY #%ld] %s: error free page=%lu type_page=%d (space=0)\n",
+                    gc_collect_seq, when, (unsigned long)pg, tp);
+            errors++;
+        }
+
+        /* Invariant 2: a CONTINUED page must not follow a free page */
+        if (tp == CONTINUED && pg > firstheappage && (int)space[pg - 1] == 0) {
+            fprintf(GC_LOG,
+                    "[GC VERIFY #%ld] %s: error CONTINUED page=%lu pred_space=0 space=%d\n",
+                    gc_collect_seq, when, (unsigned long)pg, sp);
+            errors++;
+        }
+
+        /* Count live objects on OBJECT pages in current_space. */
+        if (sp == (int)current_space && tp == OBJECT) {
+            uintptr_t *cp = PAGE_to_GCP(pg);
+            /* Stale retained from-space page: head object evacuated, so the
+             * first word is a forwarding pointer.  Benign — skip the page. */
+            if (FORWARDED(*cp)) continue;
+            while (GCP_to_PAGE(cp) == pg && cp != freep && objects < max_objects) {
+                uintptr_t hdr = *cp;
+                int ty = HEADER_TYPE(hdr);
+                if (FORWARDED(hdr) || ty < 0 || ty > GC_TYPE_CALLFRAME_ARRAY ||
+                    HEADER_WORDS(hdr) == 0)
+                    break;   /* page boundary — same as the Cheney drain */
+                objects++;
+                cp += HEADER_WORDS(hdr);
+            }
+        }
+    }
+
+    fprintf(GC_LOG, "[GC VERIFY #%ld] %s - pages=%ld objects=%ld errors=%d\n",
+            gc_collect_seq, when, pages, objects, (int)errors);
 }
 
 /* ---- nursery collection (Phase 4b.2 — copying scavenge) ------------- */
@@ -1015,6 +1158,10 @@ static void collect_nursery(const char *trigger) {
     gc_dirty_vectors_clear();
     gc_dirty_globals_clear();
 
+    /* Opt-in heap-invariant verification (--gc-verify).  Purely diagnostic;
+     * never aborts, only logs. */
+    gc_verify_heap("post-nursery");
+
     in_scavenge = 0;
 
     /* Restore the previous SIGALRM mask */
@@ -1052,6 +1199,15 @@ static void *gcalloc_internal(size_t bytes, int type_tag) {
     memset(freep + 1, 0, (words - 1) * WORDBYTES);
 
     uintptr_t *object = freep + 1;
+
+    /* Opt-in allocation watcher (--gc-watch-alloc).  Purely diagnostic. */
+    if (gc_watch_hits((uintptr_t)object, bytes)) {
+        fprintf(GC_LOG,
+                "[GC WATCH-ALLOC #%ld] ALLOC body=%p bytes=%zu tag=%d in_scavenge=%d current=%lu next=%lu\n",
+                gc_collect_seq, (void *)object, bytes, type_tag, in_scavenge,
+                (unsigned long)current_space, (unsigned long)next_space);
+        gc_backtrace(GC_LOG);
+    }
 
     if (words < PAGEWORDS) {
         freewords -= words;
@@ -1176,12 +1332,20 @@ retry:
                 freewords = pages * PAGEWORDS;
                 allocatedpages += pages;
                 freepage = next_page(freepage);
-                space[firstpage] = next_space;
-                type_page[firstpage] = OBJECT;
+                {
+                    int old = (int)space[firstpage];
+                    space[firstpage] = next_space;
+                    type_page[firstpage] = OBJECT;
+                    gc_log_page_transition(firstpage, old, (int)next_space,
+                                           "allocatepage-obj");
+                }
 
                 while (--pages) {
+                    int old = (int)space[firstpage + 1];
                     space[++firstpage] = next_space;
                     type_page[firstpage] = CONTINUED;
+                    gc_log_page_transition(firstpage, old, (int)next_space,
+                                           "allocatepage-cont");
                 }
                 return;
             }
@@ -1235,6 +1399,16 @@ static void *move_internal(uintptr_t *cp, int type_tag) {
     /* Copy header + body */
     while (cnt--)
         *to++ = *from++;
+
+    /* Opt-in allocation watcher (--gc-watch-alloc) — the evacuated copy.
+     * Purely diagnostic. */
+    if (gc_watch_hits((uintptr_t)np, (HEADER_WORDS(header) - 1) * WORDBYTES)) {
+        fprintf(GC_LOG,
+                "[GC WATCH-ALLOC #%ld] EVACUATE old_body=%p (page=%lu) -> new_body=%p (page=%lu) tag=%d\n",
+                gc_collect_seq, (void *)cp, (unsigned long)GCP_to_PAGE(cp),
+                (void *)np, (unsigned long)GCP_to_PAGE(np), type_tag);
+        gc_backtrace(GC_LOG);
+    }
 
     /* Write forwarding pointer in old header */
     cp[-1] = (uintptr_t)np;
@@ -1448,6 +1622,16 @@ void *gc_alloc(size_t bytes, int type_tag) {
             memset(header + 1, 0, (words - 1) * WORDBYTES);
 
             void *body = header + 1;
+
+            /* Opt-in allocation watcher (--gc-watch-alloc) — nursery fast
+             * path.  Purely diagnostic. */
+            if (gc_watch_hits((uintptr_t)body, bytes)) {
+                fprintf(GC_LOG,
+                        "[GC WATCH-ALLOC #%ld] ALLOC-NURSERY body=%p bytes=%zu tag=%d\n",
+                        gc_collect_seq, body, bytes, type_tag);
+                gc_backtrace(GC_LOG);
+            }
+
             nursery_cur += total;
 
             /* Set type_page markers for the nursery object.

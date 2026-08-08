@@ -1262,6 +1262,12 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--gc-dump-roots") == 0)       gc_set_dump_roots(1);
         if (strcmp(argv[i], "--gc-stale-scan") == 0)       gc_set_stale_scan(1);
         else if (strcmp(argv[i], "--gc-log") == 0 && i + 1 < argc) { gc_set_log(argv[++i]); }
+        if (strcmp(argv[i], "--gc-page-transition") == 0) gc_set_page_transition(1);
+        else if (strcmp(argv[i], "--gc-page-transition-watch") == 0 && i + 1 < argc)
+            gc_set_page_transition_watch(strtoul(argv[++i], NULL, 0));
+        else if (strcmp(argv[i], "--gc-watch-alloc") == 0 && i + 1 < argc)
+            gc_set_watch_alloc(strtoull(argv[++i], NULL, 0));
+        if (strcmp(argv[i], "--gc-verify") == 0) gc_set_verify(1);
     }
 
     if (argc > 1) {
