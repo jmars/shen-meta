@@ -442,3 +442,209 @@
 
 (define compile-define
   Name Rules -> (compile-define-h Name (strip-sig Rules)))
+
+\* ===== Extended .shen reader =====
+   The simple reader in load.shen (read-file-raw / parse-exprs) is used for
+   .kl files, where { } [ ] | are ordinary ATOMS (e.g. (= { (hd V1264)) in
+   shen.typetable).  That reader CANNOT parse .shen source, where
+   { A --> B } is a type signature (must be grouped into ONE element so
+   strip-sig can remove it) and [X | Rest] / [a b | (f x)] are list syntax.
+
+   This separate reader (shen-read-file / shen-parse-*) handles .shen source:
+     - { } delimit a grouped type signature (list with braces retained)
+     - [ ] delimit lists, | marks an improper/dotted cdr (only inside [ ])
+     - block comments and line comments are skipped
+   It is used by shen->kl (via shen->kl-forms) to read .shen files.  The
+   .kl reader in load.shen is left untouched. *\
+
+(define shen-skip-block-comment
+  Str Pos Len ->
+  (if (>= Pos Len)
+      (simple-error "unterminated block comment")
+      (let Ch (pos Str Pos)
+        (if (= Ch (n->string 42))
+            (let NextPos (+ Pos 1)
+              (if (>= NextPos Len)
+                  (simple-error "unterminated block comment")
+                  (if (= (pos Str NextPos) (n->string 92))
+                      (shen-skip-ws Str (+ NextPos 1) Len)
+                      (shen-skip-block-comment Str (+ Pos 1) Len))))
+            (shen-skip-block-comment Str (+ Pos 1) Len)))))
+
+(define shen-skip-ws
+  Str Pos Len ->
+  (if (>= Pos Len)
+      Pos
+      (let Ch (pos Str Pos)
+        (if (ws-ch? Ch)
+            (shen-skip-ws Str (+ Pos 1) Len)
+            (if (= Ch (n->string 92))
+                (let NextPos (+ Pos 1)
+                  (if (>= NextPos Len)
+                      Pos
+                      (let Ch2 (pos Str NextPos)
+                        (if (= Ch2 (n->string 92))
+                            (skip-comment Str (+ Pos 2) Len)
+                            (if (= Ch2 (n->string 42))
+                                (shen-skip-block-comment Str (+ NextPos 1) Len)
+                                (shen-skip-ws Str NextPos Len))))))
+                Pos)))))
+
+(define shen-read-atom-chars
+  Str Pos Acc Len ->
+  (if (>= Pos Len)
+      [Acc Pos]
+      (let Ch (pos Str Pos)
+        (if (or (ws-ch? Ch)
+                (= Ch "(")
+                (= Ch ")")
+                (= Ch (n->string 91))
+                (= Ch (n->string 93))
+                (= Ch (n->string 123))
+                (= Ch (n->string 125))
+                (= Ch (n->string 124))
+                (= Ch (n->string 34))
+                (= Ch (n->string 92)))
+            [Acc Pos]
+            (shen-read-atom-chars Str (+ Pos 1) [Ch | Acc] Len)))))
+
+(define shen-parse-atom
+  Str Pos Len ->
+  (let Pair (shen-read-atom-chars Str Pos [] Len)
+    (let Chars (hd Pair)
+      (let FinalPos (hd (tl Pair))
+        (let Token (chars->str (reverse Chars))
+          (if (= Token "")
+              [(intern "") FinalPos]
+              (if (or (digit-ch? (pos Token 0))
+                      (and (> (strlen Token) 1)
+                           (= (pos Token 0) "-")
+                           (digit-ch? (pos Token 1))))
+                  [(parse-num-str Token) FinalPos]
+                  [(intern Token) FinalPos])))))))
+
+\* shen-parse-list-tail: continue parsing a list after its first element.
+   Close is the closing char for the enclosing opener. Dotted is true only
+   inside [ ... ], where | marks the start of the cdr (improper list). *\
+
+(define shen-parse-list-tail
+  Str Pos Close Dotted Len ->
+  (let P (shen-skip-ws Str Pos Len)
+    (if (>= P Len)
+        (simple-error "unterminated list")
+        (if (= (pos Str P) Close)
+            [[] (+ P 1)]
+            (if (and Dotted (= (pos Str P) (n->string 124)))
+                (let Pair1 (shen-parse-expr Str (+ P 1) Len)
+                  (let Cdr (hd Pair1)
+                    (let After (hd (tl Pair1))
+                      (if (= (pos Str After) Close)
+                          [Cdr (+ After 1)]
+                          (simple-error "unterminated dotted pair")))))
+                (let Pair1 (shen-parse-expr Str P Len)
+                  (let First (hd Pair1)
+                    (let AfterFirst (hd (tl Pair1))
+                      (let Pair2 (shen-parse-list-tail Str AfterFirst Close Dotted Len)
+                        (let Rest (hd Pair2)
+                          (let AfterRest (hd (tl Pair2))
+                            [[First | Rest] AfterRest])))))))))))
+
+(define shen-parse-list
+  Str Pos Close Dotted Len ->
+  (let P (shen-skip-ws Str Pos Len)
+    (if (>= P Len)
+        (simple-error "unterminated list")
+        (if (= (pos Str P) Close)
+            [[] (+ P 1)]
+            (if (and Dotted (= (pos Str P) (n->string 124)))
+                (let Pair1 (shen-parse-expr Str (+ P 1) Len)
+                  (let Cdr (hd Pair1)
+                    (let After (hd (tl Pair1))
+                      (if (= (pos Str After) Close)
+                          [[[] | Cdr] (+ After 1)]
+                          (simple-error "unterminated dotted pair")))))
+                (let Pair1 (shen-parse-expr Str P Len)
+                  (let First (hd Pair1)
+                    (let AfterFirst (hd (tl Pair1))
+                      (let Pair2 (shen-parse-list-tail Str AfterFirst Close Dotted Len)
+                        (let Rest (hd Pair2)
+                          (let AfterRest (hd (tl Pair2))
+                            [[First | Rest] AfterRest])))))))))))
+
+\* shen-parse-string: shared with the .kl reader via parse-string. *\
+
+\* shen-parse-sig: parse a { ... } type signature.  Real Shen groups it as a
+   single sublist WITH the braces retained as atoms: { A --> B } reads as
+   ({ A --> B }) (head {, tail ... }), which is what shen.typetable /
+   shen.find-arities check for (= { (hd ...)).  Returns [Sig NextPos]. *\
+
+(define shen-parse-sig
+  Str Pos Len ->
+  (let P (shen-skip-ws Str Pos Len)
+    (if (>= P Len)
+        (simple-error "unterminated type signature")
+        (if (= (pos Str P) (n->string 125))
+            [[(intern "{") (intern "}")] (+ P 1)]
+            (let Pair1 (shen-parse-expr Str P Len)
+              (let First (hd Pair1)
+                (let AfterFirst (hd (tl Pair1))
+                  (let Pair2 (shen-parse-sig-tail Str AfterFirst Len)
+                    (let Rest (hd Pair2)
+                      (let AfterRest (hd (tl Pair2))
+                        [[(intern "{") First | Rest] AfterRest]))))))))))
+
+(define shen-parse-sig-tail
+  Str Pos Len ->
+  (let P (shen-skip-ws Str Pos Len)
+    (if (>= P Len)
+        (simple-error "unterminated type signature")
+        (if (= (pos Str P) (n->string 125))
+            [[(intern "}")] (+ P 1)]
+            (let Pair1 (shen-parse-expr Str P Len)
+              (let First (hd Pair1)
+                (let AfterFirst (hd (tl Pair1))
+                  (let Pair2 (shen-parse-sig-tail Str AfterFirst Len)
+                    (let RestContent (hd Pair2)
+                      (let AfterRest (hd (tl Pair2))
+                        [[First | RestContent] AfterRest]))))))))))
+
+\* shen-parse-expr: parse one s-expression, returning [Expr NextPos].  { ... }
+   groups a type signature via shen-parse-sig (braces retained). *\
+
+(define shen-parse-expr
+  Str Pos Len ->
+  (let P (shen-skip-ws Str Pos Len)
+    (if (>= P Len)
+        (simple-error "unexpected end of input")
+        (let Ch (pos Str P)
+          (if (= Ch "(")
+              (shen-parse-list Str (+ P 1) ")" false Len)
+              (if (= Ch (n->string 91))
+                  (shen-parse-list Str (+ P 1) (n->string 93) true Len)
+                  (if (= Ch (n->string 123))
+                      (shen-parse-sig Str (+ P 1) Len)
+                      (if (or (= Ch ")")
+                              (= Ch (n->string 93))
+                              (= Ch (n->string 125)))
+                          (simple-error (cn "unexpected " Ch))
+                          (if (= Ch (n->string 34))
+                              (parse-string Str (+ P 1) Len)
+                              (shen-parse-atom Str P Len))))))))))
+
+(define shen-parse-exprs
+  Str Pos Len ->
+  (let P (shen-skip-ws Str Pos Len)
+    (if (>= P Len)
+        [[] P]
+        (let Pair1 (shen-parse-expr Str P Len)
+          (let Expr (hd Pair1)
+            (let NewPos (hd (tl Pair1))
+              (let Pair2 (shen-parse-exprs Str NewPos Len)
+                (let Rest (hd Pair2)
+                  (let FinalPos (hd (tl Pair2))
+                    [[Expr | Rest] FinalPos])))))))))
+
+(define shen-read-file
+  Path -> (let Str (read-file-as-string Path)
+            (let Len (strlen Str)
+              (hd (shen-parse-exprs Str 0 Len)))))
