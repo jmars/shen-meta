@@ -78,6 +78,7 @@ static char *nursery_end;
 static uintptr_t *space;   /* 0=free, 1=semi-space-1, 2=semi-space-2 */
 static uintptr_t *gc_link;    /* Cheney queue links */
 static uintptr_t *type_page; /* OBJECT / CONTINUED */
+static uint8_t   *page_queued; /* 1 iff page currently in the Cheney queue (dedup) */
 
 static uintptr_t  queue_head;
 static uintptr_t  queue_tail;
@@ -146,9 +147,63 @@ void gc_check_closure(Value *cl, const char *where) {
     }
     if (space[pg] != NURSERY && space[pg] != current_space) {
         fprintf(GC_LOG, "GC-CHECK %s: code ptr=%p page=%lu space=%lu "
-                "(expected NURSERY=%d or current=%lu)\n",
+                "(expected NURSERY=%d or current=%lu) cl_env=%p env_len=%d code_len=%d\n",
                 where, (void *)code, (unsigned long)pg,
-                (unsigned long)space[pg], NURSERY, (unsigned long)current_space);
+                (unsigned long)space[pg], NURSERY, (unsigned long)current_space,
+                (void *)cl->lambda.env, cl->lambda.env_len, cl->lambda.code_len);
+        /* Decisive: does the SAME stale code pointer appear in the C global_table?
+           If yes, the global-table typed-walker scan failed to evacuate it during
+           the last full collect (a real GC bug in namespace-2 tracing). If no, the
+           stale closure is a transient local copy (C-stack / env) not the table's. */
+        if (global_table_len > 0) {
+            GlobalEntry *gt = global_table;
+            int gn = global_table_len;
+            int found = 0;
+            /* The interp's global-table (namespace 2) is a nested Shen cons
+               list [[name, closure] ...] stored under gt["global-table"].closure.
+               Recursively walk cons structures to find the failing .code. */
+            #define WALK_SEARCH_MAX 200000
+            int stack = 0;
+            Value walk[256];
+            for (int gi = 0; gi < gn && !found; gi++) {
+                if (stack < 256) walk[stack++] = gt[gi].closure;
+                int visited = 0;
+                while (stack > 0 && !found && visited < WALK_SEARCH_MAX) {
+                    Value v = walk[--stack];
+                    visited++;
+                    if (v.tag == VAL_LAMBDA && v.lambda.code == code) {
+                        uintptr_t gpg = GCP_to_PAGE(v.lambda.code);
+                        fprintf(GC_LOG, "  GC-CHECK table-hit: global[%d] name='%s' code=%p "
+                                "page=%lu space=%lu (nested closure, matches stale code)\n",
+                                gi, gt[gi].name ? gt[gi].name : "?", (void *)v.lambda.code,
+                                (unsigned long)gpg,
+                                (unsigned long)(gpg >= firstheappage && gpg <= lastheappage
+                                                ? space[gpg] : 0));
+                        found = 1;
+                    } else if (v.tag == VAL_CONS) {
+                        if (stack + 2 <= 256) {
+                            walk[stack++] = *v.cons.car;
+                            walk[stack++] = *v.cons.cdr;
+                        }
+                    }
+                }
+            }
+            if (!found)
+                fprintf(GC_LOG, "  GC-CHECK table-miss: stale code=%p NOT in any "
+                        "global_table closure (transient local copy)\n", (void *)code);
+        }
+        /* Dump the raw instruction bytes so the failing closure can be
+           identified even though the code page is dead space. */
+        int n = cl->lambda.code_len;
+        if (n > 0 && n <= 64) {
+            fprintf(GC_LOG, "  GC-CHECK code bytes:");
+            unsigned char *cb = (unsigned char *)code;
+            for (int k = 0; k < n; k++) {
+                if (k % 8 == 0) fprintf(GC_LOG, "\n    ");
+                fprintf(GC_LOG, " %02x", cb[k]);
+            }
+            fprintf(GC_LOG, "\n");
+        }
         return;
     }
     uintptr_t chdr = ((uintptr_t *)code)[-1];
@@ -207,6 +262,7 @@ static char      *raw_heap_start;
 static uintptr_t *raw_space_ptr;
 static uintptr_t *raw_link_ptr;
 static uintptr_t *raw_type_ptr;
+static uint8_t   *raw_page_queued_ptr;
 static size_t     heap_mmap_size;   /* actual mmap size of the heap */
 
 /* ---- precise-root shadow stack (Phase 4a) ------------------------- */
@@ -336,6 +392,13 @@ static uintptr_t next_page(uintptr_t page) {
 }
 
 static void queue(uintptr_t page) {
+    /* Dedup: a page must never be enqueued twice.  queue(P) when P is already
+     * in the queue clobbers gc_link[P]=0, truncating the traversal and losing
+     * every page that follows P.  Duplicate enqueues happen when gc_move's
+     * "already to-space" branch (in_scavenge) re-queues a page already queued
+     * by another reference to an object on it. */
+    if (page_queued[page]) return;
+    page_queued[page] = 1;
     if (queue_head != 0) {
         gc_link[queue_tail] = page;
         gc_link[page] = 0;
@@ -345,6 +408,12 @@ static void queue(uintptr_t page) {
         gc_link[page] = 0;
         queue_tail = page;
     }
+}
+
+static void queue_reset(void) {
+    queue_head = 0;
+    queue_tail = 0;
+    memset(page_queued + firstheappage, 0, (lastheappage - firstheappage + 1) * sizeof(uint8_t));
 }
 
 /* ---- typed scanning helpers (called from collect) ------------------ */
@@ -413,7 +482,7 @@ static void collect(const char *trigger) {
      * a nursery object that was stored via global_set between collections. */
     {
         in_scavenge = 1;
-        queue_head = 0;
+        queue_reset();
         gc_scan_roots();
 
         /* Scan non-dirty globals explicitly: every global-table entry
@@ -501,7 +570,7 @@ static void collect(const char *trigger) {
     /* Swap semi-spaces */
     next_space = (current_space == 1) ? 2 : 1;
     allocatedpages = 0;
-    queue_head = 0;
+    queue_reset();
     gc_dirty_vectors_clear();
     gc_dirty_globals_clear();
 
@@ -835,7 +904,7 @@ static void collect_nursery(const char *trigger) {
     }
 
     /* Reset the Cheney queue */
-    queue_head = 0;
+    queue_reset();
 
     /* ---- root set ---- */
 
@@ -1020,20 +1089,23 @@ static int grow_heap(uintptr_t pages_needed) {
         uintptr_t *new_space = realloc(raw_space_ptr, new_heappages * sizeof(uintptr_t));
         uintptr_t *new_link  = realloc(raw_link_ptr,  new_heappages * sizeof(uintptr_t));
         uintptr_t *new_type  = realloc(raw_type_ptr,  new_heappages * sizeof(uintptr_t));
-        if (!new_space || !new_link || !new_type) return -1;
+        uint8_t   *new_pq    = realloc(raw_page_queued_ptr, new_heappages * sizeof(uint8_t));
+        if (!new_space || !new_link || !new_type || !new_pq) return -1;
 
         raw_space_ptr = new_space;
         raw_link_ptr  = new_link;
         raw_type_ptr  = new_type;
+        raw_page_queued_ptr = new_pq;
         space  = new_space - firstheappage;
         gc_link = new_link  - firstheappage;
         type_page = new_type  - firstheappage;
+        page_queued = new_pq - firstheappage;
 
         uintptr_t old_last = lastheappage;
         lastheappage = firstheappage + new_heappages - 1;
         heappages = new_heappages;
         for (uintptr_t i = old_last + 1; i <= lastheappage; i++) {
-            space[i] = 0; gc_link[i] = 0; type_page[i] = 0;
+            space[i] = 0; gc_link[i] = 0; type_page[i] = 0; page_queued[i] = 0;
         }
         return 0;
     }
@@ -1262,8 +1334,9 @@ void gc_init(uintptr_t heap_size) {
     uintptr_t *space_ptr = calloc(page_count, sizeof(uintptr_t));
     uintptr_t *link_ptr  = calloc(page_count, sizeof(uintptr_t));
     uintptr_t *type_ptr  = calloc(page_count, sizeof(uintptr_t));
+    uint8_t   *pq_ptr    = calloc(page_count, sizeof(uint8_t));
 
-    if (!space_ptr || !link_ptr || !type_ptr) {
+    if (!space_ptr || !link_ptr || !type_ptr || !pq_ptr) {
         fprintf(stderr, "gc_init: metadata alloc failed\n");
         exit(1);
     }
@@ -1272,15 +1345,18 @@ void gc_init(uintptr_t heap_size) {
     space      = space_ptr - firstheappage;
     gc_link    = link_ptr  - firstheappage;
     type_page  = type_ptr  - firstheappage;
+    page_queued = pq_ptr   - firstheappage;
 
     raw_space_ptr = space_ptr;
     raw_link_ptr  = link_ptr;
     raw_type_ptr  = type_ptr;
+    raw_page_queued_ptr = pq_ptr;
 
     for (i = firstheappage; i <= lastheappage; i++) {
         space[i] = 0;
         gc_link[i]  = 0;
         type_page[i] = 0;
+        page_queued[i] = 0;
     }
 
     /* Carve out the nursery region at the start of the heap.

@@ -198,10 +198,13 @@ Value val_nil(void) {
 }
 Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
     /* env arrays are GC-allocated via gcalloc so GC traces captured
-       Values when the closure is reachable (e.g. via global_table). */
+       Values when the closure is reachable (e.g. via global_table).
+       code/env are rooted across GC_VALUE_ARRAY; v is a local NOT on
+       the shadow stack, so v.lambda.code must be set AFTER allocating
+       (GC may evacuate the code array; the rooted code param is updated
+       but a stale v.lambda.code set before GC would not be). */
     Value v; memset(&v, 0, sizeof(v));
     v.tag = VAL_LAMBDA;
-    v.lambda.code = code; v.lambda.code_len = code_len;
     if (env_len > 0) {
         gc_root_push_ptr((void**)&code);   /* root code across GC_VALUE_ARRAY */
         gc_root_push_ptr((void**)&env);    /* root env across GC_VALUE_ARRAY */
@@ -211,6 +214,9 @@ Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
         gc_root_pop();  /* env */
         gc_root_pop();  /* code */
     } else { v.lambda.env = NULL; v.lambda.env_len = 0; }
+    /* Set code AFTER env allocation — v is not rooted so any pre-GC
+       assignment would hold a stale interior pointer. */
+    v.lambda.code = code; v.lambda.code_len = code_len;
     return v;
 }
 #define check_closure(cl, where) gc_check_closure(&(cl), where)
@@ -310,9 +316,14 @@ static void va_init(ValueArray *a) {
 static void va_push(ValueArray *a, Value v) {
     if (a->len >= a->cap) {
         int new_cap = a->cap * 2;
+        /* Root v across GC_VALUE_ARRAY — v may carry interior pointers
+           (lambda.code/env, cons.car/cdr, str.data, ...) that a GC fired
+           during the grow would otherwise leave stale in this local. */
+        gc_root_push_value(&v);
         Value *new_data = GC_VALUE_ARRAY(new_cap);
         memcpy(new_data, a->data, a->len * sizeof(Value));
         a->data = new_data; a->cap = new_cap;
+        gc_root_pop();
     }
     a->data[a->len++] = v;
 }
@@ -1069,7 +1080,6 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
                to the enclosing catch frame, not back to this one. */
             vm_catch_chain = cf.parent;
             Value err = cf.error_val;
-            Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
             int env_len = handler.lambda.env_len;
             int new_env_len = env_len + 1;
             gc_root_push_value(&err);        /* S3: root err (copy of cf.error_val) across GC_VALUE_ARRAY */
@@ -1077,6 +1087,10 @@ static int exec_primitive(const char *name, Value *acc, ValueArray *stack) {
             if (env_len > 0)
                 memcpy(henv, handler.lambda.env, env_len * sizeof(Value));
             henv[env_len] = err;
+            /* Capture lambda.code AFTER allocating (GC may evacuate it) —
+               handler is a volatile root so handler.lambda.code is updated
+               in-place by GC, but a separately-captured local is not. */
+            Instr *hc = handler.lambda.code; int hl = handler.lambda.code_len;
             gc_root_pop();  /* err */
             /* Pop roots BEFORE calling handler — if handler's vm_exec_env
                raises a simple-error (longjmps to cf.parent), the pops
