@@ -26,6 +26,8 @@ and the GC design work.
   collector.
 - **`moving-gc-validation.md`** — the advisor validation of the GC plan
   (hazards, full line references).
+- **`debugging.md`** — GC debugging tooling (opt-in flags, build/run), the open
+  precise-root-miss investigation, and deferred GC tooling items.
 
 ## Source of truth
 

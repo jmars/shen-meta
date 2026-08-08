@@ -93,6 +93,87 @@ long gc_preemptive_scavenge_count = 0;
 long gc_reactive_scavenge_count  = 0;
 long gc_full_collect_count       = 0;
 
+/* ---- opt-in observability tooling (--gc-verbose / --gc-check-closures /
+ * ---- --gc-dump-roots argv flags).  Pure diagnostics; NO GC semantics change. */
+static long gc_collect_seq    = 0;   /* per-collection sequence (nursery+fits) */
+static int  gc_verbose        = 0;
+static int  gc_check_closures = 0;
+static int  gc_dump_roots     = 0;
+
+void gc_set_verbose(int on)        { gc_verbose        = on; }
+void gc_set_check_closures(int on) { gc_check_closures = on; }
+void gc_set_dump_roots(int on)     { gc_dump_roots     = on; }
+
+/* gc_check_closure: validate a closure's code/env headers are on live pages
+ * with the expected type tags.  No-op unless gc_check_closures is set.  Uses
+ * the static page/space/current_space state directly (all in this TU). */
+void gc_check_closure(Value *cl, const char *where) {
+    if (!gc_check_closures) return;
+    if (!cl) { fprintf(stderr, "GC-CHECK %s: NULL Value pointer\n", where); return; }
+    if (cl->tag != VAL_LAMBDA) {
+        fprintf(stderr, "GC-CHECK %s: tag=%d (not VAL_LAMBDA=%d)\n",
+                where, (int)cl->tag, (int)VAL_LAMBDA);
+        return;
+    }
+    Instr *code = cl->lambda.code;
+    if (code == NULL) {
+        fprintf(stderr, "GC-CHECK %s: lambda.code == NULL\n", where);
+        return;
+    }
+    uintptr_t pg = GCP_to_PAGE(code);
+    if (pg < firstheappage || pg > lastheappage) {
+        fprintf(stderr, "GC-CHECK %s: code ptr=%p page=%lu out of heap [%lu,%lu]\n",
+                where, (void *)code, (unsigned long)pg,
+                (unsigned long)firstheappage, (unsigned long)lastheappage);
+        return;
+    }
+    if (space[pg] != NURSERY && space[pg] != current_space) {
+        fprintf(stderr, "GC-CHECK %s: code ptr=%p page=%lu space=%lu "
+                "(expected NURSERY=%d or current=%lu)\n",
+                where, (void *)code, (unsigned long)pg,
+                (unsigned long)space[pg], NURSERY, (unsigned long)current_space);
+        return;
+    }
+    uintptr_t chdr = ((uintptr_t *)code)[-1];
+    if (FORWARDED(chdr)) {
+        fprintf(stderr, "GC-CHECK %s: code ptr=%p header FORWARDED (fwd=0x%lx)\n",
+                where, (void *)code, (unsigned long)chdr);
+        return;
+    }
+    int cty = HEADER_TYPE(chdr);
+    if (cty != GC_TYPE_INSTR_ARRAY) {
+        fprintf(stderr, "GC-CHECK %s: code ptr=%p header type=%d "
+                "(expected GC_TYPE_INSTR_ARRAY=%d)\n",
+                where, (void *)code, cty, GC_TYPE_INSTR_ARRAY);
+        return;
+    }
+    if (cl->lambda.env != NULL) {
+        uintptr_t epg = GCP_to_PAGE(cl->lambda.env);
+        if (epg < firstheappage || epg > lastheappage) {
+            fprintf(stderr, "GC-CHECK %s: env ptr=%p page=%lu out of heap "
+                    "[%lu,%lu]\n", where, (void *)cl->lambda.env,
+                    (unsigned long)epg, (unsigned long)firstheappage,
+                    (unsigned long)lastheappage);
+            return;
+        }
+        if (space[epg] != NURSERY && space[epg] != current_space) {
+            fprintf(stderr, "GC-CHECK %s: env ptr=%p page=%lu space=%lu "
+                    "(expected NURSERY=%d or current=%lu)\n",
+                    where, (void *)cl->lambda.env, (unsigned long)epg,
+                    (unsigned long)space[epg], NURSERY, (unsigned long)current_space);
+            return;
+        }
+        uintptr_t ehdr = ((uintptr_t *)cl->lambda.env)[-1];
+        int ety = HEADER_TYPE(ehdr);
+        if (ety != GC_TYPE_VALUE_ARRAY) {
+            fprintf(stderr, "GC-CHECK %s: env ptr=%p header type=%d "
+                    "(expected GC_TYPE_VALUE_ARRAY=%d)\n",
+                    where, (void *)cl->lambda.env, ety, GC_TYPE_VALUE_ARRAY);
+            return;
+        }
+    }
+}
+
 /* Per-allocation-class histogram, indexed by GC type tag (see gc.h).
  * Counts whole allocation requests through the public entry points
  * (gc_alloc / gc_alloc_oldgen / gc_alloc_atomic).  Raw hooks for a future,
@@ -223,8 +304,8 @@ void gc_dirty_globals_clear(void) {
 
 /* ---- forward declarations ----------------------------------------- */
 
-static void  collect(void);
-static void  collect_nursery(void);
+static void  collect(const char *trigger);
+static void  collect_nursery(const char *trigger);
 static void  allocatepage(uintptr_t pages);
 static void *gcalloc_internal(size_t bytes, int type_tag);
 static void *move_internal(uintptr_t *cp, int type_tag);
@@ -262,7 +343,7 @@ static void evac_instr(Instr *in) {
 
 /* ---- collector ---------------------------------------------------- */
 
-static void collect(void) {
+static void collect(const char *trigger) {
     sigset_t   old_sig_set;
 
     /* Block SIGALRM during collection and restore the prior mask afterwards:
@@ -281,6 +362,11 @@ static void collect(void) {
     }
 
     gc_full_collect_count++;
+    gc_collect_seq++;
+    if (gc_verbose) {
+        fprintf(stderr, "[GC FULL #%ld] trigger=%s shadow_depth=%zu live_pages=%lu\n",
+                gc_collect_seq, trigger, shadow_len, (unsigned long)allocatedpages);
+    }
 
     /* Finalize any partial page */
     if (freewords != 0) {
@@ -389,6 +475,29 @@ static void collect(void) {
  * gc_move→move_internal.  The Cheney drain recursively scans all
  * reachable objects. */
 static void gc_scan_roots(void) {
+    /* 0. Root-set dump (opt-in --gc-dump-roots) */
+    if (gc_dump_roots) {
+        fprintf(stderr, "[GC ROOTS %s #%ld] shadow_depth=%zu\n",
+                in_scavenge ? "NURSERY" : "FULL", gc_collect_seq, shadow_len);
+        for (size_t i = 0; i < shadow_len; i++) {
+            GcRoot *r = &shadow_stack[i];
+            fprintf(stderr, "  [%zu] kind=%d slot=%p", i, (int)r->kind, r->slot);
+            if (r->kind == ROOT_PTR) {
+                void *p = *(void **)r->slot;
+                if (p) {
+                    uintptr_t pg = GCP_to_PAGE(p);
+                    int ty = (pg >= firstheappage && pg <= lastheappage)
+                             ? HEADER_TYPE(((uintptr_t *)p)[-1]) : -1;
+                    fprintf(stderr, " -> obj=%p page=%lu hdr_type=%d",
+                            p, (unsigned long)pg, ty);
+                } else {
+                    fprintf(stderr, " -> obj=NULL");
+                }
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+
     /* 1. Shadow stack entries */
     for (size_t i = 0; i < shadow_len; i++) {
         GcRoot *r = &shadow_stack[i];
@@ -478,7 +587,7 @@ static void gc_scan_roots(void) {
  * After the Cheney drain, ALL nursery pages are reset to NURSERY and
  * the bump cursor is rewound to the nursery start — the nursery is
  * fully reusable every cycle. */
-static void collect_nursery(void) {
+static void collect_nursery(const char *trigger) {
     sigset_t   old_sig_set;
 
     /* Guard against recursive entry */
@@ -507,6 +616,11 @@ static void collect_nursery(void) {
 
     /* Count this as a real scavenge. */
     gc_nursery_scavenge_count++;
+    gc_collect_seq++;
+    if (gc_verbose) {
+        fprintf(stderr, "[GC NURSERY #%ld] trigger=%s shadow_depth=%zu nursery_free=%zu\n",
+                gc_collect_seq, trigger, shadow_len, (size_t)(nursery_end - nursery_cur));
+    }
 
     /* Reset the Cheney queue */
     queue_head = 0;
@@ -731,7 +845,7 @@ retry:
     if (current_space == next_space &&  /* not mid-collection */
         !in_scavenge &&                /* not during nursery scavenge */
         allocatedpages + pages >= oldgen_collect_lastresort()) {
-        collect();
+        collect("LASTRESORT");
         if (allocatedpages + pages >= oldgen_collect_lastresort()) {
             if (!retried && grow_heap(pages) == 0) {
                 retried = 1;
@@ -1000,7 +1114,7 @@ void *gc_alloc(size_t bytes, int type_tag) {
          * This decouples the scavenge trigger from the reactive path. */
         if (!in_scavenge &&
             (size_t)(nursery_end - nursery_cur) <= NURSERY_SCAVENGE_FREE_LOWATER) {
-            collect_nursery();
+            collect_nursery("PREEMPTIVE");
             nursery_tried = 1;
             gc_preemptive_scavenge_count++;
         }
@@ -1056,7 +1170,7 @@ void *gc_alloc(size_t bytes, int type_tag) {
 
         /* Nursery full — collect and retry once. */
         if (!nursery_tried) {
-            collect_nursery();
+            collect_nursery("REACTIVE");
             nursery_tried = 1;
             gc_reactive_scavenge_count++;
             goto nursery_retry;
@@ -1071,7 +1185,7 @@ void *gc_alloc(size_t bytes, int type_tag) {
      * last resort, but pre-emptive collection here improves throughput
      * and keeps the heap from filling to the brink. */
     if (allocatedpages > 0 && allocatedpages > oldgen_collect_threshold() && !in_scavenge)
-        collect();
+        collect("THRESHOLD");
 
     return gcalloc_internal(bytes, type_tag);
 }
@@ -1088,7 +1202,7 @@ void *gc_alloc_oldgen(size_t bytes, int type_tag) {
      * entirely.  Used for large objects (frame_stack, big arrays) that
      * would never fit in the nursery and would fragment it. */
     if (allocatedpages > 0 && allocatedpages > oldgen_collect_threshold() && !in_scavenge)
-        collect();
+        collect("ALLOC");
 
     return gcalloc_internal(bytes, type_tag);
 }

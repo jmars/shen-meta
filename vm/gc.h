@@ -77,6 +77,17 @@ void gc_dirty_vectors_clear(void);
  * (post-dedup).  Read by gc_nursery_tests() to assert the barrier fires. */
 extern long gc_dirty_vectors_fired;
 
+/* ---- opt-in observability tooling (--gc-verbose / --gc-check-closures /
+ * ---- --gc-dump-roots argv flags).  Pure diagnostics; NO GC semantics change. */
+void gc_set_verbose(int on);
+void gc_set_check_closures(int on);
+void gc_set_dump_roots(int on);
+
+/* Validate a closure value's code/env headers for live-page + correct
+ * type-tag.  No-op unless gc_set_check_closures(1) was called.  `where`
+ * labels the call site (e.g. "APPLY" / "APPTERM"). */
+void gc_check_closure(Value *cl, const char *where);
+
 /* Write-barrier remembered set: dirty globals bitset (site 2).
  * Marked by global_set; consulted during nursery scavenges to skip
  * non-dirty globals.  Cleared at scavenge-end and full-collect start. */

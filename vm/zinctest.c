@@ -1254,6 +1254,9 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
             trace_add(argv[++i]);
         }
+        if (strcmp(argv[i], "--gc-verbose") == 0)          gc_set_verbose(1);
+        if (strcmp(argv[i], "--gc-check-closures") == 0)   gc_set_check_closures(1);
+        if (strcmp(argv[i], "--gc-dump-roots") == 0)       gc_set_dump_roots(1);
     }
 
     if (argc > 1) {
@@ -1658,6 +1661,101 @@ int main(int argc, char **argv) {
                 }
                 fflush(stdout);
                 }
+
+#ifdef ZINC_TEST_OS_LOAD
+                /* ---- OS-load probes: determine WHERE corruption first occurs. ---- */
+                {
+                    const char *path_str = "shen/probe-kl/test-add.kl";
+                    long path_len = (long)strlen(path_str);
+
+                    /* Probe 1: strlen alone on the path (1-arg, direct). */
+                    printf("\n--- OS-load Probe 1: strlen of path ---\n"); fflush(stdout);
+                    {
+                        Value p1path = val_string(path_str, path_len);
+                        Value s1 = call_bundled_1("strlen", p1path);
+                        printf("  strlen result: "); print_value(s1); printf(" (tag=%d)\n", s1.tag); fflush(stdout);
+                        if (s1.tag == VAL_NUMBER && s1.number == path_len)
+                            printf("  Probe 1 PASS: strlen = %ld\n", path_len);
+                        else
+                            printf("  Probe 1 FAIL: expected %ld\n", path_len);
+                        /* Second allocation-heavy call: corruption often shows here. */
+                        Value s1b = call_bundled_1("strlen", p1path);
+                        printf("  strlen (2nd call): "); print_value(s1b); printf(" (tag=%d)\n", s1b.tag); fflush(stdout);
+                        if (s1b.tag == VAL_NUMBER && s1b.number == path_len)
+                            printf("  Probe 1b PASS: strlen survives 2nd call (%ld)\n", path_len);
+                        else
+                            printf("  Probe 1b FAIL: expected %ld on 2nd call\n", path_len);
+                        fflush(stdout);
+                    }
+
+                    /* Probe 2: read-file-as-string on the path. Expect file contents. */
+                    printf("\n--- OS-load Probe 2: read-file-as-string of path ---\n"); fflush(stdout);
+                    {
+                        Value p2path = val_string(path_str, path_len);
+                        Value c2 = call_bundled_1("read-file-as-string", p2path);
+                        printf("  read-file-as-string result: "); print_value(c2); printf(" (tag=%d)\n", c2.tag); fflush(stdout);
+                        if (c2.tag == VAL_STRING)
+                            printf("  Probe 2 PASS: string of len %d\n", c2.str.len);
+                        else
+                            printf("  Probe 2 FAIL: expected VAL_STRING, got tag=%d\n", c2.tag);
+                        fflush(stdout);
+                    }
+
+                    /* Probe 3: read-file-raw on the path. Expect list of 2 defun forms. */
+                    printf("\n--- OS-load Probe 3: read-file-raw of path ---\n"); fflush(stdout);
+                    {
+                        Value p3path = val_string(path_str, path_len);
+                        Value c3 = call_bundled_1("read-file-raw", p3path);
+                        printf("  read-file-raw result: "); print_value(c3); printf(" (tag=%d)\n", c3.tag); fflush(stdout);
+                        if (c3.tag == VAL_CONS)
+                            printf("  Probe 3 PASS: read-file-raw returned a non-empty list\n");
+                        else
+                            printf("  Probe 3 FAIL: expected a list (VAL_CONS), got tag=%d\n", c3.tag);
+                        fflush(stdout);
+                    }
+
+                    /* Probe 4: interp-eval-all on a fresh read-file-raw result. Expect `loaded`. */
+                    printf("\n--- OS-load Probe 4: interp-eval-all of read-file-raw forms ---\n"); fflush(stdout);
+                    {
+                        Value p4path = val_string(path_str, path_len);
+                        Value forms = call_bundled_1("read-file-raw", p4path);
+                        printf("  forms tag=%d\n", forms.tag); fflush(stdout);
+                        Value c4 = call_bundled_1("interp-eval-all", forms);
+                        printf("  interp-eval-all result: "); print_value(c4); printf(" (tag=%d)\n", c4.tag); fflush(stdout);
+                        if (c4.tag == VAL_SYMBOL && strcmp(c4.sym.name, "loaded") == 0)
+                            printf("  Probe 4 PASS: interp-eval-all returned `loaded`\n");
+                        else
+                            printf("  Probe 4 FAIL: expected symbol `loaded`, got tag=%d\n", c4.tag);
+                        fflush(stdout);
+                    }
+                }
+
+                printf("\n--- Test OS-load probe: interp-load-raw of shen/probe-kl/test-add.kl ---\n"); fflush(stdout);
+                {
+                    const char *path_str = "shen/probe-kl/test-add.kl";
+                    Value path = val_string(path_str, (long)strlen(path_str));
+                    printf("  Calling interp-load-raw on \"%s\" (len=%ld)...\n",
+                           path_str, (long)strlen(path_str)); fflush(stdout);
+                    Value load_res = call_bundled_1("interp-load-raw", path);
+                    printf("  interp-load-raw result: "); print_value(load_res); printf(" (tag=%d)\n", load_res.tag); fflush(stdout);
+                    if (load_res.tag == VAL_SYMBOL && strcmp(load_res.sym.name, "loaded") == 0) {
+                        printf("  OS-load probe PASS: interp-load-raw returned `loaded`\n");
+                    } else {
+                        printf("  OS-load probe FAIL: expected symbol `loaded`, got tag=%d", load_res.tag);
+                        if (load_res.tag == VAL_SYMBOL) printf(" name=%s", load_res.sym.name);
+                        printf("\n");
+                    }
+                    fflush(stdout);
+
+                    /* Verify the loaded closure my-add is usable: (my-add 2 3) → 5.
+                     * pushmark, number 3, number 2, global my-add, apply. */
+                    run_test_timeout("probe-my-add", "(mn[1:n]3n[1:n]2g[6:s]my-addp)", 0, 30);
+
+                    /* Verify my-id: (my-id 42) → 42. pushmark, number 42, global my-id, apply. */
+                    run_test_timeout("probe-my-id", "(mn[2:n]42g[5:s]my-idp)", 0, 30);
+                    fflush(stdout);
+                }
+#endif
 
             printf("\nSelf-hosting proven: The C VM loaded %d closures compiled by\n", global_table_len);
             printf("the metacircular Shen ZINC interpreter and executed them correctly.\n");

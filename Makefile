@@ -1,4 +1,4 @@
-.PHONY: all vm test test-debug debug bundle bundle-full pipeline interp setup clean gate
+.PHONY: all vm test test-debug debug bundle bundle-full pipeline interp setup clean gate gcdebug
 
 SHEN   = vendor/shen-scheme/bin/shen-scheme
 CFLAGS = -Wall -Wextra -O2 -I vm
@@ -53,6 +53,21 @@ test: zinctest
 
 test-debug: zinctest-debug
 	./zinctest-debug
+
+# GC debugging tooling helper.  Builds the existing zinctest-debug target
+# (-O0 -g -DZINCVM_DEBUG) and lists the opt-in observability flags that
+# zinctest/zincvm accept at runtime.  No new compile target; no semantics
+# change — this is pure per-run diagnostics.
+gcdebug: zinctest-debug
+	@echo ""
+	@echo "GC debug tooling (opt-in argv flags; all write to stderr):"
+	@echo "  --gc-verbose         per-collection stats: [GC NURSERY/FULL #N] trigger/shadow_depth/live/free"
+	@echo "  --gc-check-closures  validate code/env headers on each closure entry (APPLY/APPTERM)"
+	@echo "  --gc-dump-roots      dump the precise-root shadow stack at each collection"
+	@echo "  --trace <name>       (existing) trace a closure's bytecode execution"
+	@echo ""
+	@echo "Example: ./zinctest globals.csexp --gc-verbose --gc-check-closures --gc-dump-roots"
+	@echo "         ./zinctest-debug globals-full.csexp --gc-verbose"
 
 test-asan: zinctest-asan
 	./zinctest-asan

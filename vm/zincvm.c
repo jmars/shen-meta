@@ -213,7 +213,7 @@ Value val_lambda(Instr *code, int code_len, Value *env, int env_len) {
     } else { v.lambda.env = NULL; v.lambda.env_len = 0; }
     return v;
 }
-#define check_closure(cl, where) ((void)0)
+#define check_closure(cl, where) gc_check_closure(&(cl), where)
 /* verify_heap() is now in zincvm.h */
 static Value val_mark(void) {
     Value v; memset(&v, 0, sizeof(v));
@@ -2333,6 +2333,9 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
             trace_add(argv[++i]);
         }
+        if (strcmp(argv[i], "--gc-verbose") == 0)          gc_set_verbose(1);
+        if (strcmp(argv[i], "--gc-check-closures") == 0)   gc_set_check_closures(1);
+        if (strcmp(argv[i], "--gc-dump-roots") == 0)       gc_set_dump_roots(1);
     }
 
     if (argc > 1) {
