@@ -91,11 +91,27 @@ at `APPLY` has `code ptr=... page=<garbage huge number> space=2` — the closure
 object was moved by GC but a C local holding the closure (its `.code` interior
 pointer) was not rooted/updated during the deep recursion.
 
-**Note on Bug 2's `gc_check_closure`:** it fires on `APPLY`/`APPTERM` entry, i.e.
-it validates closure headers when a closure is *called*. It does NOT validate
-the `.code` pointer *before* the corruption is used — but it catches the stale
-pointer at the first call, which is the smoking gun. The tooling is doing its
-job here.
+**Progress (commits `40c6d31`, `de28c3d`, `98f98bb`):**
+- **Root cause of the full-collect stale pointer identified:** a full collect
+  treats the nursery as opaque (`gc_move` leaves nursery objects untouched when
+  `!in_scavenge`), so nursery-resident closures pointing to old-gen Instr arrays
+  were not updated when those arrays were evacuated → stale `.code` into the dead
+  semi-space. **Fixed** with a nursery-promotion pass at the top of `collect()`
+  (scan roots + non-dirty globals with `in_scavenge=1`, Cheney-drain to promote
+  to old-gen before the swap), plus `CallFrame.code` evacuation in the CallFrame
+  scanner. Reviewer-verified sound; no regression.
+- **Fixed a masked compiler bug:** `not` was missing from the bundle (debruijn
+  uses `(not (element? ...))` → `[global not]` → bare symbol → compile failed
+  silently). Added `not` to `os-helpers.shen`.
+- **STILL OPEN:** a residual precise-root-miss remains in the deep defun-compile
+  recursion. The OS-load probe still shows 12 stale-code-pointer GC-CHECK lines
+  (`space=2`) and `unknown op` (trace-sensitive: `\x00` vs `\x04` by traced
+  closure). The `not` fix lets debruijn execute further, but a closure's `.code`
+  is still corrupted mid-compile. The specific unrooted C local is not yet found.
+  Next: trace the exact collection (#51 FULL, THRESHOLD, shadow_depth=70 in the
+  deep recursion) with `--gc-dump-roots` and find which closure's `.code` is
+  left in the dead semi-space during `interp-eval → kl->zinc → normalize →
+  debruijn → zinc-c`.
 
 ### What the GC tooling established (during the hunt)
 
