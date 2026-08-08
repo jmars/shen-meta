@@ -374,6 +374,112 @@ static void collect(const char *trigger) {
         freewords = 0;
     }
 
+    /* ---- Phase 0: promote nursery survivors to old-gen ----
+     * During a full collect with in_scavenge=0, gc_move returns nursery
+     * objects unchanged and nursery pages are never queued for scanning.
+     * So a nursery-resident closure whose .code points to an old-gen Instr
+     * array would keep a stale .code pointer after that array is evacuated.
+     * Promote all live nursery objects to old-gen first (in_scavenge=1,
+     * nursery→old-gen via the existing gc_move path), THEN swap semi-spaces
+     * and run the normal full collect.  After promotion all live objects
+     * are old-gen, so the full collect sees no nursery pointers and
+     * evacuates everything correctly.
+     *
+     * This is NOT a call to collect_nursery() — we skip the side effects
+     * (counter bumps, dirty-vector/globals clears, nursery-page reset,
+     * nursery-cursor rewind).  The full collect will handle those.
+     *
+     * gc_scan_roots() with in_scavenge=1 only scans dirty globals (as an
+     * optimisation for normal nursery scavenges).  For promotion we must
+     * also scan non-dirty globals — a non-dirty global may still reference
+     * a nursery object that was stored via global_set between collections. */
+    {
+        in_scavenge = 1;
+        queue_head = 0;
+        gc_scan_roots();
+
+        /* Scan non-dirty globals explicitly: every global-table entry
+         * must be walked so nursery closures reachable only through
+         * non-dirty globals are also promoted. */
+        if (reg_global_table && reg_global_table_len) {
+            GlobalEntry *gt = (GlobalEntry *)reg_global_table;
+            int n = *reg_global_table_len;
+            for (int i = 0; i < n; i++) {
+                if (!gc_dirty_globals_test(i))
+                    gc_scan_value(&gt[i].closure);
+            }
+        }
+
+        /* Cheney drain: same pattern as collect_nursery */
+        while (queue_head != 0) {
+            uintptr_t qpg  = queue_head;
+            uintptr_t *cp  = PAGE_to_GCP(qpg);
+
+            while (GCP_to_PAGE(cp) == qpg && cp != freep) {
+                uintptr_t hw = HEADER_WORDS(*cp);
+                int ty = HEADER_TYPE(*cp);
+
+                if (hw == 0) break;
+                if (ty < 0 || ty > GC_TYPE_CALLFRAME_ARRAY) break;
+                uintptr_t *body = cp + 1;
+
+                switch (ty) {
+                case 0: /* GC_TYPE_RAW */ break;
+
+                case 1: /* GC_TYPE_VALUE */
+                    gc_scan_value((Value *)body);
+                    break;
+
+                case 2: { /* GC_TYPE_VALUE_ARRAY */
+                    uintptr_t body_bytes = (hw - 1) * WORDBYTES;
+                    int count = (int)(body_bytes / sizeof(Value));
+                    Value *arr = (Value *)body;
+                    for (int j = 0; j < count; j++)
+                        gc_scan_value(&arr[j]);
+                    break;
+                }
+
+                case 3: { /* GC_TYPE_INSTR_ARRAY */
+                    uintptr_t body_bytes = (hw - 1) * WORDBYTES;
+                    int count = (int)(body_bytes / sizeof(Instr));
+                    Instr *arr = (Instr *)body;
+                    for (int j = 0; j < count; j++)
+                        evac_instr(&arr[j]);
+                    break;
+                }
+
+                case 4: { /* GC_TYPE_CALLFRAME_ARRAY */
+                    uintptr_t body_bytes = (hw - 1) * WORDBYTES;
+                    int count = (int)(body_bytes / sizeof(CallFrame));
+                    CallFrame *arr = (CallFrame *)body;
+                    for (int j = 0; j < count; j++) {
+                        gc_evacuate((void **)&arr[j].code);
+                        gc_evacuate((void **)&arr[j].env);
+                        gc_evacuate((void **)&arr[j].stack.data);
+                    }
+                    break;
+                }
+
+                default: break;
+                }
+
+                cp += hw;
+            }
+            queue_head = gc_link[queue_head];
+        }
+
+        /* Promotion allocated in old-gen; finalise any partial page so the
+         * full collect's gcalloc_internal starts from a clean slate in
+         * to-space rather than consuming residual freewords on a from-space
+         * page. */
+        if (freewords != 0) {
+            *freep = MAKE_HEADER(freewords, 0);
+            freewords = 0;
+        }
+
+        in_scavenge = 0;
+    }
+
     /* Swap semi-spaces */
     next_space = (current_space == 1) ? 2 : 1;
     allocatedpages = 0;
@@ -437,6 +543,7 @@ static void collect(const char *trigger) {
                 int count = (int)(body_bytes / sizeof(CallFrame));
                 CallFrame *arr = (CallFrame *)body;
                 for (int j = 0; j < count; j++) {
+                    gc_evacuate((void **)&arr[j].code);
                     gc_evacuate((void **)&arr[j].env);
                     gc_evacuate((void **)&arr[j].stack.data);
                 }
@@ -698,6 +805,7 @@ static void collect_nursery(const char *trigger) {
                 int count = (int)(body_bytes / sizeof(CallFrame));
                 CallFrame *arr = (CallFrame *)body;
                 for (int j = 0; j < count; j++) {
+                    gc_evacuate((void **)&arr[j].code);
                     gc_evacuate((void **)&arr[j].env);
                     gc_evacuate((void **)&arr[j].stack.data);
                 }

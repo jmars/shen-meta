@@ -25,6 +25,15 @@
   X [H | T] -> true where (= X H)
   X [_ | T] -> (element? X T))
 
+\* not — used by debruijn in normalize.shen ((not (element? X Scope))).
+   Previously missing from the bundle, so [global not] resolved to the bare
+   symbol 'not' at runtime, apply failed, trap-error swallowed it, and
+   interp-eval-all returned a false-positive `loaded` (defun never stored). *\
+(define not
+  true -> false
+  false -> true
+  _ -> (simple-error "not: expected boolean"))
+
 (define assoc
   _ [] -> []
   K [[H V] | T] -> [H V] where (= K H)
