@@ -3,6 +3,37 @@
 (tc -)
 (load "shen/compile.shen")
 (load "shen/load.shen")
+(tc -)
+(load "shen/shen-kl-helpers.shen")
+(load "shen/shen->kl.shen")
+
+\* === Compile .shen files through our own full-arity compiler ===
+   shen-load reads a .shen file via shen-read-file (extended reader),
+   compiles each form through shen->kl (full-arity KLambda defuns), and
+   installs them into global-table via interp-eval.  dedupe-globals at
+   serialize time keeps the first (most recent = shen-load'd) occurrence,
+   so these full-arity closures win over the host-compiled bootstrap ones.
+   
+   primitives.shen is NOT shen-load'd here: its %% escapes in where-guards
+   need zinc.shen %% support that is deferred to a later unit.  Its safe
+   wrappers are already installed by the bootstrap set-toplevel calls. *\
+(tc -)
+(define shen-eval-forms
+  [] -> loaded
+  [F | R] -> (do (interp-eval F) (shen-eval-forms R)))
+(define shen-load
+  Path -> (shen-eval-forms (shen->kl-forms (shen-read-file Path))))
+(tc +)
+
+(shen-load "shen/util.shen")
+(shen-load "shen/types.shen")
+(shen-load "shen/zinc.shen")
+(shen-load "shen/compile.shen")
+(shen-load "shen/normalize.shen")
+\* primitives.shen: kept host-loaded (%% in guards, deferred) *\
+(shen-load "shen/interp.shen")
+(shen-load "shen/toplevel.shen")
+(shen-load "shen/load.shen")
 
 \* REDUCED bundle: the self-contained meta-interpreter + type-safe Shen OS
    base .kl only.  Skips the heavy / type-unsafe Shen OS components (yacc,
@@ -31,43 +62,7 @@
 (interp-load-raw "vendor/ShenOSKernel-41.2/klambda/writer.kl")
 (interp-load-raw "shen/overrides-pure.kl")
 
-\* Load shen/util.shen via interp-load-raw (bypasses reader). *\
-(interp-load-raw "shen/util.shen")
-
-\* Bundle the load/eval infrastructure so the interpreter can compile and
-   load further .kl source at runtime (close the loop).  These are plain
-   Shen defuns in toplevel.shen / load.shen that are NOT otherwise
-   set-toplevel'd; without this they'd be val_prim placeholders and the
-   runtime could not load anything.  Order matters: interp-eval first,
-   then the load.shen chain (read-file-raw before interp-load-raw). *\
-(tc -)
-(set-toplevel defun->lambda defun->lambda)
-(set-toplevel interp-eval interp-eval)
-(set-toplevel strlen strlen)
-(set-toplevel strlen-acc strlen-acc)
-(set-toplevel chars->str chars->str)
-(set-toplevel digit-ch? digit-ch?)
-(set-toplevel ws-ch? ws-ch?)
-(set-toplevel str->num str->num)
-(set-toplevel str->num-acc str->num-acc)
-(set-toplevel parse-num-str parse-num-str)
-(set-toplevel skip-comment skip-comment)
-(set-toplevel skip-ws skip-ws)
-(set-toplevel parse-string-chars parse-string-chars)
-(set-toplevel parse-string parse-string)
-(set-toplevel read-atom-chars read-atom-chars)
-(set-toplevel parse-atom parse-atom)
-(set-toplevel parse-list-tail parse-list-tail)
-(set-toplevel parse-list parse-list)
-(set-toplevel parse-expr parse-expr)
-(set-toplevel parse-exprs parse-exprs)
-(set-toplevel read-file-raw read-file-raw)
-(set-toplevel interp-load interp-load)
-(set-toplevel interp-load-safe interp-load-safe)
-(set-toplevel interp-load-raw interp-load-raw)
-(set-toplevel interp-eval-all interp-eval-all)
-(set-toplevel interp-eval-safe interp-eval-safe)
-(tc +)
+\* Load shen/util.shen via shen-load above (full-arity compiler). *\
 
 \* Add shen. prefix aliases for unprefixed closures. *\
 (tc -)
