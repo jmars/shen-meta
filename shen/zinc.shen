@@ -14,6 +14,11 @@
                     (append (append (zinc-c X) (append [jmpf F] (zinc-c Y)))
                             (append [jmp E] (append [label F] (append (zinc-c Z) [label E]))))))
   [symbol X]   -> [symbol X] where (symbol? X)
+  \* %% escapes: (%% F A1..An) compiles directly to a primitive dispatch. *\
+  [%% F A]     -> (append (zinc-c A) [prim F]) where (and (symbol? F) (primitive? F))
+  [%% F | Args] -> (append (fold-append [] (map-zinc-c (reverse (tl Args))))
+                           (append (zinc-c (hd Args)) [prim F]))
+                   where (and (symbol? F) (primitive? F))
   [F A]        <- (if (primitive? F) (append (zinc-c A) [prim F]) (fail)) where (symbol? F)
   [F | Args]   <- (if (primitive? F)
                     (append (fold-append [] (map-zinc-c (reverse (tl Args))))
@@ -39,6 +44,12 @@
                     (append (append (zinc-c X) (append [jmpf F] (zinc-c Y)))
                             (append [jmp E] (append [label F] (append (zinc-c Z) [label E]))))))
   [symbol X]   -> [symbol X] where (symbol? X)
+  \* %% escapes: (%% F A1..An) compiles directly to a primitive dispatch,
+     bypassing the global table / safe wrappers (matches C VM's [prim F]). *\
+  [%% F A]     -> (append (zinc-c A) [prim F]) where (and (symbol? F) (primitive? F))
+  [%% F | Args] -> (append (fold-append [] (map-zinc-c (reverse (tl Args))))
+                           (append (zinc-c (hd Args)) [prim F]))
+                   where (and (symbol? F) (primitive? F))
   [F A]        <- (if (primitive? F) (append (zinc-c A) [prim F]) (fail)) where (symbol? F)
   [F | Args]   <- (if (primitive? F)
                     (append (fold-append [] (map-zinc-c (reverse (tl Args))))

@@ -274,7 +274,7 @@
                                   (let SubBody (apply-subs Subs AlphaBody)
                                     (let GuardTest (if (empty? Guard)
                                                       []
-                                                      [(apply-subs Subs Guard)])
+                                                      [(apply-subs Subs (shen->kl-body Guard))])
                                       (let Folded (fold-guard-body Guarded SubBody Subs)
                                         (let KLBody (shen->kl-body (tl Folded))
                                           (let AllTests (append Tests (append GuardTest (hd Folded)))

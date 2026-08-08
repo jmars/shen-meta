@@ -14,9 +14,9 @@
    serialize time keeps the first (most recent = shen-load'd) occurrence,
    so these full-arity closures win over the host-compiled bootstrap ones.
    
-   primitives.shen is NOT shen-load'd here: its %% escapes in where-guards
-   need zinc.shen %% support that is deferred to a later unit.  Its safe
-   wrappers are already installed by the bootstrap set-toplevel calls. *\
+   primitives.shen is shen-load'd below (its %% escapes are now supported by
+   zinc.shen, so the safe wrappers compile through our own full-arity
+   compiler instead of the host bootstrap). *\
 (tc -)
 (define shen-eval-forms
   [] -> loaded
@@ -30,7 +30,7 @@
 (shen-load "shen/zinc.shen")
 (shen-load "shen/compile.shen")
 (shen-load "shen/normalize.shen")
-\* primitives.shen: kept host-loaded (%% in guards, deferred) *\
+(shen-load "shen/primitives.shen")
 (shen-load "shen/interp.shen")
 (shen-load "shen/toplevel.shen")
 (shen-load "shen/load.shen")
