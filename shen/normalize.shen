@@ -9,8 +9,12 @@
 (define kmacros { klambda --> klambda }
   [freeze X]                                   -> [lambda (newvar) (kmacros X)]
   [thaw X]                                     -> [(kmacros X) 0]
-  [and X Y]                                    -> (kmacros [if (kmacros X) (kmacros Y) false])
-  [or X Y]                                     -> (kmacros [if (kmacros X) true (kmacros Y)])
+  [and]                                        -> true
+  [and X]                                      -> (kmacros X)
+  [and X Y | Z]                                -> (kmacros [if (kmacros X) (kmacros [and Y | Z]) false])
+  [or]                                         -> false
+  [or X]                                       -> (kmacros X)
+  [or X Y | Z]                                 -> (kmacros [if (kmacros X) true (kmacros [or Y | Z])])
   [cond [X Y] | Rest]                          -> (kmacros [if (kmacros X) (kmacros Y) (kmacros [cond | Rest])])
   [cond]                                       -> [simple-error "No condition was true"]
   [trap-error B E]                             -> [trap-error (kmacros [lambda (newvar) (kmacros B)]) (kmacros E)]
