@@ -787,6 +787,10 @@ static void gc_log_page_transition(uintptr_t page, int old_space, int new_space,
     if (!gc_page_transition) return;
     if (gc_page_transition_watch && page != gc_page_transition_watch) return;
     if (old_space == new_space) return;
+    /* Bug-2 signal: only log recycling of a previously-allocated page
+     * (old_space != 0).  Fresh free-page allocations (old_space==0) during
+     * heap growth are noise and dominate the log. */
+    if (!gc_page_transition_watch && old_space == 0) return;
     fprintf(GC_LOG, "[GC PAGE-TRANSITION #%ld] page=%lu %d->%d where=%s\n",
             gc_collect_seq, (unsigned long)page, old_space, new_space, where);
     gc_backtrace(GC_LOG);
