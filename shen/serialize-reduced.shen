@@ -35,6 +35,68 @@
 (shen-load "shen/toplevel.shen")
 (shen-load "shen/load.shen")
 
+\* === Safe-wrapper aliases: point short names to our-compiled safe.N closures ===
+   serialize.shen (full bundle) relies on interp.shen's set-toplevel calls for
+   these toplevel aliases.  Here we OVERWRITE them with our full-arity compiled
+   closures by prepending [Short (lookup-global Safe)] to global-table, so the
+   bundle's N resolves to the SAME closure object as safe.N (eliminating the
+   host-compiled `(ps X)` path from the reduced bundle).  dedupe-globals keeps
+   the first (prepended) occurrence.  Must run AFTER the shen-loads above so
+   lookup-global finds the our-compiled safe.N. *\
+(tc -)
+(set safe-alias-pairs
+  [[number? safe.number?]
+   [symbol? safe.symbol?]
+   [string? safe.string?]
+   [boolean? safe.boolean?]
+   [cons? safe.cons?]
+   [simple-error safe.simple-error]
+   [get-time safe.get-time]
+   [close safe.close]
+   [read-byte safe.read-byte]
+   [tl safe.tl]
+   [hd safe.hd]
+   [absvector safe.absvector]
+   [n->string safe.n->string]
+   [string->n safe.string->n]
+   [str safe.str]
+   [tlstr safe.tlstr]
+   [value safe.value]
+   [intern safe.intern]
+   [error-to-string safe.error-to-string]
+   [trap-error safe.trap-error]
+   [= safe.=]
+   [open safe.open]
+   [write-byte safe.write-byte]
+   [cons safe.cons]
+   [fst safe.fst]
+   [snd safe.snd]
+   [emptylist safe.emptylist]
+   [hdstr safe.hdstr]
+   [read-file-as-string safe.read-file-as-string]
+   [<-address safe.<-address]
+   [cn safe.cn]
+   [pos safe.pos]
+   [<= safe.<=]
+   [>= safe.>=]
+   [< safe.<]
+   [> safe.>]
+   [set safe.set]
+   [- safe.-]
+   [* safe.*]
+   [/ safe./]
+   [+ safe.+]
+   [address-> safe.address->]
+   [eval-kl safe.eval-kl]])
+(define install-safe-aliases
+  [] -> aliases-installed
+  [[Short Safe] | Rest] -> (do
+    (set global-table (cons [Short (lookup-global Safe)]
+                            (value global-table)))
+    (install-safe-aliases Rest)))
+(install-safe-aliases (value safe-alias-pairs))
+(tc +)
+
 \* REDUCED bundle: the self-contained meta-interpreter + type-safe Shen OS
    base .kl only.  Skips the heavy / type-unsafe Shen OS components (yacc,
    prolog, sequent, t-star, stlib, init, extensions) which crash the

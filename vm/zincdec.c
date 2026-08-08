@@ -629,14 +629,75 @@ static void decompile_csexp(Instr *code, int len) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Curried-call detector                                              */
+/* ------------------------------------------------------------------ */
+
+/* A curried partial-application call ((f x) y) compiles to ZINC where the
+ * inner and outer applies land ADJACENT in the linear instruction stream:
+ *   m y m x f p p
+ * Full-arity code always has argument computation (or a mark) between two
+ * applies, so two consecutive apply/appterm opcodes are the hallmark of a
+ * curried call the C VM cannot run.  Returns the number of curried pairs
+ * found; recurses into OP_CUR sub-closures. */
+static int scan_curried(Instr *code, int len, const char *name,
+                        int *prev_was_apply, int *out_count) {
+    int local_prev = (prev_was_apply ? *prev_was_apply : 0);
+    int found = 0;
+    for (int i = 0; i < len; i++) {
+        Instr *in = &code[i];
+        switch (in->op) {
+        case OP_APPLY:
+        case OP_APPTERM:
+            if (local_prev) {
+                fprintf(stderr, "  %s: curried call at instr %d (%c after %c)\n",
+                        name, i, in->op,
+                        (i > 0 ? code[i-1].op : '?'));
+                found++;
+            }
+            local_prev = 1;
+            break;
+        case OP_CUR:
+            /* sub-closures reset adjacency for their own stream, but a
+               closure-returning sub-apply is still a curried candidate */
+            found += scan_curried(in->closure_code, in->closure_len, name,
+                                  NULL, NULL);
+            local_prev = 0;
+            break;
+        default:
+            local_prev = 0;
+            break;
+        }
+    }
+    if (out_count) *out_count = found;
+    return found;
+}
+
+static int scan_all_curried(void) {
+    int total = 0, closures_with = 0, scanned = 0;
+    for (int i = 0; i < global_table_len; i++) {
+        Value v = global_table[i].closure;
+        if (v.tag != VAL_LAMBDA) continue;
+        scanned++;
+        int cnt = 0;
+        scan_curried(v.lambda.code, v.lambda.code_len,
+                     global_table[i].name, NULL, &cnt);
+        if (cnt) { total += cnt; closures_with++; }
+    }
+    fprintf(stderr, "Scanned %d closures: %d curried call(s) in %d closure(s)\n",
+            scanned, total, closures_with);
+    return total;
+}
+
+/* ------------------------------------------------------------------ */
 /*  main                                                               */
 /* ------------------------------------------------------------------ */
 
 static void usage(const char *prog) {
     fprintf(stderr,
         "Usage: %s <bundle> <function-name> [--raw|--asm|--shen|--csexp]\n"
+        "       %s <bundle> --curried\n"
         "\n"
-        "Decompile a bundled closure's ZINC bytecode.\n"
+        "Decompile a bundled closure's ZINC bytecode, or scan the whole bundle.\n"
         "\n"
         "Output formats:\n"
         "  --raw   (default) Human-readable opcode names with operands\n"
@@ -644,12 +705,17 @@ static void usage(const char *prog) {
         "  --shen            Shen list syntax for interp.shen's interp\n"
         "  --csexp           Raw csexp wire format (feedable to parse_bytecode)\n"
         "\n"
+        "Whole-bundle modes:\n"
+        "  --curried         Flag any curried partial-application calls (the C VM\n"
+        "                    cannot run them); exit 1 if any found\n"
+        "\n"
         "Examples:\n"
         "  %s globals.csexp +\n"
         "  %s globals.csexp read-from-string --asm\n"
         "  %s globals.csexp shen.repl --shen\n"
-        "  %s globals.csexp reverse --csexp\n",
-        prog, prog, prog, prog, prog);
+        "  %s globals.csexp reverse --csexp\n"
+        "  %s globals.csexp --curried\n",
+        prog, prog, prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char **argv) {
@@ -683,6 +749,11 @@ int main(int argc, char **argv) {
     free(buf);
     if (n <= 0) { fprintf(stderr, "error: parse failed\n"); return 1; }
     fprintf(stderr, "Loaded %d closures\n", n);
+
+    /* --curried: scan all closures for curried partial-application calls */
+    if (!strcmp(func_name, "--curried")) {
+        return scan_all_curried() ? 1 : 0;
+    }
 
     /* Pattern keywords as symbols */
     { const char *kws[] = {"number","string","symbol","cons","nil","boolean",
