@@ -8,6 +8,9 @@ and the GC design work.
 - **`architecture.md`** — pipeline, key files, design intent (static vs dynamic
   call sites, guard-free release VM), the reduced self-contained bundle, partial
   application, self-hosting tests.
+- **`compiler.md`** — the `shen->kl` compiler front-end: supported subset,
+  constraints & limitations (non-linear patterns, reader split, out-of-scope
+  constructs), and improvement roadmap.
 - **`bytecode-vm.md`** — ZINC calling/argument conventions, opcodes, csexp atoms,
   primitive semantics, C VM conventions, `apply`/`appterm` layout, pipeline
   gotchas.
