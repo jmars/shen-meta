@@ -122,6 +122,14 @@ typedef struct {
     int scratch;         /* 1 = produce C-heap operand strings for scratch buffer */
     Instr *scratch_buf;  /* current scratch buffer (to free on PARSE_ERROR) */
     int scratch_len;     /* number of valid Instr entries in scratch_buf */
+    /* Side-slot rooting for closure_code children during recursive
+     * parse_body.  Each OP_CUR allocates a malloc'd Instr** slot that
+     * is pushed onto the GC shadow stack so the collector can see
+     * nested closure_code arrays while the outer scratch buffer
+     * (malloc'd, invisible to GC) holds copies. */
+    Instr ***cc_slots;   /* growable array of malloc'd Instr** slots */
+    int cc_len;          /* number of slots in use */
+    int cc_cap;          /* capacity of cc_slots array */
 } ParseState;
 
 static jmp_buf parse_err_jmp;
@@ -1433,6 +1441,14 @@ static int parse_body(ParseState *ps, Instr **out) {
     ps->scratch_buf = scratch;
     ps->scratch_len = 0;  /* updated as we add entries below */
 
+    /* Save caller's cc_slots state; this call builds its own */
+    Instr ***saved_cc_slots = ps->cc_slots;
+    int saved_cc_len = ps->cc_len;
+    int saved_cc_cap = ps->cc_cap;
+    ps->cc_slots = NULL;
+    ps->cc_len   = 0;
+    ps->cc_cap   = 0;
+
     while (1) {
         skip_ws(ps); char c = *ps->p;
         if (c == ')' || c == '\0') break;
@@ -1455,15 +1471,30 @@ static int parse_body(ParseState *ps, Instr **out) {
         case 'P': instr.op = OP_PRIM;     ps->p++; instr.operand = parse_csexp_atom(ps); break;
         case 'S': instr.op = OP_STRING;   ps->p++; instr.operand = parse_csexp_atom(ps); break;
         case 'b': instr.op = OP_BOOLEAN;  ps->p++; instr.operand = parse_csexp_atom(ps); break;
-        case 'c':
+        case 'c': {
             instr.op = OP_CUR; ps->p++; skip_ws(ps);
             if (*ps->p != '(') PARSE_ERROR("expected '(' after 'c'");
             ps->p++;
-            /* Recursive parse produces final GC-managed Instr array
-             * with GC-managed operand strings — store directly */
-            instr.closure_len = parse_body(ps, &instr.closure_code);
+            /* Allocate a stable side-slot for the closure_code so the GC
+             * can see it across the recursive parse_body and subsequent
+             * gc_alloc calls.  The slot is pushed on the shadow stack
+             * for the entire duration of THIS parse_body call so nested
+             * recursive parse_body gc_allocs keep every child reachable. */
+            Instr **slot = (Instr**)malloc(sizeof(Instr*));
+            if (!slot) { fprintf(stderr, "fatal: malloc Instr** slot\n"); exit(1); }
+            if (ps->cc_len >= ps->cc_cap) {
+                int new_cap = ps->cc_cap ? ps->cc_cap * 2 : 8;
+                ps->cc_slots = (Instr***)realloc(ps->cc_slots, new_cap * sizeof(Instr**));
+                if (!ps->cc_slots) { fprintf(stderr, "fatal: realloc cc_slots\n"); exit(1); }
+                ps->cc_cap = new_cap;
+            }
+            ps->cc_slots[ps->cc_len++] = slot;
+            gc_root_push_ptr((void**)slot);
+            instr.closure_len = parse_body(ps, slot);
+            instr.closure_code = *slot;
             if (*ps->p != ')') PARSE_ERROR("expected ')' after cur body");
             ps->p++; break;
+        }
         default: { char msg[64]; snprintf(msg, sizeof(msg), "unknown opcode '%c' (0x%02x)", c, (unsigned char)c); PARSE_ERROR(msg); }
         }
         if (len >= cap) { cap *= 2; scratch = (Instr*)realloc(scratch, cap * sizeof(Instr)); }
@@ -1476,6 +1507,21 @@ static int parse_body(ParseState *ps, Instr **out) {
     ps->scratch     = saved_scratch;
     ps->scratch_buf = saved_scratch_buf;
     ps->scratch_len = saved_scratch_len;
+
+    /* Re-sync closure_code pointers from rooted side-slots into the
+     * scratch buffer before the dangerous gc_alloc below.  A nursery
+     * scavenge triggered by a later recursive parse_body may have
+     * promoted a child code array, updating *slot but leaving
+     * scratch[i].closure_code stale. */
+    {
+        int si = 0;
+        for (int i = 0; i < len; i++) {
+            if (scratch[i].op == OP_CUR) {
+                scratch[i].closure_code = *ps->cc_slots[si];
+                si++;
+            }
+        }
+    }
 
     /* Allocate final GC-managed Instr array and bulk-copy */
     Instr *code = (Instr*)gc_alloc(len * sizeof(Instr), GC_TYPE_INSTR_ARRAY);
@@ -1505,6 +1551,20 @@ static int parse_body(ParseState *ps, Instr **out) {
 
     gc_root_pop();  /* code */
 
+    /* Pop and free the side-slots that rooted closure_code children.
+     * Pushed in order: slot0, slot1, ..., slotN, &code.  &code was
+     * popped above; now pop the N slots (LIFO order matches). */
+    for (int i = 0; i < ps->cc_len; i++)
+        gc_root_pop();
+    for (int i = 0; i < ps->cc_len; i++)
+        free(ps->cc_slots[i]);
+    free(ps->cc_slots);
+
+    /* Restore parent's cc_slots state */
+    ps->cc_slots = saved_cc_slots;
+    ps->cc_len   = saved_cc_len;
+    ps->cc_cap   = saved_cc_cap;
+
     free(scratch);
     *out = code; return len;
 }
@@ -1529,6 +1589,10 @@ int parse_bytecode(const char *str, Instr **out) {
             }
             free(ps.scratch_buf);
         }
+        /* Free any side-slots from parse_body OP_CUR rooting */
+        for (int i = 0; i < ps.cc_len; i++)
+            free(ps.cc_slots[i]);
+        free(ps.cc_slots);
         gc_root_pop_to(parse_wm);
         fprintf(stderr, "%s\n", parse_err_msg); *out = NULL; return 0;
     }
@@ -2192,6 +2256,10 @@ int parse_bundle(const char *str) {
             }
             free(ps.scratch_buf);
         }
+        /* Free any side-slots from parse_body OP_CUR rooting */
+        for (int i = 0; i < ps.cc_len; i++)
+            free(ps.cc_slots[i]);
+        free(ps.cc_slots);
         gc_root_pop_to(parse_wm);
         fprintf(stderr, "%s\n", parse_err_msg);
         return 0;
