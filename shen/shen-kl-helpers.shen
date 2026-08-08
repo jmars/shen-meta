@@ -293,7 +293,7 @@
              (fail-form? (hd (tl (tl (tl Body)))))
              (empty? (tl (tl (tl (tl Body))))))
         [[(apply-subs Subs (hd (tl Body)))] | (apply-subs Subs (hd (tl (tl Body))))]
-        [[] Body]))
+        [[] | Body]))
 
 \* compile-clauses: compile each clause to an (@p [Test Body] Guarded) pair. *\
 
