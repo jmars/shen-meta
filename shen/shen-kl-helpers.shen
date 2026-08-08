@@ -547,7 +547,9 @@
                       (let Pair2 (shen-parse-list-tail Str AfterFirst Close Dotted Len)
                         (let Rest (hd Pair2)
                           (let AfterRest (hd (tl Pair2))
-                            [[First | Rest] AfterRest])))))))))))
+                            (if Dotted
+                                [[cons First Rest] AfterRest]
+                                [[First | Rest] AfterRest]))))))))))))
 
 (define shen-parse-list
   Str Pos Close Dotted Len ->
@@ -561,7 +563,9 @@
                   (let Cdr (hd Pair1)
                     (let After (hd (tl Pair1))
                       (if (= (pos Str After) Close)
-                          [[[] | Cdr] (+ After 1)]
+                          (if Dotted
+                              [[cons [] Cdr] (+ After 1)]
+                              [[[] | Cdr] (+ After 1)])
                           (simple-error "unterminated dotted pair")))))
                 (let Pair1 (shen-parse-expr Str P Len)
                   (let First (hd Pair1)
@@ -569,7 +573,9 @@
                       (let Pair2 (shen-parse-list-tail Str AfterFirst Close Dotted Len)
                         (let Rest (hd Pair2)
                           (let AfterRest (hd (tl Pair2))
-                            [[First | Rest] AfterRest])))))))))))
+                            (if Dotted
+                                [[cons First Rest] AfterRest]
+                                [[First | Rest] AfterRest]))))))))))))
 
 \* shen-parse-string: shared with the .kl reader via parse-string. *\
 
