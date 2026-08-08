@@ -215,8 +215,18 @@
      Bypass normalize/debruijn to avoid CPS closure capture bugs
      in the self-compiled normalize-term chain. *\
   [F | Args] -> (zinc-c [F | Args]) where (primitive? F)
-  \* General case: full normalize/debruijn pipeline *\
-  X -> (zinc-c (debruijn [] (normalize-term (kmacros X)))))
+  \* General case: full normalize/debruijn pipeline.  The two complex
+     sub-expressions (kmacros / normalize-term) are explicitly let-bound
+     so the host Shen compiler emits proper 2-arg applies (not curried
+     partial applications) when it compiles THIS closure into the bundle.
+     Crucially the (debruijn [] N) call itself must be INLINED into zinc-c
+     (not let-bound to a D): let-binding the call is what triggers the
+     compiler to curry it.  A curried call like ((debruijn []) N) would
+     fail at runtime because the C VM does not support partial
+     application. *\
+  X -> (let K (kmacros X)
+         (let N (normalize-term K)
+           (zinc-c (debruijn [] N)))))
 
 (define set-toplevel { symbol --> symbol --> symbol }
   N X -> (do
